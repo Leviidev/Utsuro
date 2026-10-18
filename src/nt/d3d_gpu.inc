@@ -319,7 +319,49 @@ uint32_t MapBuffer(Call& c, Res& r, uint32_t type, uint64_t* out) {
     return 0;
 }
 
+/// Inflates `n` bytes at `src` (a zlib stream when `zlib_header`, raw DEFLATE otherwise); false unless the stream ends cleanly.
+bool InflateGuest(const uint8_t* src, uint32_t n, bool zlib_header, std::vector<uint8_t>* out) {
+    z_stream z {};
+    if (inflateInit2(&z, zlib_header ? 15 : -15) != Z_OK) return false;
+    z.next_in = const_cast<Bytef*>(src);
+    z.avail_in = n;
+    out->clear();
+    uint8_t buf[1 << 16];
+    int rc = Z_OK;
+    while (rc == Z_OK) {
+        z.next_out = buf;
+        z.avail_out = sizeof buf;
+        rc = inflate(&z, Z_NO_FLUSH);
+        out->insert(out->end(), buf, buf + (sizeof buf - z.avail_out));
+        if (out->size() > (256u << 20)) break;
+    }
+    inflateEnd(&z);
+    return rc == Z_STREAM_END;
+}
+
 void RegisterGpuOverrides() {
+    // ---- the DMA engine's hardware LZ decoder (a DEFLATE stream) ----
+    // The title cooks its packages in chunks for it. The call completes at once here, so a fence never stays pending.
+    OverrideAll("LZDecompressMemory", [](Call& c) -> uint32_t {
+        const uint64_t a = c.Arg(0), b = c.Arg(1);
+        const uint32_t n = static_cast<uint32_t>(c.Arg(2));
+        static int logged = 0;
+        std::vector<uint8_t> data;
+        // The documented order is (dst, src, size, flags); accept the other one if only that decodes.
+        for (int swap = 0; swap < 2; ++swap) {
+            const uint64_t dst = swap ? b : a, src = swap ? a : b;
+            for (bool zl : {true, false}) {
+                if (InflateGuest(reinterpret_cast<const uint8_t*>(src), n, zl, &data)) {
+                    std::memcpy(reinterpret_cast<void*>(dst), data.data(), data.size());
+                    if (logged++ < 5) UT_INFO("d3d: LZDecompressMemory %u -> %zu bytes (%s, %s order)", n, data.size(), zl ? "zlib" : "raw", swap ? "swapped" : "dst,src");
+                    return 0;
+                }
+            }
+        }
+        UT_WARN("d3d: LZDecompressMemory %#llx %#llx size %u flags %#x did not decode (first bytes %02x %02x)", (unsigned long long)a, (unsigned long long)b, n,
+                (uint32_t)c.Arg(3), c.Arg(1) > 0x10000 ? *reinterpret_cast<uint8_t*>(c.Arg(1)) : 0, c.Arg(1) > 0x10000 ? *reinterpret_cast<uint8_t*>(c.Arg(1) + 1) : 0);
+        return 0;
+    });
     // ---- creation hook: Fallback calls OnCreate after it made the object ----
     // ---- Map / Unmap ----
     OverrideAll("Map", [](Call& c) -> uint32_t {

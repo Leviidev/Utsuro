@@ -610,6 +610,34 @@ void* HostThreadMain(void* raw) {
     const RunResult r = t.guest->Run();
     UT_INFO("thread %llu ended: %s (status %d, rip %#llx)", (unsigned long long)t.tid_, r.message.c_str(), r.status,
             (unsigned long long)r.rip);
+    if (r.outcome != RunOutcome::Exited) {
+        // Debugging aid: UTSURO_SCAN=<text> prints where that text (ASCII or UTF-16) sits in the guest's heap.
+        if (const char* needle = std::getenv("UTSURO_SCAN")) {
+            const std::string a = needle;
+            std::string w;
+            for (char c : a) { w += c; w += '\0'; }
+            int shown = 0;
+            k.Vm().ForEachReadable([&](uint64_t base, const uint8_t* mem, uint64_t len) {
+                for (const std::string* pat : {static_cast<const std::string*>(&a), static_cast<const std::string*>(&w)}) {
+                    const uint8_t* at = mem;
+                    const uint8_t* end = mem + len;
+                    while (shown < 12 && (at = static_cast<const uint8_t*>(memmem(at, static_cast<size_t>(end - at), pat->data(), pat->size()))) != nullptr) {
+                        std::string ctx;
+                        const bool wide = pat == &w;
+                        for (int i = -40; i < 240; ++i) {
+                            const uint8_t* q = at + i * (wide ? 2 : 1);
+                            if (q < mem || q + 1 > end) continue;
+                            const uint8_t c = *q;
+                            ctx += (c >= 32 && c < 127) ? static_cast<char>(c) : (c == 10 || c == 13) ? '|' : '.';
+                        }
+                        UT_INFO("scan: %s at %#llx: %s", wide ? "utf16" : "ascii", (unsigned long long)(base + (at - mem)), ctx.c_str());
+                        ++shown;
+                        at += pat->size();
+                    }
+                }
+            });
+        }
+    }
     k.ExitThread(t, r.outcome == RunOutcome::Exited ? t.exit_status : -1);
     return nullptr;
 }

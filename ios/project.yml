@@ -87,6 +87,7 @@ targets:
           - "-framework"
           - "SystemConfiguration"
           - "-lresolv"
+          - "-lz"
     dependencies:
       # Built-in StikJIT's debugger process. Embedded into PlugIns/.
       - target: UtsuroJITHelper

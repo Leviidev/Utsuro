@@ -18,6 +18,7 @@
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <zlib.h>
 #include <map>
 #include <string>
 #include <vector>

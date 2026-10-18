@@ -266,6 +266,8 @@ bool Kernel::ResolvePath(const std::string& nt_in, std::string* host_path, bool*
         if (exists) *exists = false;
         return false;
     }
+    // A trailing separator names the same thing; keeping it would make a missing leaf look like a missing parent.
+    while (!rest.empty() && rest.back() == '\\') rest.pop_back();
     // Walk the components.
     std::string cur = root;
     size_t i = 0;

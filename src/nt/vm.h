@@ -6,6 +6,7 @@
 // coarse truth: which ranges are mapped, and which of them are executable or writable.
 #pragma once
 
+#include <functional>
 #include "engine/guest_memory.h"
 #include "nt/nt_types.h"
 
@@ -64,6 +65,9 @@ public:
 
     /// Sets the NT protection of an image section range after the fact.
     void SetImagePages(uint64_t address, uint64_t size, uint32_t protect);
+
+    /// Debugging: calls `fn(address, bytes, length)` for each run of committed readable private memory.
+    void ForEachReadable(const std::function<void(uint64_t, const uint8_t*, uint64_t)>& fn) const;
 
     GuestAddressSpace& Space() { return space_; }
     bool Contains(uint64_t address, uint64_t length) const;

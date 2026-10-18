@@ -211,6 +211,7 @@ NTSTATUS NtReadFile(Kernel& k, NtThread&, SyscallArgs& a) {
         n = pread(f->fd, buf, len, static_cast<off_t>(f->position));
         if (n >= 0) f->position += n;
     }
+    UT_DEBUG("read: %s off %lld len %u -> %zd", f->nt_path.c_str(), (long long)(off ? *off : -1), len, n);
     if (n < 0) { SetIosb(iosb, FromErrno(errno), 0); return FromErrno(errno); }
     if (n == 0 && len != 0) { SetIosb(iosb, STATUS_END_OF_FILE, 0); return STATUS_END_OF_FILE; }
     SetIosb(iosb, STATUS_SUCCESS, static_cast<uint64_t>(n));

@@ -345,3 +345,22 @@ void VirtualMemory::SetImagePages(uint64_t address, uint64_t size, uint32_t prot
 }
 
 } // namespace utsuro::nt
+
+namespace utsuro::nt {
+
+void VirtualMemory::ForEachReadable(const std::function<void(uint64_t, const uint8_t*, uint64_t)>& fn) const {
+    std::scoped_lock lock {mutex_};
+    for (const auto& [base, r] : regions_) {
+        if (r.kind != RegionKind::Private) continue;
+        const uint64_t page = kPage;
+        for (uint64_t i = 0; i < r.pages.size();) {
+            if (r.pages[i] == 0 || (r.pages[i] & 0xFF) == PAGE_NOACCESS) { ++i; continue; }
+            uint64_t j = i;
+            while (j < r.pages.size() && r.pages[j] != 0 && (r.pages[j] & 0xFF) != PAGE_NOACCESS) ++j;
+            fn(base + i * page, reinterpret_cast<const uint8_t*>(base + i * page), (j - i) * page);
+            i = j;
+        }
+    }
+}
+
+} // namespace utsuro::nt
