@@ -14,16 +14,27 @@
 @interface UtsuroView : NSView
 @end
 
+static bool g_captured = false;
+static void SetMouseCaptured(bool captured) {
+    if (captured == g_captured) return;
+    g_captured = captured;
+    CGAssociateMouseAndMouseCursorPosition(captured ? NO : YES);
+    if (captured) [NSCursor hide]; else [NSCursor unhide];
+}
+
 @implementation UtsuroView
 - (BOOL)acceptsFirstResponder { return YES; }
 - (BOOL)wantsLayer { return YES; }
 - (CALayer*)makeBackingLayer { return [CAMetalLayer layer]; }
-- (void)keyDown:(NSEvent*)event { if (!event.isARepeat) utsuro::input::KeyEvent(event.keyCode, true); }
+- (void)keyDown:(NSEvent*)event {
+    if (event.keyCode == 0x35 && g_captured) SetMouseCaptured(false);   // Esc also gives the mouse back
+    if (!event.isARepeat) utsuro::input::KeyEvent(event.keyCode, true);
+}
 - (void)keyUp:(NSEvent*)event { utsuro::input::KeyEvent(event.keyCode, false); }
 - (void)flagsChanged:(NSEvent*)event {
     utsuro::input::KeyEvent(0x38, (event.modifierFlags & NSEventModifierFlagShift) != 0);
 }
-- (void)mouseDown:(NSEvent*)event { utsuro::input::MouseButton(0, true); }
+- (void)mouseDown:(NSEvent*)event { SetMouseCaptured(true); utsuro::input::MouseButton(0, true); }
 - (void)mouseUp:(NSEvent*)event { utsuro::input::MouseButton(0, false); }
 - (void)rightMouseDown:(NSEvent*)event { utsuro::input::MouseButton(1, true); }
 - (void)rightMouseUp:(NSEvent*)event { utsuro::input::MouseButton(1, false); }
@@ -45,6 +56,15 @@ int RunWindowed(std::function<int()> run_title) {
         static UtsuroDelegate* delegate = [UtsuroDelegate new];
         [NSApp setDelegate:delegate];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+        {
+            NSMenu* bar = [NSMenu new];
+            NSMenuItem* app_item = [NSMenuItem new];
+            [bar addItem:app_item];
+            NSMenu* app_menu = [NSMenu new];
+            [app_menu addItemWithTitle:@"Quit Utsuro" action:@selector(terminate:) keyEquivalent:@"q"];
+            app_item.submenu = app_menu;
+            [NSApp setMainMenu:bar];
+        }
         const NSRect frame = NSMakeRect(0, 0, 1280, 720);
         NSWindow* window = [[NSWindow alloc] initWithContentRect:frame
                                                        styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
