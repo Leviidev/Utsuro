@@ -153,7 +153,15 @@ final class PadView: UIView {
         var vector = CGPoint.zero                     // a held stick's push, -1...1, y down as the screen has it
         var buttons: UInt32 = 0
         var lt = false, rt = false
+        /// Dragging on open screen to look around: `vector` is the push from how fast the finger last moved.
+        var look = false
+        var last = CGPoint.zero
     }
+
+    private var lookDecay: DispatchWorkItem?
+    /// How far the right stick leans for a given drag speed, and how much more it leans than its thumb is moved.
+    private let lookGain: CGFloat = 0.16
+    private let stickBoost: CGFloat = 1.7
 
     private var controls: [Control] = []
     private var fingers: [UITouch: Finger] = [:]
@@ -274,7 +282,9 @@ final class PadView: UIView {
     /// Only the controls take touches; everywhere else the game underneath gets them.
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         if editing { return self }      // while editing, the game gets nothing
-        return control(at: point) != nil ? self : nil
+        if control(at: point) != nil { return self }
+        // The right two thirds of the screen, where no control is, turns the camera.
+        return point.x > bounds.width / 3 ? self : nil
     }
 
     /// What a finger at `p` presses, for one that is not holding a stick.
@@ -333,6 +343,9 @@ final class PadView: UIView {
                 var f = Finger(); f.stick = i
                 f.vector = stickVector(p, controls[i])
                 fingers[t] = f
+            } else if control(at: p) == nil, p.x > bounds.width / 3 {
+                var f = Finger(); f.look = true; f.last = p
+                fingers[t] = f
             } else {
                 fingers[t] = press(at: p)
             }
@@ -354,7 +367,13 @@ final class PadView: UIView {
         for t in touches {
             guard var f = fingers[t] else { continue }
             let p = t.location(in: self)
-            if let i = f.stick { f.vector = stickVector(p, controls[i]) } else { f = press(at: p) }
+            if f.look {
+                let dx = (p.x - f.last.x) * lookGain, dy = (p.y - f.last.y) * lookGain
+                let d = hypot(dx, dy)
+                f.vector = d > 1 ? CGPoint(x: dx / d, y: dy / d) : CGPoint(x: dx, y: dy)
+                f.last = p
+                scheduleLookDecay()
+            } else if let i = f.stick { f.vector = stickVector(p, controls[i]) } else { f = press(at: p) }
             fingers[t] = f
         }
         apply()
@@ -375,6 +394,18 @@ final class PadView: UIView {
         apply()
     }
 
+    /// A finger that stops moving stops turning the camera: its push is cleared shortly after its last movement.
+    private func scheduleLookDecay() {
+        lookDecay?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            for (t, f) in self.fingers where f.look { var g = f; g.vector = .zero; self.fingers[t] = g }
+            self.apply()
+        }
+        lookDecay = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: work)
+    }
+
     /// A stick's push: how far the finger is from its centre, as a fraction of the stick's radius, capped at one.
     private func stickVector(_ p: CGPoint, _ c: Control) -> CGPoint {
         let dx = p.x - c.center.x, dy = p.y - c.center.y
@@ -392,7 +423,14 @@ final class PadView: UIView {
             if f.lt { s.lt = 1 }
             if f.rt { s.rt = 1 }
             if let i = f.stick, case .stick(let left) = controls[i].kind {
-                if left { s.lx = Float(f.vector.x); s.ly = Float(-f.vector.y) } else { s.rx = Float(f.vector.x); s.ry = Float(-f.vector.y) }
+                if left { s.lx = Float(f.vector.x); s.ly = Float(-f.vector.y) } else {
+                    // The camera wants more lean than a thumb on a small stick gives: full speed well before the edge.
+                    let v = CGPoint(x: f.vector.x * stickBoost, y: f.vector.y * stickBoost)
+                    let d = hypot(v.x, v.y), k = d > 1 ? 1 / d : 1
+                    s.rx = Float(v.x * k); s.ry = Float(-v.y * k)
+                }
+            } else if f.look {
+                s.rx = Float(f.vector.x); s.ry = Float(-f.vector.y)
             }
         }
         if hapticsEnabled, s.buttons & ~shown.buttons != 0 || (s.lt > shown.lt) || (s.rt > shown.rt) { haptic.impactOccurred() }
