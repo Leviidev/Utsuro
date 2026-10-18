@@ -312,6 +312,8 @@ public:
 
     uint64_t PebAddress() const { return peb_; }
     uint64_t NtdllBase() const { return ntdll_base_; }
+    /// Link time of the console OS's ntdll: tells which OS build (and so which D3D11.X ABI) the dump has.
+    uint32_t NtdllTimestamp() const { return ntdll_image_ ? ntdll_image_->timestamp : 0; }
     uint64_t ImageBase() const { return exe_base_; }
     uint64_t KusdAddress() const { return kusd_; }
 

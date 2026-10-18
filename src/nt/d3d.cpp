@@ -27,6 +27,7 @@ namespace utsuro::nt::d3d {
 namespace {
 
 #include "nt/d3d_generated.inc"
+#include "nt/d3d_generated_13332.inc"
 
 using winrt::Call;
 using winrt::Guid;
@@ -211,8 +212,11 @@ uint32_t Fallback(Call& c) {
 
 } // namespace
 
-void Register(Runtime& rt) {
-    for (const D3dIfaceDef& def : kD3dIfaces) {
+void Register(Runtime& rt, uint32_t os_timestamp) {
+    // Console OS builds from September 2015 on (6.2.13xxx) lay the D3D11.X vtables out differently from the 2014 ones (6.2.11396).
+    const bool newer = os_timestamp >= 0x55e00000u;
+    UT_INFO("d3d: interface layouts of OS build %s", newer ? "6.2.13332" : "6.2.11396");
+    for (const D3dIfaceDef& def : (newer ? kD3dIfaces13332 : kD3dIfaces)) {
         std::vector<winrt::Method> methods;
         for (const D3dMethodDef& m : def.methods) {
             winrt::Method mm;

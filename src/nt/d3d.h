@@ -7,7 +7,8 @@
 namespace utsuro::nt::d3d {
 
 /// Defines every D3D11.X / DXGI interface with the runtime.
-void Register(winrt::Runtime& rt);
+/// `os_timestamp` is the link time of the dump's ntdll; it selects the interface layouts of that OS build.
+void Register(winrt::Runtime& rt, uint32_t os_timestamp);
 /// d3d11_x!D3D11CreateDevice.
 uint64_t CreateDevice(Kernel& kernel, NtThread& thread, SyscallArgs& args);
 

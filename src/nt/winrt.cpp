@@ -87,7 +87,7 @@ void Runtime::Init(Kernel& kernel) {
     }});
     Materialize(*activation_factory_);
     RegisterClasses(*this);
-    d3d::Register(*this);
+    d3d::Register(*this, kernel.NtdllTimestamp());
     xaudio2::Register(*this);
     UT_INFO("winrt: %zu classes, %zu interfaces", classes_.size(), ifaces_.size());
 }
