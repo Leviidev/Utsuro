@@ -55,3 +55,11 @@ blob, below `~/Library/Application Support/Utsuro/saves` (override with `UTSURO_
 headless run (no window needed); `scripts/playworld.sh` walks the menus into a new world.
 Environment: `UTSURO_LOG=debug`, `UTSURO_DUMPFRAMES=dir`, `UTSURO_DUMPSHADERS=dir`, `UTSURO_DUMPMSL=dir`,
 `UTSURO_D3DSTATS=1`, `UTSURO_GPUDEBUG=nodepth,nocull,noblend`, `UTSURO_HEADLESS=1`, `--trace`.
+
+## iOS
+
+`scripts/package_ipa.sh` builds `~/Desktop/Utsuro.ipa` (`--tipa` for TrollStore): husk-fex's FEXCore (`scripts/build-fex.sh ios`), the runtime
+(`scripts/build-ios-core.sh`), then the app in `ios/` (xcodegen), ad-hoc signed with its entitlements. Put the game folder (the one holding
+`Mount/` and `EmbeddedXvd/`) in Files › On My iPhone › Utsuro, or use Import in the app. Executable memory comes from a debugger: StikDebug, the
+built-in StikJIT helper (iOS 26+), TrollStore or a jailbreak, via the code in `ios/Utsuro/JIT*.swift` and `src/jit/`. The Mac build runs the same
+dual-mapped JIT region (`FEX_MAC_PHONE_PATH`), so `scripts/build.sh` tests what ships. Logs: `Documents/utsuro.log`, `utsuro-prev.log`, `utsuro-crash.log`.
