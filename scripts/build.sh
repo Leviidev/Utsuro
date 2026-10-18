@@ -22,22 +22,24 @@ INCLUDES=(
 objs=()
 pids=()
 while IFS= read -r src; do
-    obj="$OUT/obj/$(echo "${src#$ROOT/src/}" | tr '/' '_' | sed 's/\.cpp$/.o/')"
+    obj="$OUT/obj/$(echo "${src#$ROOT/src/}" | tr '/' '_' | sed -E 's/\.(cpp|mm)$/.o/')"
+    lang=()
+    [[ "$src" == *.mm ]] && lang=(-x objective-c++ -fobjc-arc)
     objs+=("$obj")
     if [[ ! -f "$obj" || "$src" -nt "$obj" || -n "$(find "$ROOT/src" \( -name '*.h' -o -name '*.inc' \) -newer "$obj" -print -quit)" ]]; then
         clang++ -target arm64-apple-macos27.0 -std=c++20 -O1 -g -DARCHITECTURE_arm64=1 \
             -Wall -Wno-unused-parameter -DMETA_NO_STD_FORWARD_DECLARATIONS -DUTSURO_DATA_DIR=\"$ROOT/data\" \
-            "${INCLUDES[@]}" -c "$src" -o "$obj" &
+            "${INCLUDES[@]}" ${lang[@]+"${lang[@]}"} -c "$src" -o "$obj" &
         pids+=($!)
     fi
-done < <(find "$ROOT/src" -name '*.cpp' | sort)
+done < <(find "$ROOT/src" \( -name '*.cpp' -o -name '*.mm' \) | sort)
 fail=0
 for p in "${pids[@]:-}"; do [[ -n "$p" ]] && { wait "$p" || fail=1; }; done
 [[ $fail == 0 ]] || { echo "compile failed" >&2; exit 1; }
 
 clang++ -target arm64-apple-macos27.0 -o "$OUT/utsuro-run" "${objs[@]}" \
     -Wl,-search_paths_first "$LIBS_DIR"/*.a "$LIBS_DIR"/*.a \
-    -Wl,-w -framework CoreFoundation -framework Foundation -lc++ -lpthread
+    -Wl,-w -framework CoreFoundation -framework Foundation -framework Metal -framework QuartzCore -framework AppKit -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers -lc++ -lpthread
 
 cat > "$OUT/jit.entitlements" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

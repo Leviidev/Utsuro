@@ -87,8 +87,7 @@ std::vector<winrt::Method> VoiceMethods() {
         v.push_back(M(n));
     v.push_back(M("SetVolume", [](Call& c) -> uint32_t {
         std::scoped_lock lock {g_mutex};
-        const uint32_t bits = static_cast<uint32_t>(c.Arg(0));
-        std::memcpy(&VoiceOf(c.obj).volume, &bits, 4);
+        VoiceOf(c.obj).volume = c.Float(0);
         return 0;
     }));
     v.push_back(M("GetVolume", [](Call& c) -> uint32_t {
@@ -183,9 +182,7 @@ void Register(winrt::Runtime& rt) {
     }));
     source.push_back(M("SetFrequencyRatio", [](Call& c) -> uint32_t {
         std::scoped_lock lock {g_mutex};
-        const uint32_t bits = static_cast<uint32_t>(c.Arg(0));
-        float r;
-        std::memcpy(&r, &bits, 4);
+        const float r = c.Float(0);
         VoiceOf(c.obj).ratio = r > 0 ? r : 1.0f;
         return 0;
     }));
@@ -286,6 +283,8 @@ void Register(winrt::Runtime& rt) {
                 }
             }
         }
+        static int logged = 0;
+        if (logged < 5) UT_INFO("xaudio2: pump pass %d, %zu callbacks, rsp %#llx", logged++, due.size(), (unsigned long long)c.args.rsp);
         if (due.empty()) return 0;
         auto idx = std::make_shared<size_t>(0);
         auto step = std::make_shared<std::function<GuestStep(NtThread&, uint64_t)>>();
@@ -300,6 +299,7 @@ void Register(winrt::Runtime& rt) {
         return 0;
     }));
     g_pump = &rt.DefineComInterface("XAudio2Pump", "00000000-0000-0000-0000-00000000A0FF", std::move(pump), nullptr);
+    g_pump->base_slots = 0;
 }
 
 namespace {
@@ -321,7 +321,9 @@ void StartPump(Kernel& k) {
     p[n++] = 0x48; p[n++] = 0xB9; std::memcpy(p + n, &block, 8); n += 8;
     p[n++] = 0x48; p[n++] = 0xB8; std::memcpy(p + n, &stub, 8); n += 8;
     p[n++] = 0xFF; p[n++] = 0xD0;
-    p[n++] = 0xEB; p[n++] = static_cast<uint8_t>(-static_cast<int>(n + 1));
+    p[n++] = 0xEB;
+    p[n] = static_cast<uint8_t>(-static_cast<int>(n + 1));   // back to the first instruction
+    ++n;
     std::string error;
     auto thread = k.NewThread(0x100000, 0x10000, error);
     if (!thread) { UT_ERROR("xaudio2: cannot start the pump thread: %s", error.c_str()); return; }

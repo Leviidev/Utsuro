@@ -68,6 +68,7 @@ struct Obj {
     std::vector<uint64_t> queue;       ///< Pending work items (guest delegates) for a dispatcher.
     std::vector<uint64_t> items;       ///< Elements of a host collection.
     int refs {1};
+    std::shared_ptr<void> user;        ///< Host state owned by whoever implements the object (the D3D layer's resources).
     bool ghost {false};                ///< Answers every IID it is asked for (a class the host does not model).
 };
 
@@ -82,6 +83,8 @@ struct Call {
     uint64_t Arg(int i) const { return args[i + 1]; }
     template <typename T>
     T* Ptr(int i) const { return reinterpret_cast<T*>(Arg(i)); }
+    /// A float parameter after `this` (index i counts like Arg): the first four positions travel in XMM0-3.
+    float Float(int i) const;
 };
 
 class Runtime {
@@ -156,6 +159,8 @@ public:
     /// Calls delegate->Invoke(args...) in the guest, then `then`. For use inside a host method.
     GuestStep InvokeDelegate(uint64_t delegate, std::initializer_list<uint64_t> args, std::function<GuestStep(NtThread&, uint64_t)> then = nullptr);
     Kernel& kernel() { return *kernel_; }
+    /// Called for every host method dispatched (diagnostics).
+    std::function<void(Obj&, Iface&, const Method&)> observer;
 };
 
 /// Registers every class the runtime provides (winrt_classes.cpp).

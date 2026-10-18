@@ -6,10 +6,18 @@
 
 #include "nt/winrt.h"
 
+#include "gpu/renderer.h"
+
 #include "engine/log.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <thread>
+#include <unordered_map>
 #include <map>
 #include <string>
 #include <vector>
@@ -116,63 +124,6 @@ void FormatShape(uint32_t fmt, uint32_t width, uint32_t height, uint32_t* pitch,
     *rows = height;
 }
 
-struct SubLayout { uint64_t offset; uint32_t row_pitch, slice_pitch; };
-
-std::vector<SubLayout> LayoutOf(Obj& o, uint64_t* total) {
-    std::vector<SubLayout> subs;
-    uint64_t at = 0;
-    const std::string& d = o.str["desc"];
-    auto u32 = [&](size_t i) { uint32_t v = 0; if ((i + 1) * 4 <= d.size()) std::memcpy(&v, d.data() + i * 4, 4); return v; };
-    if (o.class_name == "D3D:ID3D11Buffer") {
-        subs.push_back({0, u32(0), u32(0)});
-        at = u32(0);
-    } else if (o.class_name == "D3D:ID3D11Texture1D" || o.class_name == "D3D:ID3D11Texture2D" || o.class_name == "D3D:ID3D11Texture3D") {
-        const bool t3 = o.class_name == "D3D:ID3D11Texture3D", t1 = o.class_name == "D3D:ID3D11Texture1D";
-        // 1D: Width,MipLevels,ArraySize,Format ; 2D: Width,Height,MipLevels,ArraySize,Format ; 3D: Width,Height,Depth,MipLevels,Format
-        const uint32_t w = u32(0), h = t1 ? 1 : u32(1);
-        uint32_t mips = t1 ? u32(1) : t3 ? u32(3) : u32(2), array = t1 ? u32(2) : t3 ? 1 : u32(3);
-        const uint32_t depth = t3 ? u32(2) : 1, fmt = t1 ? u32(3) : t3 ? u32(4) : u32(4);
-        if (array == 0) array = 1;
-        if (mips == 0) { mips = 1; for (uint32_t m = std::max(w, h); m > 1; m >>= 1) ++mips; }
-        for (uint32_t a = 0; a < array; ++a) {
-            for (uint32_t m = 0; m < mips; ++m) {
-                uint32_t pitch, rows;
-                FormatShape(fmt, std::max(1u, w >> m), std::max(1u, h >> m), &pitch, &rows);
-                const uint32_t slice = pitch * rows, dm = std::max(1u, depth >> m);
-                subs.push_back({at, pitch, slice});
-                at += static_cast<uint64_t>(slice) * dm;
-            }
-        }
-    }
-    *total = at;
-    return subs;
-}
-
-/// Gives a freshly created buffer/texture its memory and copies the initial data in.
-void InitResource(Obj& o, uint64_t initial) {
-    uint64_t total = 0;
-    const auto subs = LayoutOf(o, &total);
-    if (total == 0 || total > (1ull << 31)) return;
-    uint64_t base = 0, size = (total + 0xFFF) & ~0xFFFull;
-    if (Runtime::Get().kernel().Vm().Allocate(&base, &size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE, RegionKind::Private, "d3d resource") != STATUS_SUCCESS) {
-        UT_WARN("d3d: no memory for a %llu byte resource", (unsigned long long)total);
-        return;
-    }
-    o.u64["data"] = base;
-    if (initial == 0) return;
-    struct Init { uint64_t mem; uint32_t pitch, slice; };
-    const auto* in = reinterpret_cast<const Init*>(initial);
-    for (size_t i = 0; i < subs.size(); ++i) {
-        if (in[i].mem == 0) continue;
-        if (o.class_name == "D3D:ID3D11Buffer") { std::memcpy(reinterpret_cast<void*>(base), reinterpret_cast<void*>(in[i].mem), subs[i].slice_pitch); continue; }
-        const uint32_t pitch = std::min(subs[i].row_pitch, in[i].pitch == 0 ? subs[i].row_pitch : in[i].pitch);
-        const uint32_t rows = subs[i].row_pitch ? subs[i].slice_pitch / subs[i].row_pitch : 0;
-        for (uint32_t r = 0; r < rows; ++r)
-            std::memcpy(reinterpret_cast<void*>(base + subs[i].offset + static_cast<uint64_t>(r) * subs[i].row_pitch),
-                        reinterpret_cast<void*>(in[i].mem + static_cast<uint64_t>(r) * in[i].pitch), pitch);
-    }
-}
-
 // ---- device context state -------------------------------------------------------------
 
 /// What the title has bound on a context. Getters read it back; a renderer reads it at draw time.
@@ -187,12 +138,28 @@ struct CtxState {
     uint32_t num_viewports {0};
     int32_t scissors[16][4] {};
     uint32_t num_scissors {0};
+    uint32_t cb_first[6][16] {}, cb_count[6][16] {};   ///< D3D11.1 constant ranges, in float4s (count 0: the whole buffer)
     uint64_t layout {}, vb[16] {}, ib {};
     uint32_t stride[16] {}, voffset[16] {}, ib_format {0}, ib_offset {0}, topology {0};
 };
 
 std::map<uint64_t, CtxState> g_ctx;
 CtxState& StateOf(Obj& o) { return g_ctx[o.id]; }
+
+void OverrideAll(const char* method, winrt::HostFn fn, const char* only_iface_prefix = nullptr) {
+    for (auto& [name, iface] : g_ifaces) {
+        if (only_iface_prefix != nullptr && name.rfind(only_iface_prefix, 0) != 0) continue;
+        for (auto& m : iface->methods) if (m.name == method) m.fn = fn;
+    }
+}
+
+#include "nt/d3d_gpu.inc"
+
+std::mutex g_state_mutex;
+std::map<std::string, uint64_t> g_state_cache;   // identical state descriptions share one object
+
+std::map<std::string, uint64_t> g_calls;   // call counts by Interface::method, for the periodic summary
+std::mutex g_calls_mutex;
 
 uint32_t Fallback(Call& c) {
     const winrt::Method& m = c.iface.methods[c.slot];
@@ -203,16 +170,36 @@ uint32_t Fallback(Call& c) {
     if (m.out_index >= 0 && g_defs.count(m.out_type)) {
         auto* out = c.Ptr<uint64_t>(m.out_index);
         if (out != nullptr) {
+            // State objects are immutable and the title makes one per draw: identical ones are shared.
+            const DescSpec* spec = nullptr;
+            for (const DescSpec& d : kDescs) if (m.name == d.method) spec = &d;
+            const bool is_state = m.name == "CreateBlendState" || m.name == "CreateDepthStencilState" || m.name == "CreateRasterizerState" || m.name == "CreateSamplerState";
+            std::string state_key;
+            if (is_state && spec != nullptr && c.Arg(spec->param) != 0) {
+                state_key = m.name + std::string(c.Ptr<char>(spec->param), spec->size);
+                std::scoped_lock lock {g_state_mutex};
+                auto hit = g_state_cache.find(state_key);
+                if (hit != g_state_cache.end()) { *out = hit->second; return kSOk; }
+            }
             Obj* o = Create(m.out_type, out);
             if (o != nullptr) {
                 o->u64["device"] = DeviceOf(c);
-                for (const DescSpec& d : kDescs) {
-                    if (m.name != d.method) continue;
-                    if (c.Arg(d.param) != 0) o->str["desc"].assign(c.Ptr<char>(d.param), d.size);
+                if (spec != nullptr) {
+                    if (c.Arg(spec->param) != 0) o->str["desc"].assign(c.Ptr<char>(spec->param), spec->size);
                     if (m.name.find("View") != std::string::npos) o->u64["resource"] = c.Arg(0);
                 }
-                if (m.name == "CreateBuffer" || m.name == "CreateTexture1D" || m.name == "CreateTexture2D" || m.name == "CreateTexture3D")
-                    InitResource(*o, c.Arg(1));
+                if (const char* dump_dir = std::getenv("UTSURO_DUMPSHADERS");
+                    dump_dir != nullptr && m.name.size() > 12 && m.name.compare(0, 6, "Create") == 0 && m.name.find("Shader") != std::string::npos && c.Arg(0) && c.Arg(1)) {
+                    static int n = 0;
+                    char path[512];
+                    std::snprintf(path, sizeof path, "%s/%s_%03d.bin", dump_dir, m.name.c_str(), n++);
+                    if (FILE* f = std::fopen(path, "wb")) { std::fwrite(c.Ptr<void>(0), 1, static_cast<size_t>(c.Arg(1)), f); std::fclose(f); }
+                }
+                OnCreate(c, m, *o);
+                if (!state_key.empty()) {
+                    std::scoped_lock lock {g_state_mutex};
+                    g_state_cache[state_key] = *out;
+                }
                 UT_DEBUG("d3d: %s::%s -> new %s", c.iface.name.c_str(), m.name.c_str(), m.out_type.c_str());
             }
         }
@@ -220,13 +207,6 @@ uint32_t Fallback(Call& c) {
         UT_DEBUG("d3d: %s::%s returns an object of unknown type %s", c.iface.name.c_str(), m.name.c_str(), m.out_type.c_str());
     }
     return kSOk;
-}
-
-void OverrideAll(const char* method, winrt::HostFn fn, const char* only_iface_prefix = nullptr) {
-    for (auto& [name, iface] : g_ifaces) {
-        if (only_iface_prefix != nullptr && name.rfind(only_iface_prefix, 0) != 0) continue;
-        for (auto& m : iface->methods) if (m.name == method) m.fn = fn;
-    }
 }
 
 } // namespace
@@ -328,7 +308,11 @@ void Register(Runtime& rt) {
         auto bind = [&](const std::string& name, winrt::HostFn fn) { OverrideAll(name.c_str(), std::move(fn)); };
         bind(p + "SetConstantBuffers", [st](Call& c) -> uint32_t {
             auto& s = StateOf(c.obj);
-            for (uint64_t i = 0; i < c.Arg(1) && c.Arg(0) + i < 16; ++i) s.cb[st][c.Arg(0) + i] = c.Arg(2) ? c.Ptr<uint64_t>(2)[i] : 0;
+            for (uint64_t i = 0; i < c.Arg(1) && c.Arg(0) + i < 16; ++i) {
+                s.cb[st][c.Arg(0) + i] = c.Arg(2) ? c.Ptr<uint64_t>(2)[i] : 0;
+                s.cb_first[st][c.Arg(0) + i] = 0;
+                s.cb_count[st][c.Arg(0) + i] = 4096;
+            }
             return 0;
         });
         bind(p + "GetConstantBuffers", [st](Call& c) -> uint32_t {
@@ -465,9 +449,12 @@ void Register(Runtime& rt) {
         }
         return 0;
     });
+    // Xbox signature: IASetIndexBuffer(HardwareIndexFormat (0: 16 bit, 1: 32 bit), pIndexBuffer, Offset).
     OverrideAll("IASetIndexBuffer", [](Call& c) -> uint32_t {
         auto& s = StateOf(c.obj);
-        s.ib = c.Arg(0); s.ib_format = static_cast<uint32_t>(c.Arg(1)); s.ib_offset = static_cast<uint32_t>(c.Arg(2));
+        s.ib = c.Arg(1);
+        s.ib_format = c.Arg(0) == 0 ? 57 : 42;
+        s.ib_offset = static_cast<uint32_t>(c.Arg(2));
         return 0;
     });
     OverrideAll("IAGetIndexBuffer", [](Call& c) -> uint32_t {
@@ -510,25 +497,6 @@ void Register(Runtime& rt) {
         if (it != c.obj.str.end() && c.Arg(0) != 0) std::memcpy(c.Ptr<void>(0), it->second.data(), it->second.size());
         return 0;
     });
-    // Map(resource, subresource, type, flags, D3D11_MAPPED_SUBRESOURCE*)
-    OverrideAll("Map", [](Call& c) -> uint32_t {
-        Obj* r = Runtime::Get().FromPointer(c.Arg(0));
-        auto* out = c.Ptr<uint64_t>(4);
-        if (r == nullptr || out == nullptr || r->u64["data"] == 0) {
-            UT_WARN("d3d: Map of a resource without memory (%s)", r ? r->class_name.c_str() : "unknown");
-            if (out) std::memset(out, 0, 16);
-            return 0x80004005u;
-        }
-        uint64_t total;
-        const auto subs = LayoutOf(*r, &total);
-        const size_t sub = std::min<size_t>(static_cast<size_t>(c.Arg(1)), subs.empty() ? 0 : subs.size() - 1);
-        out[0] = r->u64["data"] + (subs.empty() ? 0 : subs[sub].offset);
-        UT_INFO("d3d: Map %s sub %zu -> %#llx (resource memory %#llx, %llu bytes) type=%llu", r->class_name.c_str(), sub, (unsigned long long)out[0],
-                (unsigned long long)r->u64["data"], (unsigned long long)total, (unsigned long long)c.Arg(2));
-        reinterpret_cast<uint32_t*>(out)[2] = subs.empty() ? 0 : subs[sub].row_pitch;
-        reinterpret_cast<uint32_t*>(out)[3] = subs.empty() ? 0 : subs[sub].slice_pitch;
-        return 0;
-    });
     // GetDesc / GetResource / GetDevice on resources and views read back what was stashed.
 
     OverrideAll("GetResource", [](Call& c) -> uint32_t {
@@ -537,25 +505,6 @@ void Register(Runtime& rt) {
     });
     OverrideAll("GetDevice", [](Call& c) -> uint32_t {
         *c.Ptr<uint64_t>(0) = DeviceOf(c);
-        return kSOk;
-    });
-    // IDXGISwapChain::GetBuffer(index, riid, void** surface): a texture shaped like the swap chain.
-    OverrideAll("GetBuffer", [](Call& c) -> uint32_t {
-        const std::string key = "buffer" + std::to_string(c.Arg(0));
-        uint64_t p = c.obj.u64[key];
-        if (p == 0) {
-            Obj* t = Create("ID3D11Texture2D", &p);
-            if (t == nullptr) return 0x80004005u;
-            uint32_t sc[12] {};
-            auto d = c.obj.str.find("desc");
-            if (d != c.obj.str.end()) std::memcpy(sc, d->second.data(), std::min<size_t>(d->second.size(), sizeof sc));
-            uint32_t td[11] {sc[0], sc[1], 1, 1, sc[2], sc[4], sc[5], 0 /*usage*/, 0x28 /*SRV|RTV*/, 0, 0};
-            t->str["desc"].assign(reinterpret_cast<char*>(td), sizeof td);
-            t->u64["device"] = DeviceOf(c);
-            c.obj.u64[key] = p;
-            UT_INFO("d3d: swap chain buffer %llu is %ux%u format %u", (unsigned long long)c.Arg(0), sc[0], sc[1], sc[2]);
-        }
-        *c.Ptr<uint64_t>(2) = p;
         return kSOk;
     });
     OverrideAll("CheckFormatSupport", [](Call& c) -> uint32_t {
@@ -570,11 +519,33 @@ void Register(Runtime& rt) {
         if (c.Arg(1) != 0) std::memset(c.Ptr<void>(1), 0, static_cast<uint32_t>(c.Arg(2)));
         return kSOk;
     });
+    RegisterGpuOverrides();
     UT_INFO("d3d: %zu interfaces", g_ifaces.size());
 }
 
-uint64_t CreateDevice(Kernel&, NtThread&, SyscallArgs& a) {
+uint64_t CreateDevice(Kernel& kernel, NtThread&, SyscallArgs& a) {
+    static bool stats = false;
+    if (!stats && std::getenv("UTSURO_D3DSTATS") != nullptr) {
+        stats = true;
+        Runtime::Get().observer = [](Obj& o, Iface& i, const winrt::Method& m) {
+            if (i.base_slots != 3) return;
+            std::scoped_lock lock {g_calls_mutex};
+            ++g_calls[(i.name.find("Context") != std::string::npos ? "ctx" + std::to_string(o.id) + ":" : std::string()) + m.name];
+        };
+        std::thread([&kernel] {
+            std::map<std::string, uint64_t> last;
+            while (!kernel.exiting) {
+                std::this_thread::sleep_for(std::chrono::seconds(3));
+                std::scoped_lock lock {g_calls_mutex};
+                std::string line;
+                for (auto& [name, n] : g_calls) if (n != last[name]) line += " " + name + "=" + std::to_string(n - last[name]);
+                last = g_calls;
+                UT_INFO("d3d/3s:%s", line.c_str());
+            }
+        }).detach();
+    }
     // D3D11CreateDevice(adapter, driverType, software, flags, levels, nlevels, sdk, ppDevice, pLevel, ppContext)
+    gpu::Init();
     Obj* device = New("ID3D11DeviceX");
     Obj* context = New("ID3D11DeviceContextX");
     if (device == nullptr || context == nullptr) return 0x80004005u;

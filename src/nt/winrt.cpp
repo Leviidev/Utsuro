@@ -230,6 +230,18 @@ uint64_t Runtime::QueryInterface(Obj& obj, const Guid& iid) {
     return 0;
 }
 
+float Call::Float(int i) const {
+    const int position = i + 2;   // this is position 1
+    uint32_t bits = static_cast<uint32_t>(Arg(i));
+    if (position <= 4 && thread.control != nullptr) {
+        GuestCpuState st;
+        if (thread.control->CaptureCpuState(&st)) bits = static_cast<uint32_t>(st.xmm[position - 1][0]);
+    }
+    float f;
+    std::memcpy(&f, &bits, 4);
+    return f;
+}
+
 Obj* Runtime::FromPointer(uint64_t pointer) {
     if (pointer <= 0x10000) return nullptr;
     const uint64_t id = reinterpret_cast<const uint64_t*>(pointer)[1];
@@ -382,6 +394,7 @@ method:
     Method& m = iface->methods[slot - iface->base_slots];
     Call call {*kernel_, thread, args, *obj, *iface, slot - static_cast<uint32_t>(iface->base_slots)};
     UT_DEBUG("winrt: %s.%s::%s", obj->class_name.c_str(), iface->name.c_str(), m.name.c_str());
+    if (observer) observer(*obj, *iface, m);
     if (m.fn) { *result = m.fn(call); return true; }
     if (iface->fallback) { *result = iface->fallback(call); return true; }
     if (m.ctor) {

@@ -3,6 +3,7 @@
 //   utsuro-run [--trace[=substring]] <dump dir containing Mount/ and EmbeddedXvd/> [exe]
 #include "engine/log.h"
 #include "nt/kernel.h"
+#include "gpu/dxbc.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -21,6 +22,20 @@ int main(int argc, char** argv) {
     std::string dump;
     std::string exe;
     if (argc > 1 && std::string(argv[1]) == "--selftest") return RunSelfTest();
+    if (argc > 2 && std::string(argv[1]) == "--dxbc") {
+        // Development aid: translate a DXBC file to MSL on stdout.
+        FILE* f = std::fopen(argv[2], "rb");
+        if (!f) { std::perror(argv[2]); return 1; }
+        std::string bytes;
+        char chunk[4096];
+        size_t n;
+        while ((n = std::fread(chunk, 1, sizeof chunk, f)) > 0) bytes.append(chunk, n);
+        std::fclose(f);
+        auto r = gpu::TranslateDxbc(reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size());
+        if (!r.ok) { std::fprintf(stderr, "%s: %s\n", argv[2], r.error.c_str()); return 1; }
+        std::fputs(r.msl.c_str(), stdout);
+        return 0;
+    }
     if (argc > 2 && std::string(argv[1]) == "--classes") {
         nt::InitRegistry(std::string(argv[2]) + "/EmbeddedXvd/Windows/System32/config");
         nt::DumpActivatableClasses();
