@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Builds the Utsuro runtime as a native macOS program (build/utsuro-run).
-# FEXCore is not vendored: it uses Fathom's macOS FEXCore build (see fathom/scripts/build-fexcore-macos.sh).
+# FEXCore is not vendored: it is husk-fex's, built by scripts/build-fex.sh macphone. That branch has the hosted-JIT hooks, and
+# the macphone build runs the phone's dual-mapped JIT on the Mac, so this binary exercises the same path the iOS app ships.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-FATHOM="${FATHOM:-$HOME/Documents/Coding/fathom}"
-FEXCORE_SRC="${FEXCORE_SRC:-$HOME/Documents/Coding/fathom-fexcore/runtime/sources/fexcore-darwin}"
-FEX_BUILD="${FEX_BUILD:-$FATHOM/build/fexcore-macos}"
-LIBS_DIR="${LIBS_DIR:-$FATHOM/build/fexcore-macos-libs}"
+FEXCORE_SRC="${FEXCORE_SRC:-$HOME/Documents/Coding/husk-fex/runtime/sources/fexcore-darwin}"
+FEX_BUILD="${FEX_BUILD:-$ROOT/build/fex/macphone}"
+LIBS_DIR="${LIBS_DIR:-$ROOT/build/fex/macphone-libs}"
 OUT="$ROOT/build"
 mkdir -p "$OUT/obj"
 
@@ -22,17 +22,20 @@ INCLUDES=(
 objs=()
 pids=()
 while IFS= read -r src; do
-    obj="$OUT/obj/$(echo "${src#$ROOT/src/}" | tr '/' '_' | sed -E 's/\.(cpp|mm)$/.o/')"
+    obj="$OUT/obj/$(echo "${src#$ROOT/src/}" | tr '/' '_' | sed -E 's/\.(cpp|mm|c|S)$/.o/')"
     lang=()
+    cc=clang++
     [[ "$src" == *.mm ]] && lang=(-x objective-c++ -fobjc-arc)
+    [[ "$src" == *.c ]] && { cc=clang; lang=(-std=gnu11); }
+    [[ "$src" == *.S ]] && { cc=clang; lang=(-x assembler-with-cpp); }
     objs+=("$obj")
     if [[ ! -f "$obj" || "$src" -nt "$obj" || -n "$(find "$ROOT/src" \( -name '*.h' -o -name '*.inc' \) -newer "$obj" -print -quit)" ]]; then
-        clang++ -target arm64-apple-macos27.0 -std=c++20 -O1 -g -DARCHITECTURE_arm64=1 \
+        $cc -target arm64-apple-macos27.0 $([[ "$cc" == clang++ ]] && echo -std=c++20) -O1 -g -DARCHITECTURE_arm64=1 -DFEX_MAC_PHONE_PATH=1 \
             -Wall -Wno-unused-parameter -DMETA_NO_STD_FORWARD_DECLARATIONS -DUTSURO_DATA_DIR=\"$ROOT/data\" \
             "${INCLUDES[@]}" ${lang[@]+"${lang[@]}"} -c "$src" -o "$obj" &
         pids+=($!)
     fi
-done < <(find "$ROOT/src" \( -name '*.cpp' -o -name '*.mm' \) | sort)
+done < <(find "$ROOT/src" \( -name '*.cpp' -o -name '*.mm' -o -name '*.c' -o -name '*.S' \) | sort)
 fail=0
 for p in "${pids[@]:-}"; do [[ -n "$p" ]] && { wait "$p" || fail=1; }; done
 [[ $fail == 0 ]] || { echo "compile failed" >&2; exit 1; }

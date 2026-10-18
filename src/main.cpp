@@ -6,6 +6,7 @@
 #include "gpu/dxbc.h"
 #include "host/input.h"
 #include "host/window.h"
+#include "jit/jit.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -61,6 +62,7 @@ int main(int argc, char** argv) {
     opt.exe_name = exe.empty() ? "Minecraft.Client.exe" : exe;
 
     utsuro_install_crash_handler("/tmp/utsuro-crash.log");
+    if (!jit::Prewarm()) std::fprintf(stderr, "no executable memory was granted\n");
     auto run = [opt = std::move(opt)]() mutable -> int {
         nt::Kernel kernel(std::move(opt));
         std::string error;

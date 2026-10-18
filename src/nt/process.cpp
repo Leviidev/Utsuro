@@ -4,6 +4,7 @@
 #include "nt/winrt.h"
 
 #include "engine/log.h"
+#include "jit/jit.h"
 
 #include <pthread.h>
 #include <sys/stat.h>
@@ -47,7 +48,17 @@ NtThread* CurrentNtThreadRaw() { return g_self; }
 
 bool Kernel::Boot(std::string& error) {
     std::string e;
-    GuestAddressSpace* space = GuestAddressSpace::Reserve(options_.arena_size, e, 0x10000);
+    if (!jit::Install(e)) { error = e; return false; }
+    // The guest lives 1:1 at host addresses, so the arena is as big as the host will give: 128 GB on a Mac, less where
+    // the process is limited. UTSURO_ARENA_GB pins it.
+    GuestAddressSpace* space = nullptr;
+    uint64_t want = options_.arena_size;
+    if (const char* gb = std::getenv("UTSURO_ARENA_GB")) want = std::max<uint64_t>(1, std::strtoull(gb, nullptr, 0)) << 30;
+    for (; want >= (uint64_t {8} << 30); want >>= 1) {
+        space = GuestAddressSpace::Reserve(want, e, 0x10000);
+        if (space != nullptr) break;
+        UT_WARN("no room for a %llu GB guest arena: %s", (unsigned long long)(want >> 30), e.c_str());
+    }
     if (space == nullptr) { error = e; return false; }
     space_.reset(space);
     EngineOptions eo;
