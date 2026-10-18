@@ -1,0 +1,6 @@
+games
+ref/
+tools/venv/
+build/
+*.pyc
+.DS_Store
