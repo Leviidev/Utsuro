@@ -171,6 +171,13 @@ public:
         software_.Load(config_dir + "/SOFTWARE");
         system_.Load(config_dir + "/SYSTEM");
         default_.Load(config_dir + "/DEFAULT");
+        // Some dumps ship without their hives; UTSURO_HIVES names a config directory of another
+        // dump (the same console OS family) to read them from instead.
+        if (const char* alt = std::getenv("UTSURO_HIVES")) {
+            if (!software_.valid()) software_.Load(std::string(alt) + "/SOFTWARE");
+            if (!system_.valid()) system_.Load(std::string(alt) + "/SYSTEM");
+            if (!default_.valid()) default_.Load(std::string(alt) + "/DEFAULT");
+        }
         UT_INFO("registry: SOFTWARE %s, SYSTEM %s, DEFAULT %s", software_.valid() ? "loaded" : "missing",
                 system_.valid() ? "loaded" : "missing", default_.valid() ? "loaded" : "missing");
     }

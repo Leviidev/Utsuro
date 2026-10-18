@@ -1,0 +1,2 @@
+E 26c9 8  ; mov qword ptr [rsp], 0x7ffe0320
+F 26e2 6 rax  ; add rax, 0x7ffe0000

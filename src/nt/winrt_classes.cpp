@@ -52,6 +52,7 @@ void RegisterClasses(Runtime& rt) {
     RegisterCollections(rt);
     RegisterAsync(rt);
     RegisterStorage(rt);
+    RegisterAppData(rt);
     // One signed-in user, id 1, who plays on the one pad.
     {
         rt.Override("IUserStatics", "get_Users", [](Call& c) -> uint32_t {

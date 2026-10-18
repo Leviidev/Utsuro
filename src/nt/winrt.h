@@ -171,5 +171,6 @@ void RegisterCollections(Runtime& rt);
 void RegisterAsync(Runtime& rt);
 void RegisterStorage(Runtime& rt);
 void RegisterInput(Runtime& rt);
+void RegisterAppData(Runtime& rt);
 
 } // namespace utsuro::nt::winrt

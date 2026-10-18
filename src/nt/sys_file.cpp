@@ -133,6 +133,7 @@ NTSTATUS DoCreate(Kernel& k, NtThread&, HANDLE* out, uint32_t access, const OBJE
             struct stat pst {};
             const bool parent_ok = slash != std::string::npos && stat(host.substr(0, slash).c_str(), &pst) == 0;
             const NTSTATUS rc = parent_ok ? STATUS_OBJECT_NAME_NOT_FOUND : STATUS_OBJECT_PATH_NOT_FOUND;
+            UT_DEBUG("open: %s not found (%s)", nt_path.c_str(), parent_ok ? "name" : "path");
             SetIosb(iosb, rc, FILE_DOES_NOT_EXIST);
             return rc;
         }
@@ -175,6 +176,7 @@ NTSTATUS DoCreate(Kernel& k, NtThread&, HANDLE* out, uint32_t access, const OBJE
         if (disposition == FILE_SUPERSEDE) information = FILE_SUPERSEDED;
         else if (disposition == FILE_OVERWRITE || disposition == FILE_OVERWRITE_IF) information = FILE_OVERWRITTEN;
     }
+    UT_DEBUG("open: %s (%s)", nt_path.c_str(), information == FILE_CREATED ? "created" : "opened");
     *out = k.AddHandle(file);
     SetIosb(iosb, STATUS_SUCCESS, information);
     return STATUS_SUCCESS;
@@ -569,7 +571,10 @@ NTSTATUS NtQueryAttributesFile(Kernel& k, NtThread&, SyscallArgs& a) {
     if (!NameFromAttributes(k, a.Ptr<OBJECT_ATTRIBUTES>(0), &nt_path)) return STATUS_OBJECT_NAME_INVALID;
     std::string host;
     bool exists = false;
-    if (!k.ResolvePath(nt_path, &host, &exists) || !exists) return STATUS_OBJECT_NAME_NOT_FOUND;
+    if (!k.ResolvePath(nt_path, &host, &exists) || !exists) {
+        UT_DEBUG("query attributes: %s not found", nt_path.c_str());
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
     struct stat st;
     if (stat(host.c_str(), &st) != 0) return FromErrno(errno);
     FillBasic(a.Ptr<uint8_t>(1), st);
@@ -581,7 +586,10 @@ NTSTATUS NtQueryFullAttributesFile(Kernel& k, NtThread&, SyscallArgs& a) {
     if (!NameFromAttributes(k, a.Ptr<OBJECT_ATTRIBUTES>(0), &nt_path)) return STATUS_OBJECT_NAME_INVALID;
     std::string host;
     bool exists = false;
-    if (!k.ResolvePath(nt_path, &host, &exists) || !exists) return STATUS_OBJECT_NAME_NOT_FOUND;
+    if (!k.ResolvePath(nt_path, &host, &exists) || !exists) {
+        UT_DEBUG("query attributes: %s not found", nt_path.c_str());
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
     struct stat st;
     if (stat(host.c_str(), &st) != 0) return FromErrno(errno);
     auto* buf = a.Ptr<uint8_t>(1);

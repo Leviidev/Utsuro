@@ -246,7 +246,14 @@ bool Kernel::ResolvePath(const std::string& nt_in, std::string* host_path, bool*
         return false;
     };
     const std::string xvd_root = options_.system_root.substr(0, options_.system_root.rfind('/'));
-    if (starts("\\??\\C:\\") || starts("\\DosDevices\\C:\\") || starts("C:\\") || starts("\\??\\Volume{c}\\")) {
+    // The title's own app data (ApplicationData.LocalFolder and friends) is writable and lives with the saves.
+    if (starts("\\??\\C:\\Users\\Default\\AppData\\") || starts("C:\\Users\\Default\\AppData\\")) {
+        const char* e = std::getenv("UTSURO_SAVES");
+        std::string base = e != nullptr ? std::string(e) : std::string(std::getenv("HOME")) + "/Library/Application Support/Utsuro/saves";
+        while (base.size() > 1 && base.back() == '/') base.pop_back();
+        root = base.substr(0, base.rfind('/')) + "/AppData";
+        mkdir(root.c_str(), 0755);
+    } else if (starts("\\??\\C:\\") || starts("\\DosDevices\\C:\\") || starts("C:\\") || starts("\\??\\Volume{c}\\")) {
         root = xvd_root;
     } else if (starts("\\SystemRoot\\") || starts("\\??\\SystemRoot\\")) {
         root = options_.system_root;

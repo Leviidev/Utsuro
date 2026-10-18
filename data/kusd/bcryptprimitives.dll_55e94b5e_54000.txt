@@ -1,0 +1,6 @@
+A 18d56 8  ; mov rdi, qword ptr [0x7ffe0250]
+B 18fc7 5 edi  ; mov edi, 0x7ffe0250
+B 1910f 5 edi  ; mov edi, 0x7ffe0250
+A 283d0 8  ; mov rax, qword ptr [0x7ffe0250]
+E 3d86d 8  ; mov qword ptr [rsp], 0x7ffe0320
+F 3d886 6 rax  ; add rax, 0x7ffe0000
