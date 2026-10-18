@@ -1,4 +1,5 @@
 #include "nt/kernel.h"
+#include <pthread/qos.h>
 
 #include "engine/log.h"
 
@@ -91,8 +92,20 @@ uint64_t Kernel::QpcNow() { return static_cast<uint64_t>(MonotonicNs() / 100); }
 GuestAddressSpace* NtThread::Space() const { return &kernel_.Space(); }
 bool NtThread::StopRequested() const { return kernel_.exiting.load(); }
 
+void NtThread::ApplyHostPriority() {
+    // On a phone the cores are not equal, and what runs where is decided by QoS. The game's render thread and its background workers
+    // (saving, chunk compression) would otherwise all inherit one class and fight for the fast cores.
+    const int32_t p = base_priority.load(std::memory_order_relaxed);
+    qos_class_t cls = QOS_CLASS_USER_INITIATED;
+    if (p >= 9) cls = QOS_CLASS_USER_INTERACTIVE;
+    else if (p <= 3) cls = QOS_CLASS_UTILITY;
+    else if (p < 8) cls = QOS_CLASS_DEFAULT;
+    pthread_set_qos_class_self_np(cls, 0);
+}
+
 uint64_t NtThread::Handle(uint64_t number, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5,
                           uint64_t a6) {
+    if (priority_dirty.load(std::memory_order_relaxed) && priority_dirty.exchange(false)) ApplyHostPriority();
     // FEXCore's OS_LINUX64 order: rax, rdi, rsi, rdx, r10, r8, r9. Windows: r10, rdx, r8, r9.
     SyscallArgs args;
     args.reg[0] = a4;

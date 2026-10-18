@@ -319,6 +319,11 @@ NTSTATUS NtSetInformationThread(Kernel& k, NtThread&, SyscallArgs& a) {
     const uint32_t cls = static_cast<uint32_t>(a[1]);
     auto t = IsCurrentThreadHandle(a[0]) ? k.CurrentThread() : k.FindThreadByHandle(a[0]);
     if (!t) return STATUS_INVALID_HANDLE;
+    if ((cls == 3 || cls == 2) && a[3] >= 4 && a.Ptr<int32_t>(2) != nullptr) {  // ThreadPriority (a relative step) / ThreadBasePriority
+        const int32_t v = *a.Ptr<int32_t>(2);
+        t->base_priority = cls == 3 ? v : 8 + v;
+        t->priority_dirty = true;
+    }
     if (cls == 38 || cls == 35) {  // ThreadNameInformation
         const auto* us = a.Ptr<UNICODE_STRING>(2);
         if (us != nullptr && a[3] >= sizeof(UNICODE_STRING)) t->name = Utf16ToUtf8(ReadUnicodeString(us));

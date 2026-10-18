@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import QuartzCore
+import GameController
 
 /// Runs the title on a thread of its own. There is one title per process, and it ends the process's JIT session when it returns.
 enum GameRunner {
@@ -70,6 +71,8 @@ struct GameScreen: View {
     @StateObject private var pad = VirtualPad()
     @State private var layout = PadLayout.load("minecraft")
     @State private var confirmQuit = false
+    /// A physical controller is the player's input when there is one; the touch controls only exist for when there is not.
+    @State private var hasController = !GCController.controllers().isEmpty
     @AppStorage("utsuro.padOpacity") private var padOpacity = 0.6
 
     var body: some View {
@@ -79,8 +82,10 @@ struct GameScreen: View {
                 GameRunner.start(dump: dump, layer: layer) { _ in onExit() }
             }
             .aspectRatio(16.0 / 9.0, contentMode: .fit)
-            VirtualPadView(pad: pad, opacity: padOpacity, haptics: true, layout: layout)
-                .ignoresSafeArea()
+            if !hasController {
+                VirtualPadView(pad: pad, opacity: padOpacity, haptics: true, layout: layout)
+                    .ignoresSafeArea()
+            }
             VStack {
                 HStack {
                     Spacer()
@@ -99,7 +104,18 @@ struct GameScreen: View {
         }
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
-        .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
+        .onReceive(NotificationCenter.default.publisher(for: .GCControllerDidConnect)) { _ in
+            hasController = !GCController.controllers().isEmpty
+            UtsuroLog.log("input", "controller connected: \(GCController.controllers().compactMap { $0.vendorName }.joined(separator: ", "))")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .GCControllerDidDisconnect)) { _ in
+            hasController = !GCController.controllers().isEmpty
+            UtsuroLog.log("input", "controller disconnected; touch controls \(hasController ? "stay hidden" : "are back")")
+        }
+        .onAppear {
+            UtsuroLog.log("input", "controllers at start: \(GCController.controllers().count)")
+            UIApplication.shared.isIdleTimerDisabled = true
+        }
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
             UtsuroLog.log("memory", "iOS sent a memory warning")

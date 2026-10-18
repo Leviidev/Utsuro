@@ -225,6 +225,11 @@ public:
     std::unique_ptr<GuestThread> guest;
     std::thread host;
     std::atomic<int32_t> suspend_count {0};
+    /// What the game asked for with ThreadBasePriority (8 is normal), applied to the host thread as a QoS class by that thread's own next syscall.
+    std::atomic<int32_t> base_priority {8};
+    std::atomic<bool> priority_dirty {false};
+    /// Gives the host thread the scheduling class its base priority asks for. Only the thread itself can do this on Darwin.
+    void ApplyHostPriority();
     int32_t exit_status {0};
     bool terminated {false};
     bool create_suspended {false};

@@ -581,6 +581,13 @@ void* HostThreadMain(void* raw) {
     auto& t = *sd->thread;
     g_self = &t;
     pthread_setname_np(("guest-" + std::to_string(t.tid_)).c_str());
+    {
+        // The first thread runs the game's main loop and presents the frames: it keeps the top class. Everything else starts a step
+        // below it and is moved by what the game says about it (NtSetInformationThread, ThreadBasePriority).
+        static std::atomic<bool> first {true};
+        if (first.exchange(false)) { t.base_priority = 9; }
+        t.ApplyHostPriority();
+    }
     std::string err;
     t.guest = k.Engine().StartThread(sd->rip, sd->rsp, t, err);
     if (!t.guest) {
