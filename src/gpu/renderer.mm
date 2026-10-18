@@ -1209,6 +1209,13 @@ void Present(const std::shared_ptr<Texture>& back, uint32_t sync_interval) {
         EndEncoder();
         const uint64_t index = ++g->frame_count;
         if (index % 120 == 1) {
+            static auto last_report = std::chrono::steady_clock::now();
+            static uint64_t last_index = 0;
+            const auto now = std::chrono::steady_clock::now();
+            const double secs = std::chrono::duration<double>(now - last_report).count();
+            if (index > last_index && secs > 0.5) UT_INFO("gpu: %.1f frames per second", static_cast<double>(index - last_index) / secs);
+            last_report = now;
+            last_index = index;
             const auto& st = g->stats;
             UT_INFO("gpu: frame %llu: %llu draws, %llu clears; skipped: no vs %llu, bad vs %llu, bad ps %llu, no pass %llu, no pso %llu, topology %llu, no ib %llu", (unsigned long long)index,
                     (unsigned long long)st.draws, (unsigned long long)st.clears, (unsigned long long)st.no_vs, (unsigned long long)st.bad_vs, (unsigned long long)st.bad_ps,

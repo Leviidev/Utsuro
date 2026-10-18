@@ -6,9 +6,13 @@
 
 #include "nt/winrt.h"
 
+#include "host/audio.h"
+
 #include "engine/log.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <deque>
 #include <map>
@@ -29,14 +33,16 @@ struct Buffer {
     uint32_t bytes {0}, flags {0};
     uint64_t context {0};
     uint32_t play_begin {0}, play_length {0}, loop_begin {0}, loop_length {0}, loop_count {0};
-    double played {0};        ///< Seconds of this buffer already consumed.
     bool started {false};
+    bool flushed {false};
 };
 
 struct Voice {
     bool source {false};
     bool started {false};
     uint32_t channels {2}, rate {48000}, avg_bytes_per_sec {48000 * 4};
+    uint32_t format_tag {1}, block_align {4}, bits {16};
+    double cursor {0};        ///< Position in the current buffer, in source frames.
     float ratio {1.0f}, volume {1.0f};
     uint64_t callback {0};
     std::deque<Buffer> queue;
@@ -149,6 +155,8 @@ void Register(winrt::Runtime& rt) {
         std::memcpy(&buf.loop_count, b + 32, 4);
         std::memcpy(&buf.context, b + 40, 8);
         std::scoped_lock lock {g_mutex};
+        static int shown = 0;
+        if (shown++ < 6) UT_INFO("xaudio2: SubmitSourceBuffer %u bytes flags %#x loop %u at %#llx", buf.bytes, buf.flags, buf.loop_count, (unsigned long long)buf.data);
         VoiceOf(c.obj).queue.push_back(buf);
         return 0;
     }));
@@ -157,7 +165,7 @@ void Register(winrt::Runtime& rt) {
         auto& v = VoiceOf(c.obj);
         // The title is told about every buffer that was dropped, like the real engine does.
         // (Delivered by the pump on its next pass: mark them finished.)
-        for (auto& b : v.queue) { b.played = 1e9; }
+        for (auto& b : v.queue) b.flushed = true;
         return 0;
     }));
     source.push_back(M("Discontinuity"));
@@ -198,19 +206,24 @@ void Register(winrt::Runtime& rt) {
     engine.push_back(M("CreateSourceVoice", [](Call& c) -> uint32_t {
         // (ppSourceVoice, pSourceFormat, Flags, MaxFrequencyRatio, pCallback, pSendList, pEffectChain)
         const auto* fmt = c.Ptr<uint8_t>(1);
-        uint16_t tag = 1, channels = 2;
+        uint16_t tag = 1, channels = 2, align = 4, bits = 16;
         uint32_t rate = 48000, avg = 48000 * 4;
         if (fmt != nullptr) {
             std::memcpy(&tag, fmt, 2);
             std::memcpy(&channels, fmt + 2, 2);
             std::memcpy(&rate, fmt + 4, 4);
             std::memcpy(&avg, fmt + 8, 4);
+            std::memcpy(&align, fmt + 12, 2);
+            std::memcpy(&bits, fmt + 14, 2);
         }
         Obj* o = NewVoice(true, g_source, channels, rate);
         {
             std::scoped_lock lock {g_mutex};
             Voice& v = VoiceOf(*o);
             v.avg_bytes_per_sec = avg ? avg : rate * channels * 2;
+            v.format_tag = tag;
+            v.block_align = align ? align : channels * 2;
+            v.bits = bits;
             v.callback = c.Arg(4);
         }
         UT_INFO("xaudio2: source voice tag %#x, %u ch, %u Hz", tag, channels, rate);
@@ -247,31 +260,57 @@ void Register(winrt::Runtime& rt) {
         const auto now = std::chrono::steady_clock::now();
         const double dt = std::chrono::duration<double>(now - last).count();
         last = now;
+        // Output frames to produce this pass, carrying the fraction.
+        static double carry = 0;
+        carry += dt * audio::kRate;
+        const size_t out_frames = static_cast<size_t>(std::clamp(carry, 0.0, 9600.0));
+        carry -= static_cast<double>(out_frames);
+        std::vector<float> mix(out_frames * 2, 0.f);
         std::vector<Pending> due;
         {
             std::scoped_lock lock {g_mutex};
             for (auto& [id, v] : g_voices) {
                 if (!v.source || v.destroyed) continue;
-                double budget = v.started ? dt * v.ratio : 0.0;
+                const bool pcm = (v.format_tag == 1 && v.bits == 16) || (v.format_tag == 3 && v.bits == 32);
+                const double step = static_cast<double>(v.rate) * v.ratio / audio::kRate;   // source frames per output frame
+                size_t out = 0;
                 while (!v.queue.empty()) {
                     Buffer& b = v.queue.front();
-                    const bool flushed = b.played >= 1e8;
-                    if (!flushed && !v.started) break;
-                    if (!b.started && !flushed) {
+                    if (!b.flushed && !v.started) break;
+                    if (!b.started && !b.flushed) {
                         b.started = true;
                         if (v.callback) due.push_back({v.callback, 3, v.pointer, b.context});   // OnBufferStart
                     }
-                    const double length = b.bytes / static_cast<double>(v.avg_bytes_per_sec ? v.avg_bytes_per_sec : 1);
-                    if (!flushed) {
-                        const double take = std::min(budget, length - b.played);
-                        b.played += take;
-                        budget -= take;
-                        v.samples_played += static_cast<uint64_t>(take * v.rate);
+                    const double total = pcm ? b.bytes / static_cast<double>(v.block_align ? v.block_align : 1)
+                                             : b.bytes / static_cast<double>(v.avg_bytes_per_sec ? v.avg_bytes_per_sec : 1) * v.rate;
+                    bool finished = b.flushed;
+                    // Play the buffer for as many output frames as are left in this pass.
+                    while (!finished && out < out_frames) {
+                        if (pcm && v.queue.front().data != 0) {
+                            const uint64_t idx = static_cast<uint64_t>(v.cursor);
+                            const uint32_t ch = std::max(1u, v.channels);
+                            const uint8_t* base = reinterpret_cast<const uint8_t*>(b.data) + idx * v.block_align;
+                            float f[8] = {};
+                            for (uint32_t k = 0; k < std::min(ch, 8u); ++k) {
+                                if (v.format_tag == 3) { float x; std::memcpy(&x, base + k * 4, 4); f[k] = x; }
+                                else { int16_t x; std::memcpy(&x, base + k * 2, 2); f[k] = x / 32768.0f; }
+                            }
+                            float l, r;
+                            if (ch == 1) l = r = f[0];
+                            else if (ch >= 6) { l = f[0] + 0.7071f * f[2] + 0.7071f * f[4]; r = f[1] + 0.7071f * f[2] + 0.7071f * f[5]; }
+                            else { l = f[0]; r = f[1]; }
+                            mix[out * 2] += l * v.volume;
+                            mix[out * 2 + 1] += r * v.volume;
+                        }
+                        ++out;
+                        v.cursor += step;
+                        v.samples_played += static_cast<uint64_t>(step);
+                        if (v.cursor >= total) finished = true;
                     }
-                    if (!flushed && b.played < length - 1e-9) break;
-                    if (!flushed && b.loop_count > 0) {
+                    if (!finished) break;           // this buffer needs more output frames than this pass has
+                    if (!b.flushed && b.loop_count > 0) {
                         if (b.loop_count != 255) --b.loop_count;
-                        b.played = 0;
+                        v.cursor = std::max(0.0, v.cursor - total);
                         if (v.callback) due.push_back({v.callback, 5, v.pointer, b.context});   // OnLoopEnd
                         continue;
                     }
@@ -279,10 +318,19 @@ void Register(winrt::Runtime& rt) {
                         due.push_back({v.callback, 4, v.pointer, b.context});                    // OnBufferEnd
                         if (b.flags & 0x40) due.push_back({v.callback, 2, v.pointer, 0});        // END_OF_STREAM -> OnStreamEnd
                     }
+                    v.cursor = std::max(0.0, v.cursor - total);
+                    if (b.flushed) v.cursor = 0;
                     v.queue.pop_front();
                 }
             }
         }
+        {
+            static float peak = 0;
+            static auto since = std::chrono::steady_clock::now();
+            for (float x : mix) peak = std::max(peak, std::fabs(x));
+            if (std::getenv("UTSURO_AUDIOLOG") && now - since > std::chrono::seconds(1)) { UT_INFO("xaudio2: peak %.3f", peak); peak = 0; since = now; }
+        }
+        if (out_frames != 0) { static bool up = audio::Init(); (void)up; audio::Write(mix.data(), out_frames); }
         static int logged = 0;
         if (logged < 5) UT_INFO("xaudio2: pump pass %d, %zu callbacks, rsp %#llx", logged++, due.size(), (unsigned long long)c.args.rsp);
         if (due.empty()) return 0;
