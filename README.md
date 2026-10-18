@@ -5,7 +5,8 @@ hardware: it runs the console's own Windows-derived userland (ntdll, kernelx, co
 as x86-64 under FEXCore and supplies what the hardware and the system partitions would have supplied.
 
 **Status:** Minecraft: Xbox One Edition (1.2.0.0) boots, renders its menus and the world through Metal,
-takes controller / keyboard / mouse input, plays sound, and can be played.
+takes controller / keyboard / mouse input, plays sound, and can be played. Worlds and options are saved
+and loaded again (see Saves).
 
 ## What is where
 
@@ -41,6 +42,11 @@ build/utsuro-run games/mc-1.2.0.0
 Controls (keyboard): `WASD` left stick, `IJKL` right stick (or the mouse after a click; `Esc` releases it),
 arrows D-pad, `Return`/`Space` A, `Backspace`/`Esc` B, `X`, `Y`, `Q`/`E` shoulders, `Z`/`V` triggers, `Tab` View, `P` Menu.
 A game controller works too.
+
+## Saves
+
+Connected storage (the console's save data) is kept on disk, one directory per container with one file per
+blob, below `~/Library/Application Support/Utsuro/saves` (override with `UTSURO_SAVES=dir`).
 
 ## Debugging
 
