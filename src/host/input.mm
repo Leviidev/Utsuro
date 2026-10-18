@@ -1,5 +1,7 @@
 #include "host/input.h"
 
+#include "gpu/renderer.h"
+
 #import <Foundation/Foundation.h>
 #import <GameController/GameController.h>
 
@@ -10,6 +12,9 @@
 #include <cstring>
 #include <mutex>
 #include <sstream>
+#include <thread>
+#include <sys/stat.h>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -71,6 +76,35 @@ void ApplyScript(PadState& s) {
 
 } // namespace
 
+void RunCommand(const std::string& line);
+
+void StartControl(const char* path) {
+    if (path == nullptr || *path == 0) return;
+    const std::string file = path;
+    std::thread([file] {
+        pthread_setname_np("utsuro-control");
+        off_t offset = 0;
+        {
+            struct stat st;
+            if (stat(file.c_str(), &st) == 0) offset = st.st_size;   // only commands appended from now on
+        }
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(40));
+            struct stat st;
+            if (stat(file.c_str(), &st) != 0 || st.st_size <= offset) continue;
+            FILE* f = std::fopen(file.c_str(), "r");
+            if (!f) continue;
+            std::fseek(f, offset, SEEK_SET);
+            char line[512];
+            while (std::fgets(line, sizeof line, f)) {
+                offset = std::ftell(f);
+                RunCommand(line);
+            }
+            std::fclose(f);
+        }
+    }).detach();
+}
+
 void KeyEvent(uint16_t key_code, bool down) {
     std::scoped_lock lock {g_mutex};
     if (key_code < 256) g_keys[key_code] = down;
@@ -83,6 +117,64 @@ void MouseMoved(float dx, float dy) {
 
 void MouseButton(int button, bool down) {
     if (button >= 0 && button < 3) g_mouse_buttons[button] = down;
+}
+
+// ---- the control file ----------------------------------------------------------------------
+struct Override { std::string name; std::chrono::steady_clock::time_point until; float value; };
+std::mutex g_override_mutex;
+std::vector<Override> g_overrides;
+
+void ApplyOverrides(PadState& s) {
+    std::scoped_lock lock {g_override_mutex};
+    const auto now = std::chrono::steady_clock::now();
+    g_overrides.erase(std::remove_if(g_overrides.begin(), g_overrides.end(), [&](const Override& o) { return o.until <= now; }), g_overrides.end());
+    for (const Override& e : g_overrides) {
+        const std::string& n = e.name;
+        if (n == "A") s.buttons |= kA; else if (n == "B") s.buttons |= kB; else if (n == "X") s.buttons |= kX; else if (n == "Y") s.buttons |= kY;
+        else if (n == "START") s.buttons |= kMenu; else if (n == "BACK") s.buttons |= kView;
+        else if (n == "LB") s.buttons |= kLeftShoulder; else if (n == "RB") s.buttons |= kRightShoulder;
+        else if (n == "UP") s.buttons |= kDPadUp; else if (n == "DOWN") s.buttons |= kDPadDown;
+        else if (n == "LEFT") s.buttons |= kDPadLeft; else if (n == "RIGHT") s.buttons |= kDPadRight;
+        else if (n == "LS") s.buttons |= kLeftThumb; else if (n == "RS") s.buttons |= kRightThumb;
+        else if (n == "LX") s.left_x = e.value; else if (n == "LY") s.left_y = e.value;
+        else if (n == "RX") s.right_x = e.value; else if (n == "RY") s.right_y = e.value;
+        else if (n == "LT") s.left_trigger = e.value; else if (n == "RT") s.right_trigger = e.value;
+    }
+}
+
+void RunCommand(const std::string& line) {
+    std::stringstream ss(line);
+    std::string cmd;
+    ss >> cmd;
+    const auto now = std::chrono::steady_clock::now();
+    if (cmd == "press" || cmd == "stick") {
+        std::string name;
+        ss >> name;
+        float value = 1.f;
+        double ms = 90;
+        if (cmd == "stick") ss >> value;
+        ss >> ms;
+        std::scoped_lock lock {g_override_mutex};
+        g_overrides.push_back({name, now + std::chrono::microseconds((int64_t)(ms * 1000)), value});
+    } else if (cmd == "hold") {
+        std::string name;
+        ss >> name;
+        std::scoped_lock lock {g_override_mutex};
+        g_overrides.push_back({name, now + std::chrono::hours(1), 1.f});
+    } else if (cmd == "release") {
+        std::string name;
+        ss >> name;
+        std::scoped_lock lock {g_override_mutex};
+        g_overrides.erase(std::remove_if(g_overrides.begin(), g_overrides.end(), [&](const Override& o) { return o.name == name; }), g_overrides.end());
+    } else if (cmd == "snap") {
+        std::string path;
+        ss >> path;
+        if (!path.empty()) gpu::RequestSnapshot(path);
+    } else if (cmd == "trace") {
+        gpu::RequestTrace();
+    } else if (cmd == "quit") {
+        std::_Exit(0);
+    }
 }
 
 PadState Poll() {
@@ -139,6 +231,7 @@ PadState Poll() {
         }
     }
     ApplyScript(s);
+    ApplyOverrides(s);
     return s;
 }
 

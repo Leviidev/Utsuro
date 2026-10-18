@@ -46,11 +46,14 @@ struct Texture {
 
 struct Shader {
     ShaderStage stage {ShaderStage::Unknown};
-    TranslatedShader translated;
+    TranslatedShader translated;          ///< the default (all-float inputs) translation
+    std::vector<uint8_t> dxbc;
     id<MTLFunction> function {nil};
     id<MTLLibrary> library {nil};
     bool failed {false};
-    int id {0};
+    int serial {0};
+    /// Vertex shaders are specialised by how their layout feeds integer inputs.
+    std::map<std::string, id<MTLFunction>> variants;
 };
 
 struct InputLayout {
@@ -97,6 +100,8 @@ struct Globals {
 
     uint64_t frame_count {0};
     int trace_draws {0};
+    uint64_t trace_frame {0};
+    std::string snapshot_path;
     std::string debug;   // UTSURO_GPUDEBUG: nodepth, nocull, noblend
     struct Stats { uint64_t draws {0}, no_vs {0}, bad_vs {0}, bad_ps {0}, no_pass {0}, no_pso {0}, bad_topology {0}, clears {0}, no_ib {0}; } stats;
     std::chrono::steady_clock::time_point last_present;
@@ -478,13 +483,35 @@ bool CompileShader(Shader& s) {
     }
     s.function = [s.library newFunctionWithName:@"main0"];
     static int counter = 0;
-    s.id = ++counter;
+    s.serial = ++counter;
     if (const char* dir = std::getenv("UTSURO_DUMPMSL")) {
         char path[512];
-        std::snprintf(path, sizeof path, "%s/shader_%03d_%s.metal", dir, s.id, s.stage == ShaderStage::Vertex ? "vs" : "ps");
+        std::snprintf(path, sizeof path, "%s/shader_%03d_%s.metal", dir, s.serial, s.stage == ShaderStage::Vertex ? "vs" : "ps");
         if (FILE* f = std::fopen(path, "w")) { std::fputs(s.translated.msl.c_str(), f); std::fclose(f); }
     }
     return s.function != nil;
+}
+
+/// The vertex function for `classes` (one byte per input register; see TranslateDxbc).
+id<MTLFunction> VariantFor(Shader& s, const std::vector<uint8_t>& classes) {
+    bool any = false;
+    for (uint8_t c : classes) any |= c != 0;
+    if (!any) return CompileShader(s) ? s.function : nil;
+    std::string key(classes.begin(), classes.end());
+    auto it = s.variants.find(key);
+    if (it != s.variants.end()) return it->second;
+    TranslatedShader t = TranslateDxbc(s.dxbc.data(), s.dxbc.size(), &classes);
+    id<MTLFunction> fn = nil;
+    if (t.ok) {
+        NSError* err = nil;
+        MTLCompileOptions* opts = [MTLCompileOptions new];
+        opts.fastMathEnabled = NO;
+        id<MTLLibrary> lib = [g->device newLibraryWithSource:[NSString stringWithUTF8String:t.msl.c_str()] options:opts error:&err];
+        if (lib == nil) UT_ERROR("gpu: Metal rejected a shader variant: %s", [[err localizedDescription] UTF8String]);
+        else fn = [lib newFunctionWithName:@"main0"];
+    }
+    s.variants[key] = fn;
+    return fn;
 }
 
 struct PassTargets {
@@ -541,6 +568,27 @@ id<MTLRenderPipelineState> PipelineFor(const DrawState& st, Shader& vs, Shader* 
     std::string key;
     key.reserve(512);
     auto add = [&](const void* p, size_t n) { key.append(static_cast<const char*>(p), n); };
+    // How the layout feeds integer inputs decides which translation of the vertex shader to use.
+    std::vector<uint8_t> classes;
+    if (layout != nullptr) {
+        for (const SignatureElement& in : vs.translated.reflection.inputs) {
+            if (in.system_value != 0) continue;
+            for (const InputElement& e : layout->elements) {
+                std::string name = e.semantic;
+                for (auto& c : name) c = (char)std::toupper((unsigned char)c);
+                if (name != in.semantic || e.semantic_index != in.index) continue;
+                uint8_t cls = 0;
+                switch (e.format) {
+                case 3: case 7: case 12: case 17: case 25: case 30: case 36: case 42: case 50: case 57: case 62: cls = 1; break;
+                case 4: case 8: case 14: case 18: case 32: case 38: case 43: case 52: case 59: case 64: cls = 2; break;
+                }
+                if (classes.size() <= in.reg) classes.resize(in.reg + 1, 0);
+                classes[in.reg] = cls;
+                break;
+            }
+        }
+    }
+    add(classes.data(), classes.size());
     const void* vsp = &vs; add(&vsp, 8);
     const void* psp = ps; add(&psp, 8);
     const void* lp = layout; add(&lp, 8);
@@ -561,7 +609,8 @@ id<MTLRenderPipelineState> PipelineFor(const DrawState& st, Shader& vs, Shader* 
     if (it != g->pipelines.end()) return it->second;
 
     MTLRenderPipelineDescriptor* d = [MTLRenderPipelineDescriptor new];
-    d.vertexFunction = vs.function;
+    d.vertexFunction = VariantFor(vs, classes);
+    if (d.vertexFunction == nil) return nil;
     d.fragmentFunction = ps ? ps->function : nil;
     d.rasterSampleCount = samples;
     // Vertex layout.
@@ -699,6 +748,7 @@ bool Init() {
         g->last_present = std::chrono::steady_clock::now();
         g->dump_dir = std::getenv("UTSURO_DUMPFRAMES");
         if (const char* d = std::getenv("UTSURO_GPUDEBUG")) g->debug = d;
+        if (const char* d = std::getenv("UTSURO_TRACEFRAME")) g->trace_frame = std::strtoull(d, nullptr, 10);
         if (const char* e = std::getenv("UTSURO_DUMPEVERY")) g->dump_every = (uint32_t)std::max(1, std::atoi(e));
     }
     g->ready = true;
@@ -853,6 +903,7 @@ void GenerateMips(Texture& t) {
 std::shared_ptr<Shader> CreateShader(const uint8_t* dxbc, size_t size, ShaderStage stage) {
     auto s = std::make_shared<Shader>();
     s->stage = stage;
+    s->dxbc.assign(dxbc, dxbc + size);
     s->translated = TranslateDxbc(dxbc, size);
     if (!s->translated.ok) {
         UT_ERROR("gpu: cannot translate a shader: %s", s->translated.error.c_str());
@@ -968,15 +1019,15 @@ void Draw(const DrawState& st, const DrawArgs& args) {
             [e setVertexBuffer:st.vb[i].buffer->mtl offset:st.vb[i].buffer->offset + st.vb[i].offset atIndex:15 + i];
         }
 
-        if (g->frame_count == 120 && g->trace_draws < 40) {
+        if (g->frame_count == g->trace_frame && g->trace_draws < 400) {
             ++g->trace_draws;
             id<MTLTexture> rt0 = st.rtv[0] && st.rtv[0]->texture ? ViewOf(*st.rtv[0]->texture, st.rtv[0]->desc, true) : nil;
             UT_INFO("gpu: draw %s count %u inst %u topo %u vs %p(#%d) ps %p(#%d) layout %p rt0 %ux%u fmt %lu depth %d vp %.0fx%.0f+%.0f,%.0f cb0 %p tex0 %p blend %zu", args.indexed ? "indexed" : "plain", args.count, args.instances, st.topology,
-                    (void*)st.vs.get(), st.vs->id, (void*)st.ps.get(), st.ps ? st.ps->id : 0, (void*)st.layout.get(), rt0 ? (unsigned)rt0.width : 0, rt0 ? (unsigned)rt0.height : 0, rt0 ? (unsigned long)rt0.pixelFormat : 0, has_depth,
+                    (void*)st.vs.get(), st.vs->serial, (void*)st.ps.get(), st.ps ? st.ps->serial : 0, (void*)st.layout.get(), rt0 ? (unsigned)rt0.width : 0, rt0 ? (unsigned)rt0.height : 0, rt0 ? (unsigned long)rt0.pixelFormat : 0, has_depth,
                     st.num_viewports ? st.viewports[0].w : 0.f, st.num_viewports ? st.viewports[0].h : 0.f, st.num_viewports ? st.viewports[0].x : 0.f, st.num_viewports ? st.viewports[0].y : 0.f,
                     (void*)st.cb[0][0].buffer.get(), (void*)st.srv[1][0].get(), st.blend.bytes.size());
         }
-        if (g->frame_count == 120 && g->trace_draws <= 6 && g->trace_draws > 0 && std::getenv("UTSURO_TRACEPIXELS")) {
+        if (g->frame_count == g->trace_frame && g->trace_draws <= 400 && g->trace_draws > 0 && std::getenv("UTSURO_TRACEPIXELS")) {
             for (int stage = 0; stage < 2; ++stage) {
                 const BufferBinding& b = st.cb[stage][0];
                 if (!b.buffer) continue;
@@ -1032,7 +1083,7 @@ void Draw(const DrawState& st, const DrawArgs& args) {
         } else {
             [e drawPrimitives:prim vertexStart:args.start vertexCount:args.count instanceCount:args.instances baseInstance:args.start_instance];
         }
-        if (g->frame_count == 120 && g->trace_draws <= 40 && g->trace_draws > 0 && std::getenv("UTSURO_TRACEPIXELS")) {
+        if (false) {
             // Debug: how much of the render target is lit after this draw?
             id<MTLTexture> rt0 = st.rtv[0] && st.rtv[0]->texture ? ViewOf(*st.rtv[0]->texture, st.rtv[0]->desc, true) : nil;
             EndEncoder();
@@ -1180,7 +1231,8 @@ void Present(const std::shared_ptr<Texture>& back, uint32_t sync_interval) {
                 [Command() presentDrawable:drawable];
             }
         }
-        const bool dump = g->dump_dir != nullptr && back && back->mtl != nil && (index % g->dump_every) == 0;
+        const bool snap = !g->snapshot_path.empty() && back && back->mtl != nil;
+        const bool dump = snap || (g->dump_dir != nullptr && back && back->mtl != nil && (index % g->dump_every) == 0);
         id<MTLCommandBuffer> cmd = Command();
         // Frames in flight: wait for the oldest, then recycle its ring slot.
         dispatch_semaphore_t sem = g->frames_in_flight;
@@ -1190,7 +1242,8 @@ void Present(const std::shared_ptr<Texture>& back, uint32_t sync_interval) {
         if (dump) {
             [cmd waitUntilCompleted];
             char path[512];
-            std::snprintf(path, sizeof path, "%s/frame_%06llu.png", g->dump_dir, (unsigned long long)index);
+            if (snap) { std::snprintf(path, sizeof path, "%s", g->snapshot_path.c_str()); g->snapshot_path.clear(); }
+            else std::snprintf(path, sizeof path, "%s/frame_%06llu.png", g->dump_dir, (unsigned long long)index);
             SavePng(*back, path);
         }
         dispatch_semaphore_wait(g->frames_in_flight, DISPATCH_TIME_FOREVER);
@@ -1205,6 +1258,19 @@ void Present(const std::shared_ptr<Texture>& back, uint32_t sync_interval) {
         if (due > now) std::this_thread::sleep_for(due - now);
         g->last_present = std::max(due, now - period);
     }
+}
+
+void RequestSnapshot(const std::string& path) {
+    if (g == nullptr) return;
+    std::scoped_lock lock {g->mutex};
+    g->snapshot_path = path;
+}
+
+void RequestTrace() {
+    if (g == nullptr) return;
+    std::scoped_lock lock {g->mutex};
+    g->trace_frame = g->frame_count + 3;
+    g->trace_draws = 0;
 }
 
 void Flush() {

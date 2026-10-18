@@ -22,6 +22,9 @@ struct PadState {
 /// The current merged state (callable from any thread).
 PadState Poll();
 
+/// Starts the control thread: UTSURO_CTL names a file the agent appends commands to (press A 100, snap /tmp/x.png, ...).
+void StartControl(const char* path);
+
 /// Window side: a key went down or up (macOS virtual key code) / mouse motion in points.
 void KeyEvent(uint16_t key_code, bool down);
 void MouseMoved(float dx, float dy);

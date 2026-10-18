@@ -137,6 +137,10 @@ void CopyBuffer(Buffer& dst, uint32_t dst_offset, Buffer& src, uint32_t src_offs
 /// Ends the frame: shows `back_buffer` in the window and waits for the display's pace.
 void Present(const std::shared_ptr<Texture>& back_buffer, uint32_t sync_interval);
 void Flush();
+/// The next presented frame is written to `path` as a PNG (debugging).
+void RequestSnapshot(const std::string& path);
+/// Logs every draw of a frame a moment from now (needs UTSURO_TRACEPIXELS for the data dump).
+void RequestTrace();
 
 /// Writes the texture's top mip to a PNG (debugging).
 bool SavePng(Texture& texture, const std::string& path);

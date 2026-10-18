@@ -4,6 +4,7 @@
 #include "engine/log.h"
 #include "nt/kernel.h"
 #include "gpu/dxbc.h"
+#include "host/input.h"
 #include "host/window.h"
 
 #include <cstdio>
@@ -69,6 +70,7 @@ int main(int argc, char** argv) {
         }
         return kernel.Run();
     };
+    input::StartControl(std::getenv("UTSURO_CTL"));
     if (std::getenv("UTSURO_HEADLESS") != nullptr) return run();
     return host::RunWindowed(run);
 }

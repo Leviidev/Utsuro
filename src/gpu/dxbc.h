@@ -41,6 +41,8 @@ struct TranslatedShader {
 };
 
 /// Translates a DXBC container (or a bare shader token stream) to MSL.
-TranslatedShader TranslateDxbc(const uint8_t* data, size_t size);
+/// `input_classes[reg]` tells how the vertex layout supplies each vertex-shader input: 0 float
+/// (the default), 1 unsigned integer, 2 signed integer. Integer inputs keep their bits in the register.
+TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vector<uint8_t>* input_classes = nullptr);
 
 } // namespace utsuro::gpu

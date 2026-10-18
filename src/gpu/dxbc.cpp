@@ -198,8 +198,7 @@ struct Translator {
             } else {
                 std::snprintf(buf, sizeof buf, "as_type<float4>(uint4(0x%xu, 0x%xu, 0x%xu, 0x%xu))", o.imm[0], o.imm[1], o.imm[2], o.imm[3]);
                 e = buf;
-                // swizzle below
-                e = "(" + e + ")." + Swizzle(o);
+                // An immediate vector has no swizzle: its four values are used in order.
             }
         } else if (o.type == T_OUTPUT_DEPTH) {
             e = "float4(oDepth)";
@@ -345,7 +344,8 @@ std::vector<SignatureElement> ParseSignature(const Chunk& c) {
 
 } // namespace
 
-TranslatedShader TranslateDxbc(const uint8_t* data, size_t size) {
+TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vector<uint8_t>* input_classes) {
+    auto input_class = [&](uint32_t reg) -> int { return input_classes != nullptr && reg < input_classes->size() ? (*input_classes)[reg] : 0; };
     TranslatedShader result;
     bool container = false;
     const auto chunks = ParseContainer(data, size, &container);
@@ -698,7 +698,7 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size) {
         src << "struct VSIn {\n";
         for (uint32_t reg : t.input_regs) {
             if (t.input_sgv.count(reg) && (t.input_sgv[reg] == 6 || t.input_sgv[reg] == 8)) continue;
-            src << "    float4 a" << reg << " [[attribute(" << reg << ")]];\n";
+            src << "    " << (input_class(reg) == 1 ? "uint4" : input_class(reg) == 2 ? "int4" : "float4") << " a" << reg << " [[attribute(" << reg << ")]];\n";
         }
         src << "};\n";
         src << "struct VSOut {\n";
@@ -750,6 +750,7 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size) {
         if (vs) {
             if (sv == 6) src << "    v" << reg << ".x = as_type<float>(vertex_id);\n";
             else if (sv == 8) src << "    v" << reg << ".x = as_type<float>(instance_id);\n";
+            else if (input_class(reg) != 0) src << "    v" << reg << " = as_type<float4>(in.a" << reg << ");\n";
             else src << "    v" << reg << " = in.a" << reg << ";\n";
         } else {
             if (sv == 1) src << "    v" << reg << " = in.position;\n";
