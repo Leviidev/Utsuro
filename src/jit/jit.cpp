@@ -34,11 +34,13 @@ size_t RegionBytes() {
     return size_t {256} << 20;
 }
 
-bool Prewarm() {
+bool Prewarm(bool self_only) {
 #if TARGET_OS_IPHONE
-    husk_ios_jit_install_trap_handler();
-    return husk_ios_jit_prewarm(RegionBytes());
+    // The app installs the trap guard (husk_ios_jit_install_trap_handler) before anything can reach a brk; doing it twice would
+    // make the guard its own predecessor.
+    return self_only ? husk_ios_jit_prewarm_self(RegionBytes()) : husk_ios_jit_prewarm(RegionBytes());
 #else
+    (void)self_only;
     return true;
 #endif
 }

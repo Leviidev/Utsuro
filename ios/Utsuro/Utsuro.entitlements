@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Lets StikDebug (or the built-in StikJIT helper) attach to Utsuro as a debugger. Without that there is no JIT. -->
+	<key>get-task-allow</key>
+	<true/>
+	<!-- Honoured on TrollStore and jailbroken devices; harmless elsewhere. -->
+	<key>dynamic-codesigning</key>
+	<true/>
+	<!-- Minecraft's 128 GB guest address space plus its working set. -->
+	<key>com.apple.developer.kernel.increased-memory-limit</key>
+	<true/>
+	<key>com.apple.developer.kernel.extended-virtual-addressing</key>
+	<true/>
+</dict>
+</plist>

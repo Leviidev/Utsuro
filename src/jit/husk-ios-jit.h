@@ -85,6 +85,10 @@ HuskDualMapping husk_ios_jit_allocate(size_t bytes);
  */
 HUSK_EXPORT bool husk_ios_jit_prewarm(size_t bytes);
 
+/* Prewarm without trapping: the region is made by the process itself (MAP_JIT, or plain memory where a debugger or jailbreak
+ * allows it). Before iOS 26 only; false on a TXM device. */
+HUSK_EXPORT bool husk_ios_jit_prewarm_self(size_t bytes);
+
 /* The region prewarm obtained (NULL if none), for the arena to take over. */
 HUSK_EXPORT HuskDualMapping *husk_ios_jit_get_mapping(void);
 

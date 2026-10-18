@@ -22,6 +22,9 @@ struct PadState {
 /// The current merged state (callable from any thread).
 PadState Poll();
 
+/// The on-screen controller (iOS): merged into Poll() with whatever else is pressed. Callable from any thread.
+void SetTouchPad(const PadState& state);
+
 /// Starts the control thread: UTSURO_CTL names a file the agent appends commands to (press A 100, snap /tmp/x.png, ...).
 void StartControl(const char* path);
 

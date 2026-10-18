@@ -3,6 +3,7 @@
 #include "engine/log.h"
 
 #import <AVFoundation/AVFoundation.h>
+#include <TargetConditionals.h>
 
 #include <algorithm>
 #include <atomic>
@@ -33,6 +34,13 @@ bool Init() {
     if (g_started) return g_engine != nil;
     g_started = true;
     @autoreleasepool {
+#if TARGET_OS_IPHONE
+        // iOS routes nothing until the app has a session: playback, so the silent switch does not mute a game.
+        NSError* session_error = nil;
+        AVAudioSession* session = [AVAudioSession sharedInstance];
+        if (![session setCategory:AVAudioSessionCategoryPlayback error:&session_error] || ![session setActive:YES error:&session_error])
+            UT_WARN("audio: cannot activate the audio session: %s", [[session_error localizedDescription] UTF8String]);
+#endif
         g_engine = [[AVAudioEngine alloc] init];
         AVAudioFormat* format = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32 sampleRate:kRate channels:2 interleaved:NO];
         AVAudioSourceNode* node = [[AVAudioSourceNode alloc] initWithFormat:format renderBlock:^OSStatus(BOOL* silence, const AudioTimeStamp*, AVAudioFrameCount frames, AudioBufferList* list) {

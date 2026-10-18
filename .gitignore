@@ -4,3 +4,4 @@ tools/venv/
 build/
 *.pyc
 .DS_Store
+ios/Utsuro.xcodeproj/

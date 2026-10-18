@@ -17,7 +17,8 @@ size_t RegionBytes();
 
 /// Claims the region at app launch while a debugger is still attached (iOS), and holds it. Safe to call on
 /// the Mac, where it does nothing. Returns false if no executable memory could be had.
-bool Prewarm();
+/// `self_only` makes the region without any trap to a debugger (before iOS 26, where a process marked as debugged may map its own).
+bool Prewarm(bool self_only = false);
 
 /// Opens the arena on the held region and hands it to FEXCore. Call before the first FexEngine::Create.
 bool Install(std::string& error);

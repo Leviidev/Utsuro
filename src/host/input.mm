@@ -26,6 +26,8 @@ std::mutex g_mutex;
 bool g_keys[256] {};
 std::atomic<float> g_mouse_dx {0}, g_mouse_dy {0};
 std::atomic<bool> g_mouse_buttons[3] {};
+std::mutex g_touch_mutex;
+PadState g_touch;
 
 // macOS virtual key codes.
 enum Key : uint16_t {
@@ -103,6 +105,11 @@ void StartControl(const char* path) {
             std::fclose(f);
         }
     }).detach();
+}
+
+void SetTouchPad(const PadState& state) {
+    std::scoped_lock lock {g_touch_mutex};
+    g_touch = state;
 }
 
 void KeyEvent(uint16_t key_code, bool down) {
@@ -229,6 +236,14 @@ PadState Poll() {
             s.left_trigger = std::max(s.left_trigger, p.leftTrigger.value);
             s.right_trigger = std::max(s.right_trigger, p.rightTrigger.value);
         }
+    }
+    {
+        std::scoped_lock lock {g_touch_mutex};
+        s.buttons |= g_touch.buttons;
+        if (g_touch.left_x != 0 || g_touch.left_y != 0) { s.left_x = g_touch.left_x; s.left_y = g_touch.left_y; }
+        if (g_touch.right_x != 0 || g_touch.right_y != 0) { s.right_x = g_touch.right_x; s.right_y = g_touch.right_y; }
+        s.left_trigger = std::max(s.left_trigger, g_touch.left_trigger);
+        s.right_trigger = std::max(s.right_trigger, g_touch.right_trigger);
     }
     ApplyScript(s);
     ApplyOverrides(s);

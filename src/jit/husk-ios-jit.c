@@ -428,6 +428,19 @@ HUSK_EXPORT bool husk_ios_jit_prewarm(size_t bytes)
     return husk_prewarmed.rw_addr != NULL;
 }
 
+/* The same, without ever trapping: for a process that is debugged but whose debugger services nothing (TrollStore's enable-jit
+ * attaches for a moment and answers no brk, and a brk in that window stops the process for good). Before iOS 26 only. */
+HUSK_EXPORT bool husk_ios_jit_prewarm_self(size_t bytes)
+{
+    if (husk_prewarm_done) {
+        return husk_prewarmed.rw_addr != NULL;
+    }
+    husk_prewarm_done = true;
+    husk_prewarmed = husk_self_dual_mapping(bytes);
+    fprintf(stderr, "[husk-jit] self-granted prewarm %s: %zu bytes\n", husk_prewarmed.rw_addr ? "OK" : "FAILED", bytes);
+    return husk_prewarmed.rw_addr != NULL;
+}
+
 /* The held region, for the native runtime (translation-layer/husk-tl-load.c looks this up by name). */
 HUSK_EXPORT HuskDualMapping *husk_ios_jit_get_mapping(void)
 {
@@ -707,6 +720,7 @@ HuskDualMapping husk_ios_jit_allocate(size_t bytes)
     return husk_ios_jit_allocate_real(bytes);
 }
 bool husk_ios_jit_prewarm(size_t bytes) { (void)bytes; return false; }
+bool husk_ios_jit_prewarm_self(size_t bytes) { (void)bytes; return false; }
 bool husk_ios_jit_reserve_bottom(size_t end) { (void)end; return true; }
 void husk_ios_jit_release(HuskDualMapping *m) { (void)m; }
 void husk_ios_jit_detach(void) {}

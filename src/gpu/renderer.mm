@@ -14,6 +14,7 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#include <TargetConditionals.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -822,6 +823,10 @@ std::shared_ptr<Texture> CreateTexture(const TextureDesc& desc) {
         d.textureType = d.sampleCount > 1 ? MTLTextureType2DMultisample : MTLTextureType2D;
     }
     if (d.sampleCount > 1) d.mipmapLevelCount = 1;
+#if TARGET_OS_IPHONE
+    // A multisample texture cannot be shared storage on an Apple GPU in a phone; nothing reads one from the CPU (a resolve target does).
+    if (d.sampleCount > 1) d.storageMode = MTLStorageModePrivate;
+#endif
     t->mtl = [g->device newTextureWithDescriptor:d];
     if (t->mtl == nil) UT_ERROR("gpu: cannot create a %ux%u texture of format %u", desc.width, desc.height, desc.format);
     return t;

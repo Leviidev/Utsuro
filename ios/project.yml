@@ -1,0 +1,142 @@
+name: Utsuro
+options:
+  bundleIdPrefix: com.utsuro
+  deploymentTarget:
+    # What the runtime and FEXCore are built for (scripts/build-ios-core.sh, scripts/build-fex.sh).
+    iOS: "17.4"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    # The app and its JIT helper extension follow this together: the helper's identifier has to sit under the app's.
+    UTSURO_BUNDLE_IDENTIFIER: com.utsuro.app
+    ARCHS: arm64
+    ONLY_ACTIVE_ARCH: YES
+    ENABLE_BITCODE: NO
+    SWIFT_VERSION: "5.0"
+    SWIFT_OPTIMIZATION_LEVEL: "-O"
+
+targets:
+  Utsuro:
+    type: application
+    platform: iOS
+    sources:
+      - path: Utsuro
+        excludes:
+          - "Resources/**"
+      # NOT `type: folder`: Bundle.path(forResource:ofType:) does not search subdirectories.
+      - path: Utsuro/Resources
+        buildPhase: resources
+      # The KUSER_SHARED_DATA patch tables the loader reads (UTSURO_DATA).
+      - path: ../data
+        type: folder
+        buildPhase: resources
+      # The messages the app and its JIT helper exchange.
+      - path: UtsuroJITHelper/UtsuroJITMessages.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(UTSURO_BUNDLE_IDENTIFIER)
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_STYLE: Automatic
+        INFOPLIST_FILE: Utsuro/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Utsuro/Utsuro.entitlements
+        SWIFT_OBJC_BRIDGING_HEADER: Utsuro/UtsuroBridge.h
+        TARGETED_DEVICE_FAMILY: "1,2"
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/Frameworks"
+        LIBRARY_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(SRCROOT)/../build/ios"
+          - "$(SRCROOT)/../build/fex/ios-libs"
+          - "$(SRCROOT)/Frameworks"
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          - "-lutsuro-core"
+          - "-lFEXCore"
+          - "-lFEXCore_Base"
+          - "-lCommon"
+          - "-lCommonTools"
+          - "-lJemallocLibs"
+          - "-lcephes_128bit"
+          - "-lcpp-optparse"
+          - "-lfmt"
+          - "-lsoftfloat_3e"
+          - "-ltiny-json"
+          - "-lxxhash"
+          - "-lutsuro_rppairing"
+          - "-lc++"
+          - "-framework"
+          - "Metal"
+          - "-framework"
+          - "QuartzCore"
+          - "-framework"
+          - "CoreGraphics"
+          - "-framework"
+          - "ImageIO"
+          - "-framework"
+          - "GameController"
+          - "-framework"
+          - "AVFoundation"
+          - "-framework"
+          - "AudioToolbox"
+          - "-framework"
+          - "UniformTypeIdentifiers"
+          - "-framework"
+          - "Security"
+          - "-framework"
+          - "SystemConfiguration"
+          - "-lresolv"
+    dependencies:
+      # Built-in StikJIT's debugger process. Embedded into PlugIns/.
+      - target: UtsuroJITHelper
+    postBuildScripts:
+      - name: Embed StikJIT
+        # The helper links StikJIT; it lives here, in the app's Frameworks, because sideloaders re-sign frameworks there and left one
+        # inside the helper unsigned. Upstream's framework has no Info.plist, and installd refuses an embedded framework without one.
+        script: |
+          set -e
+          SRC="$SRCROOT/Frameworks/StikJIT.xcframework/ios-arm64/StikJIT.framework"
+          DST="$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/StikJIT.framework"
+          rm -rf "$DST"
+          mkdir -p "$(dirname "$DST")"
+          ditto "$SRC" "$DST"
+          rm -rf "$DST/Headers" "$DST/Modules"
+          PLIST="$DST/Info.plist"
+          if [ ! -f "$PLIST" ]; then
+            plutil -create xml1 "$PLIST"
+            plutil -insert CFBundleIdentifier -string "$PRODUCT_BUNDLE_IDENTIFIER.StikJIT" "$PLIST"
+            plutil -insert CFBundleExecutable -string StikJIT "$PLIST"
+            plutil -insert CFBundleName -string StikJIT "$PLIST"
+            plutil -insert CFBundlePackageType -string FMWK "$PLIST"
+            plutil -insert CFBundleInfoDictionaryVersion -string 6.0 "$PLIST"
+            plutil -insert CFBundleShortVersionString -string 1.9.0 "$PLIST"
+            plutil -insert CFBundleVersion -string 1.9.0 "$PLIST"
+            plutil -insert MinimumOSVersion -string 17.4 "$PLIST"
+            plutil -insert CFBundleSupportedPlatforms -array "$PLIST"
+            plutil -insert CFBundleSupportedPlatforms.0 -string iPhoneOS "$PLIST"
+          fi
+        basedOnDependencyAnalysis: false
+
+  # Built-in StikJIT's debugger. A process cannot synchronously debug itself, so StikJIT runs here and attaches to the app.
+  # iOS 26 only: below that the app uses StikDebug, TrollStore or a jailbreak.
+  UtsuroJITHelper:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: UtsuroJITHelper
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(UTSURO_BUNDLE_IDENTIFIER).JITHelper
+        INFOPLIST_FILE: UtsuroJITHelper/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        APPLICATION_EXTENSION_API_ONLY: YES
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1,2"
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/../../Frameworks"
+    dependencies:
+      - framework: Frameworks/StikJIT.xcframework
+        embed: false
