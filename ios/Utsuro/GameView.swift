@@ -41,7 +41,9 @@ final class MetalHostView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        guard !delivered, bounds.width > 0, let layer = layer as? CAMetalLayer else { return }
+        guard bounds.width > 0, let layer = layer as? CAMetalLayer else { return }
+        // The renderer draws 1080p whatever the screen is; a bounds change must not resize the drawable under it.
+        if delivered { layer.drawableSize = CGSize(width: 1920, height: 1080); return }
         delivered = true
         layer.contentsScale = window?.screen.scale ?? UIScreen.main.scale
         layer.contentsGravity = .resizeAspect
@@ -97,6 +99,12 @@ struct GameScreen: View {
         }
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
+        .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
+        .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
+            UtsuroLog.log("memory", "iOS sent a memory warning")
+            husk_ios_jit_log_footprint("memory-warning")
+        }
         .alert("Quit Minecraft?", isPresented: $confirmQuit) {
             Button("Quit", role: .destructive) {
                 // The guest has no clean shutdown from outside; saves are written as the game makes them.
