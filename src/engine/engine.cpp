@@ -27,6 +27,8 @@
 #include <ucontext.h>
 #endif
 
+#include <functional>
+#include <string>
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -477,6 +479,10 @@ struct LiveThread {
 
 std::mutex g_live_threads_mutex;
 std::vector<LiveThread> g_live_threads;
+std::atomic<FEXCore::SignalDelegator*> g_any_delegator {nullptr};
+
+/// Mach port of the host thread running each live guest thread, for the watchdog.
+
 
 /// The same threads again, in a form a signal handler can read.
 ///
@@ -526,6 +532,13 @@ std::condition_variable g_invalidations_done;
 /// ours and owns nothing that has to be put back. A fault anywhere else is a bug in
 /// Fathom itself and stays fatal, because there the process really is in no state to
 /// continue.
+struct FaultRegs {
+    bool valid {false};
+    uint64_t rip {};
+    uint64_t gregs[16] {};
+};
+thread_local FaultRegs g_fault_regs;
+
 bool EndFaultedGuestThread(int signal, siginfo_t* info, void* raw_context) {
 #if defined(__aarch64__) && defined(__APPLE__)
     if (raw_context == nullptr || g_current_guest_thread == nullptr) {
@@ -533,6 +546,17 @@ bool EndFaultedGuestThread(int signal, siginfo_t* info, void* raw_context) {
     }
     auto* context = static_cast<ucontext_t*>(raw_context);
     const auto pc = static_cast<uintptr_t>(arm_thread_state64_get_pc(context->uc_mcontext->__ss));
+    g_fault_regs.valid = false;
+    if (g_active.context != nullptr && g_active.thread != nullptr && g_active.delegator != nullptr &&
+        g_active.context->IsAddressInCodeBuffer(g_active.thread, pc)) {
+        // Guest registers live in host registers inside generated code; read them from the
+        // faulting context rather than from the frame, which is only current at syscalls.
+        const auto& config = g_active.delegator->GetConfig();
+        auto& ss = context->uc_mcontext->__ss;
+        g_fault_regs.rip = g_active.context->RestoreRIPFromHostPC(g_active.thread, pc);
+        for (size_t i = 0; i < config.SRAGPRCount && i < 16; ++i) g_fault_regs.gregs[i] = ss.__x[config.SRAGPRMapping[i]];
+        g_fault_regs.valid = true;
+    }
     bool in_generated_code = g_active.context != nullptr && g_active.thread != nullptr &&
                              g_active.context->IsAddressInCodeBuffer(g_active.thread, pc);
     if (!in_generated_code) {
@@ -683,13 +707,13 @@ size_t DescribeGuestState(char* buffer, size_t capacity) {
                                    "r8 ", "r9 ", "r10", "r11", "r12", "r13", "r14", "r15"};
     Appender out {buffer, capacity};
     out.Text("  rip ");
-    out.Hex(state.rip, 16);
-    out.Text("\n");
+    out.Hex(g_fault_regs.valid ? g_fault_regs.rip : state.rip, 16);
+    out.Text(g_fault_regs.valid ? "  (from the faulting host pc)\n" : "  (as of the last syscall)\n");
     for (size_t index = 0; index < 16; ++index) {
         out.Text("  ");
         out.Text(kNames[index]);
         out.Text(" ");
-        out.Hex(state.gregs[index], 16);
+        out.Hex(g_fault_regs.valid ? g_fault_regs.gregs[index] : state.gregs[index], 16);
         out.Text((index % 2 == 1) ? "\n" : "");
     }
 
@@ -1350,6 +1374,50 @@ GuestThread* FexEngine::Current() {
     return g_current_guest_thread;
 }
 
+void DumpGuestThreads(const std::function<std::string(uint64_t)>& describe,
+                      const std::function<void(uint64_t, const uint64_t*)>& with_state) {
+#if defined(__aarch64__) && defined(__APPLE__)
+    std::vector<LiveThread> live;
+    {
+        std::scoped_lock lock {g_live_threads_mutex};
+        live = g_live_threads;
+    }
+    for (const auto& entry : live) {
+        if (entry.port == 0) continue;
+        thread_act_t port = entry.port;
+        if (thread_suspend(port) != KERN_SUCCESS) continue;
+        arm_thread_state64_t ss;
+        mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
+        if (thread_get_state(port, ARM_THREAD_STATE64, reinterpret_cast<thread_state_t>(&ss), &count) == KERN_SUCCESS) {
+            const uintptr_t pc = static_cast<uintptr_t>(arm_thread_state64_get_pc(ss));
+            if (entry.context->IsAddressInCodeBuffer(entry.thread, pc)) {
+                const uint64_t rip = entry.context->RestoreRIPFromHostPC(entry.thread, pc);
+                UT_WARN("watchdog: guest thread %u in JIT code, guest rip %#llx %s (host pc %#llx)", port,
+                        static_cast<unsigned long long>(rip), describe ? describe(rip).c_str() : "", static_cast<unsigned long long>(pc));
+                if (auto* d = g_any_delegator.load()) {
+                    const auto& config = d->GetConfig();
+                    static const char* kNames[] = {"rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+                                                   "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"};
+                    uint64_t regs[16] = {};
+                    for (size_t i = 0; i < config.SRAGPRCount && i < 16; ++i) regs[i] = ss.__x[config.SRAGPRMapping[i]];
+                    if (with_state) with_state(rip, regs);
+                    for (size_t i = 0; i < config.SRAGPRCount && i < 16; i += 4) {
+                        UT_WARN("  %s=%#llx %s=%#llx %s=%#llx %s=%#llx", kNames[i], (unsigned long long)ss.__x[config.SRAGPRMapping[i]],
+                                kNames[i + 1], (unsigned long long)ss.__x[config.SRAGPRMapping[i + 1]], kNames[i + 2],
+                                (unsigned long long)ss.__x[config.SRAGPRMapping[i + 2]], kNames[i + 3],
+                                (unsigned long long)ss.__x[config.SRAGPRMapping[i + 3]]);
+                    }
+                }
+            } else {
+                UT_WARN("watchdog: guest thread %u is in host code, pc %#llx lr %#llx", port, static_cast<unsigned long long>(pc),
+                        static_cast<unsigned long long>(arm_thread_state64_get_lr(ss)));
+            }
+        }
+        thread_resume(port);
+    }
+#endif
+}
+
 void FexEngine::PauseCompilation() {
     impl_->context->GetCodeInvalidationMutex().lock();
 }
@@ -1408,6 +1476,7 @@ std::unique_ptr<FexEngine> FexEngine::Create(GuestAddressSpace& space, const Eng
     }
 
     impl->signals = std::make_unique<UtsuroSignalDelegator>();
+    g_any_delegator.store(impl->signals.get());
     g_avx_layout.store(impl->host_features.SupportsAVX && impl->host_features.SupportsSVE256, std::memory_order_release);
     impl->guest_is_32bit = options.guest_is_32bit;
     impl->handler = std::make_unique<UtsuroSyscallHandler>(space, options.guest_is_32bit);

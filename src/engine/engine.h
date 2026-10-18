@@ -12,6 +12,7 @@
 #pragma once
 
 #include "guest_memory.h"
+#include <functional>
 #include <pthread.h>
 
 #include <cstdint>
@@ -164,6 +165,10 @@ private:
 /// next one is loaded over it -- and FEXCore's block cache is keyed by guest address, so
 /// without this the new program runs the old program's compiled code.
 void InvalidateCompiledCode(uint64_t host_begin, uint64_t host_end);
+
+/// Suspends every guest thread in turn and logs where it is. For hangs.
+void DumpGuestThreads(const std::function<std::string(uint64_t)>& describe = {},
+                      const std::function<void(uint64_t, const uint64_t*)>& with_state = {});
 
 /// Puts invalidation off until every suspended guest thread is running again.
 ///

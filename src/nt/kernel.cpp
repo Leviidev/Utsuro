@@ -1,0 +1,416 @@
+#include "nt/kernel.h"
+
+#include "engine/log.h"
+
+#include <dirent.h>
+#include <fcntl.h>
+#include <mach/mach_time.h>
+#include <pthread.h>
+#include <sys/stat.h>
+#include <sys/sysctl.h>
+#include <sys/time.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <cerrno>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+namespace utsuro::nt {
+
+static uint64_t AlignUpPage(uint64_t v) { return (v + 0xFFF) & ~0xFFFull; }
+
+// ---------------------------------------------------------------------------------------
+// Strings
+// ---------------------------------------------------------------------------------------
+
+std::u16string ReadUnicodeString(const UNICODE_STRING* us) {
+    if (us == nullptr || us->Buffer == 0) return {};
+    return std::u16string(reinterpret_cast<const char16_t*>(us->Buffer), us->Length / 2);
+}
+
+std::string Utf16ToUtf8(const std::u16string& s) {
+    std::string out;
+    for (size_t i = 0; i < s.size(); ++i) {
+        uint32_t c = s[i];
+        if (c >= 0xD800 && c < 0xDC00 && i + 1 < s.size()) {
+            c = 0x10000 + ((c - 0xD800) << 10) + (s[++i] - 0xDC00);
+        }
+        if (c < 0x80) out += static_cast<char>(c);
+        else if (c < 0x800) { out += static_cast<char>(0xC0 | (c >> 6)); out += static_cast<char>(0x80 | (c & 0x3F)); }
+        else if (c < 0x10000) { out += static_cast<char>(0xE0 | (c >> 12)); out += static_cast<char>(0x80 | ((c >> 6) & 0x3F)); out += static_cast<char>(0x80 | (c & 0x3F)); }
+        else { out += static_cast<char>(0xF0 | (c >> 18)); out += static_cast<char>(0x80 | ((c >> 12) & 0x3F)); out += static_cast<char>(0x80 | ((c >> 6) & 0x3F)); out += static_cast<char>(0x80 | (c & 0x3F)); }
+    }
+    return out;
+}
+
+std::u16string Utf8ToUtf16(const std::string& s) {
+    std::u16string out;
+    for (size_t i = 0; i < s.size();) {
+        uint32_t c = static_cast<uint8_t>(s[i]);
+        int extra = c < 0x80 ? 0 : c < 0xE0 ? 1 : c < 0xF0 ? 2 : 3;
+        if (extra == 0) { out += static_cast<char16_t>(c); ++i; continue; }
+        c &= (0x3F >> extra);
+        for (int k = 1; k <= extra && i + static_cast<size_t>(k) < s.size(); ++k) c = (c << 6) | (static_cast<uint8_t>(s[i + static_cast<size_t>(k)]) & 0x3F);
+        i += static_cast<size_t>(extra) + 1;
+        if (c >= 0x10000) { c -= 0x10000; out += static_cast<char16_t>(0xD800 + (c >> 10)); out += static_cast<char16_t>(0xDC00 + (c & 0x3FF)); }
+        else out += static_cast<char16_t>(c);
+    }
+    return out;
+}
+
+FileObject::~FileObject() {
+    if (fd >= 0) ::close(fd);
+    if (delete_on_close && !host_path.empty()) ::unlink(host_path.c_str());
+}
+
+// ---------------------------------------------------------------------------------------
+// Time
+// ---------------------------------------------------------------------------------------
+
+int64_t Kernel::MonotonicNs() {
+    static mach_timebase_info_data_t tb = [] { mach_timebase_info_data_t t; mach_timebase_info(&t); return t; }();
+    return static_cast<int64_t>(mach_absolute_time() * tb.numer / tb.denom);
+}
+
+int64_t Kernel::NtSystemTime() {
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+    constexpr int64_t kEpochDiff = 11644473600ll;  // seconds from 1601 to 1970
+    return (static_cast<int64_t>(tv.tv_sec) + kEpochDiff) * 10000000ll + tv.tv_usec * 10;
+}
+
+uint64_t Kernel::QpcNow() { return static_cast<uint64_t>(MonotonicNs() / 100); }
+
+// ---------------------------------------------------------------------------------------
+// NtThread
+// ---------------------------------------------------------------------------------------
+
+GuestAddressSpace* NtThread::Space() const { return &kernel_.Space(); }
+bool NtThread::StopRequested() const { return kernel_.exiting.load(); }
+
+uint64_t NtThread::Handle(uint64_t number, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5,
+                          uint64_t a6) {
+    // FEXCore's OS_LINUX64 order: rax, rdi, rsi, rdx, r10, r8, r9. Windows: r10, rdx, r8, r9.
+    SyscallArgs args;
+    args.reg[0] = a4;
+    args.reg[1] = a3;
+    args.reg[2] = a5;
+    args.reg[3] = a6;
+    args.rsp = guest ? guest->Rsp() : 0;
+    current_args = &args;
+    current_syscall = number;
+    current_rip = guest ? guest->Rip() : 0;
+    // The syscall instruction ends its block, so the thread continues wherever rip says:
+    // step past it now. Handlers that put the thread somewhere else overwrite this.
+    if (control != nullptr) control->AdvanceGuestRip(2);
+    has_raw_result = false;
+    const NTSTATUS status = kernel_.Dispatch(*this, static_cast<uint32_t>(number), args);
+    current_args = nullptr;
+    if (has_raw_result) return raw_result;
+    return static_cast<uint64_t>(static_cast<int64_t>(status));
+}
+
+// ---------------------------------------------------------------------------------------
+// Kernel: handles
+// ---------------------------------------------------------------------------------------
+
+Kernel::Kernel(KernelOptions options) : options_ {std::move(options)} {
+    int n = 4;
+    size_t len = sizeof(n);
+    if (sysctlbyname("hw.logicalcpu", &n, &len, nullptr, 0) == 0) nprocs_ = static_cast<uint32_t>(std::clamp(n, 2, 8));
+}
+
+Kernel::~Kernel() = default;
+
+HANDLE Kernel::AddHandle(std::shared_ptr<Object> object) {
+    std::scoped_lock lock {handle_mutex_};
+    const HANDLE h = next_handle_;
+    next_handle_ += 4;
+    handles_[h] = std::move(object);
+    return h;
+}
+
+std::shared_ptr<Object> Kernel::GetObject(HANDLE h) {
+    if (h == ~0ull) {  // current process pseudo handle
+        return nullptr;
+    }
+    if (h == ~1ull) {  // current thread
+        return CurrentThread();
+    }
+    std::scoped_lock lock {handle_mutex_};
+    auto it = handles_.find(h);
+    return it == handles_.end() ? nullptr : it->second;
+}
+
+bool Kernel::CloseHandle(HANDLE h) {
+    std::shared_ptr<Object> dead;
+    {
+        std::scoped_lock lock {handle_mutex_};
+        auto it = handles_.find(h);
+        if (it == handles_.end()) return false;
+        dead = std::move(it->second);
+        handles_.erase(it);
+    }
+    return true;
+}
+
+HANDLE Kernel::DuplicateHandle(HANDLE h) {
+    auto o = GetObject(h);
+    if (!o) return 0;
+    return AddHandle(o);
+}
+
+NtThread* CurrentNtThreadRaw();
+
+std::shared_ptr<NtThread> Kernel::CurrentThread() {
+    NtThread* t = CurrentNtThreadRaw();
+    if (t == nullptr) return nullptr;
+    return std::static_pointer_cast<NtThread>(t->shared_from_this());
+}
+
+std::shared_ptr<NtThread> Kernel::FindThread(uint64_t tid) {
+    std::scoped_lock lock {thread_mutex_};
+    auto it = threads_.find(tid);
+    return it == threads_.end() ? nullptr : it->second;
+}
+
+std::shared_ptr<NtThread> Kernel::FindThreadByHandle(HANDLE h) {
+    if (h == ~1ull) return CurrentThread();
+    return Get<NtThread>(h, ObjType::Thread);
+}
+
+// ---------------------------------------------------------------------------------------
+// Paths
+// ---------------------------------------------------------------------------------------
+
+namespace {
+
+std::string Lower(std::string s) {
+    for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+/// Finds `name` inside `dir` ignoring case. Returns the real name or "".
+std::string FindCaseInsensitive(const std::string& dir, const std::string& name) {
+    std::string direct = dir + "/" + name;
+    struct stat st;
+    if (lstat(direct.c_str(), &st) == 0) return name;
+    DIR* d = opendir(dir.c_str());
+    if (d == nullptr) return {};
+    const std::string want = Lower(name);
+    std::string found;
+    while (auto* e = readdir(d)) {
+        if (Lower(e->d_name) == want) { found = e->d_name; break; }
+    }
+    closedir(d);
+    return found;
+}
+
+} // namespace
+
+bool Kernel::ResolvePath(const std::string& nt_in, std::string* host_path, bool* exists, bool create_parent_ok) {
+    std::string p = nt_in;
+    std::replace(p.begin(), p.end(), '/', '\\');
+    std::string root;
+    std::string rest;
+    auto starts = [&](const char* prefix) {
+        const size_t n = std::strlen(prefix);
+        if (p.size() >= n && Lower(p.substr(0, n)) == Lower(prefix)) { rest = p.substr(n); return true; }
+        return false;
+    };
+    const std::string xvd_root = options_.system_root.substr(0, options_.system_root.rfind('/'));
+    if (starts("\\??\\C:\\") || starts("\\DosDevices\\C:\\") || starts("C:\\") || starts("\\??\\Volume{c}\\")) {
+        root = xvd_root;
+    } else if (starts("\\SystemRoot\\") || starts("\\??\\SystemRoot\\")) {
+        root = options_.system_root;
+    } else if (starts("\\??\\G:\\") || starts("\\DosDevices\\G:\\") || starts("G:\\") ||
+               starts("\\Device\\Harddisk0\\Partition1\\")) {
+        root = options_.title_root;
+    } else if (starts("\\??\\D:\\") || starts("D:\\")) {
+        root = options_.title_root;
+    } else {
+        if (exists) *exists = false;
+        return false;
+    }
+    // Walk the components.
+    std::string cur = root;
+    size_t i = 0;
+    bool ok = true;
+    while (i <= rest.size() && !rest.empty()) {
+        size_t j = rest.find('\\', i);
+        if (j == std::string::npos) j = rest.size();
+        std::string comp = rest.substr(i, j - i);
+        i = j + 1;
+        if (comp.empty() || comp == ".") { if (j >= rest.size()) break; continue; }
+        if (comp == "..") { cur = cur.substr(0, cur.rfind('/')); if (j >= rest.size()) break; continue; }
+        std::string real = FindCaseInsensitive(cur, comp);
+        if (real.empty()) {
+            // The rest does not exist; keep the remaining components as given so a create can use them.
+            cur += "/" + comp;
+            ok = false;
+            while (j < rest.size()) {
+                size_t k = rest.find('\\', j + 1);
+                if (k == std::string::npos) k = rest.size();
+                cur += "/" + rest.substr(j + 1, k - j - 1);
+                j = k;
+            }
+            break;
+        }
+        cur += "/" + real;
+        if (j >= rest.size()) break;
+    }
+    *host_path = cur;
+    if (exists) *exists = ok;
+    return true;
+}
+
+std::string Kernel::NtPathFromHost(const std::string& host) const {
+    const std::string xvd_root = options_.system_root.substr(0, options_.system_root.rfind('/'));
+    auto conv = [&](const std::string& root, const char* prefix) -> std::string {
+        if (host.compare(0, root.size(), root) == 0 && (host.size() == root.size() || host[root.size()] == '/')) {
+            std::string r = host.substr(root.size());
+            std::replace(r.begin(), r.end(), '/', '\\');
+            return std::string(prefix) + (r.empty() ? "\\" : r);
+        }
+        return {};
+    };
+    std::string s = conv(options_.title_root, "G:");
+    if (s.empty()) s = conv(xvd_root, "C:");
+    return s;
+}
+
+// ---------------------------------------------------------------------------------------
+// Dispatch
+// ---------------------------------------------------------------------------------------
+
+const char* Kernel::SyscallName(uint32_t number) const {
+    auto it = numbers_.find(number);
+    return it == numbers_.end() ? "?" : it->second.c_str();
+}
+
+NTSTATUS Kernel::Dispatch(NtThread& thread, uint32_t number, SyscallArgs& args) {
+    auto it = syscalls_.find(number);
+    if (it == syscalls_.end()) {
+        UT_ERROR("[%llu] unknown syscall %u (%s) from %#llx", (unsigned long long)thread.tid_, number, SyscallName(number),
+                 (unsigned long long)thread.current_rip);
+        return STATUS_NOT_IMPLEMENTED;
+    }
+    if (it->second.second == nullptr) {
+        UT_WARN("[%llu] unimplemented syscall %s(%#llx, %#llx, %#llx, %#llx) from %#llx", (unsigned long long)thread.tid_,
+                it->second.first.c_str(), (unsigned long long)args[0], (unsigned long long)args[1],
+                (unsigned long long)args[2], (unsigned long long)args[3], (unsigned long long)thread.current_rip);
+        return STATUS_NOT_IMPLEMENTED;
+    }
+    thread.current_ret = args.rsp != 0 ? *reinterpret_cast<uint64_t*>(args.rsp) : 0;
+    const bool trace = options_.trace &&
+                       (options_.trace_filter.empty() || it->second.first.find(options_.trace_filter) != std::string::npos);
+    if (trace) {
+        UT_INFO("[%llu] %s(%#llx, %#llx, %#llx, %#llx) <- %s", (unsigned long long)thread.tid_, it->second.first.c_str(),
+                (unsigned long long)args[0], (unsigned long long)args[1], (unsigned long long)args[2],
+                (unsigned long long)args[3], Describe(thread.current_ret).c_str());
+    }
+    const NTSTATUS status = it->second.second(*this, thread, args);
+    if (trace) UT_INFO("[%llu]   -> %#x", (unsigned long long)thread.tid_, static_cast<uint32_t>(status));
+    return status;
+}
+
+std::string Kernel::Describe(uint64_t address) {
+    char buf[200];
+    {
+        std::scoped_lock lock {image_mutex};
+        auto it = image_names.upper_bound(address);
+        if (it != image_names.begin()) {
+            --it;
+            const auto info = vm_->Query(address);
+            if (info.allocation_base == it->first) {
+                std::string name = it->second.substr(it->second.rfind('\\') + 1);
+                std::string sym;
+                if (it->first == ntdll_base_) {
+                    auto s = ntdll_symbols_.upper_bound(address);
+                    if (s != ntdll_symbols_.begin()) { --s; std::snprintf(buf, sizeof buf, " (%s+%#llx)", s->second.c_str(), (unsigned long long)(address - s->first)); sym = buf; }
+                }
+                std::snprintf(buf, sizeof buf, "%s+%#llx%s", name.c_str(), (unsigned long long)(address - it->first), sym.c_str());
+                return buf;
+            }
+        }
+    }
+    std::snprintf(buf, sizeof buf, "%#llx", (unsigned long long)address);
+    return buf;
+}
+
+void Kernel::RegisterSyscalls() {
+    RegisterMemorySyscalls(handlers_);
+    RegisterFileSyscalls(handlers_);
+    RegisterSyncSyscalls(handlers_);
+    RegisterThreadSyscalls(handlers_);
+    RegisterInfoSyscalls(handlers_);
+    RegisterMiscSyscalls(handlers_);
+    // Numbers come from the ntdll stubs themselves: `mov r10, rcx; mov eax, N; syscall`.
+    const auto exports = ListExports(ntdll_base_);
+    for (const auto& [name, address] : exports) ntdll_symbols_[address] = name;
+    for (const auto& [name, address] : exports) {
+        if (name.compare(0, 2, "Nt") != 0) continue;
+        const auto* b = reinterpret_cast<const uint8_t*>(address);
+        if (b[0] == 0x4c && b[1] == 0x8b && b[2] == 0xd1 && b[3] == 0xb8 && b[8] == 0x0f && b[9] == 0x05) {
+            uint32_t n;
+            std::memcpy(&n, b + 4, 4);
+            auto h = handlers_.find(name);
+            syscalls_[n] = {name, h == handlers_.end() ? nullptr : h->second};
+            numbers_[n] = name;
+        }
+    }
+    UT_INFO("syscalls: %zu in ntdll, %zu handled", syscalls_.size(),
+            static_cast<size_t>(std::count_if(syscalls_.begin(), syscalls_.end(), [](auto& p) { return p.second.second != nullptr; })));
+}
+
+// ---------------------------------------------------------------------------------------
+// Image mapping
+// ---------------------------------------------------------------------------------------
+
+namespace {
+uint32_t SectionProtect(uint32_t c) {
+    const bool x = (c & 0x20000000) != 0, r = (c & 0x40000000) != 0, w = (c & 0x80000000) != 0;
+    if (x) return w ? PAGE_EXECUTE_READWRITE : r ? PAGE_EXECUTE_READ : PAGE_EXECUTE;
+    if (w) return PAGE_READWRITE;
+    if (r) return PAGE_READONLY;
+    return PAGE_READONLY;
+}
+} // namespace
+
+NTSTATUS Kernel::MapImageSection(SectionObject& section, uint64_t* base_io, uint64_t* size_io) {
+    PeImage& pe = *section.image;
+    uint64_t base = *base_io;
+    uint64_t size = pe.size_of_image;
+    NTSTATUS rc = vm_->Allocate(&base, &size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE, RegionKind::Image, pe.nt_path);
+    if (rc != STATUS_SUCCESS) return rc;
+    std::string error;
+    if (!PlaceImage(pe, base, error)) {
+        UT_ERROR("image %s: %s", pe.path.c_str(), error.c_str());
+        uint64_t b = base, s = 0;
+        vm_->Free(&b, &s, MEM_RELEASE);
+        return STATUS_INVALID_IMAGE_FORMAT;
+    }
+    // Headers are read-only; each section gets its own protection.
+    vm_->SetImagePages(base, pe.size_of_headers, PAGE_READONLY);
+    for (const auto& s : pe.sections) {
+        const uint64_t len = std::max<uint64_t>(s.vsize, s.raw_size);
+        vm_->SetImagePages(base + s.rva, len, SectionProtect(s.characteristics));
+    }
+    space_->NotifyContentsReplaced(base, base + pe.size_of_image);
+    {
+        std::scoped_lock lock {image_mutex};
+        image_names[base] = pe.nt_path;
+    }
+    section.last_base = base;
+    UT_INFO("image %s mapped at %#llx (preferred %#llx)", pe.nt_path.c_str(), (unsigned long long)base,
+            (unsigned long long)pe.image_base);
+    *base_io = base;
+    *size_io = AlignUpPage(pe.size_of_image);
+    if (base != pe.image_base) return STATUS_IMAGE_NOT_AT_BASE;
+    return STATUS_SUCCESS;
+}
+
+} // namespace utsuro::nt
