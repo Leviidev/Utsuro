@@ -12,11 +12,14 @@ struct HomeView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        if playing, let dump = library.dump {
-            GameScreen(dump: dump) { playing = false }
-        } else {
-            home
+        Group {
+            if playing, let dump = library.dump {
+                GameScreen(dump: dump) { playing = false }
+            } else {
+                home
+            }
         }
+        .onChange(of: playing) { now in AppDelegate.lock(now ? .landscape : .portrait) }
     }
 
     private var home: some View {

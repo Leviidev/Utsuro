@@ -734,7 +734,8 @@ void Kernel::TimerThreadMain() {
             *reinterpret_cast<uint32_t*>(k + 0x8) = static_cast<uint32_t>(ticks & 0xFFFFFFFF);
             *reinterpret_cast<int32_t*>(k + 0xc) = static_cast<int32_t>(ticks >> 32);
             *reinterpret_cast<int32_t*>(k + 0x10) = static_cast<int32_t>(ticks >> 32);
-            *reinterpret_cast<uint32_t*>(k + 0x320) = static_cast<uint32_t>(ms * 64 / 1000 * 1000 / 64);
+            // TickCount counts 15.625 ms ticks (TickCountMultiplier is 15.625 in 8.24 fixed point): GetTickCount64 multiplies it back.
+            *reinterpret_cast<uint32_t*>(k + 0x320) = static_cast<uint32_t>(ms * 64 / 1000);
         }
         const int64_t now_ns = MonotonicNs();
         int64_t wait_ns = 15000000;
