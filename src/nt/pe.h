@@ -48,7 +48,7 @@ std::unique_ptr<PeImage> LoadPe(const std::string& path, std::string& error);
 
 /// Copies headers and sections to `base` (memory already mapped read/write and zero),
 /// and applies relocations when `base` differs from the preferred address.
-bool PlaceImage(const PeImage& pe, uint64_t base, std::string& error);
+bool PlaceImage(const PeImage& pe, uint64_t base, std::string& error, bool relocate = true);
 
 /// Looks up an export by name in a *mapped* image. Returns 0 if absent.
 uint64_t FindExport(uint64_t base, const char* name);

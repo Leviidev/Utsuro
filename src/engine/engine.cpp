@@ -538,6 +538,7 @@ struct FaultRegs {
     uint64_t gregs[16] {};
 };
 thread_local FaultRegs g_fault_regs;
+std::function<void(uint64_t, const uint64_t*)> g_fault_reporter;
 
 bool EndFaultedGuestThread(int signal, siginfo_t* info, void* raw_context) {
 #if defined(__aarch64__) && defined(__APPLE__)
@@ -556,6 +557,7 @@ bool EndFaultedGuestThread(int signal, siginfo_t* info, void* raw_context) {
         g_fault_regs.rip = g_active.context->RestoreRIPFromHostPC(g_active.thread, pc);
         for (size_t i = 0; i < config.SRAGPRCount && i < 16; ++i) g_fault_regs.gregs[i] = ss.__x[config.SRAGPRMapping[i]];
         g_fault_regs.valid = true;
+        if (g_fault_reporter) g_fault_reporter(g_fault_regs.rip, g_fault_regs.gregs);
     }
     bool in_generated_code = g_active.context != nullptr && g_active.thread != nullptr &&
                              g_active.context->IsAddressInCodeBuffer(g_active.thread, pc);
@@ -606,6 +608,15 @@ bool EndFaultedGuestThread(int signal, siginfo_t* info, void* raw_context) {
             UT_WARN("fault (signal %d) inside the emulator at %p while running guest "
                         "code; ending this guest process",
                         signal, info == nullptr ? nullptr : info->si_addr);
+            // The dispatcher has spilled the guest registers to the frame by the time the
+            // decoder runs, so they are current here.
+            if (g_fault_reporter) {
+                const auto& st = g_active.thread->CurrentFrame->State;
+                g_fault_regs.rip = st.rip;
+                for (size_t i = 0; i < 16; ++i) g_fault_regs.gregs[i] = st.gregs[i];
+                g_fault_regs.valid = true;
+                g_fault_reporter(g_fault_regs.rip, g_fault_regs.gregs);
+            }
         }
     }
     // What the guest was reaching for, and what the address space thinks is there. A fault
@@ -1372,6 +1383,40 @@ FexEngine::~FexEngine() = default;
 
 GuestThread* FexEngine::Current() {
     return g_current_guest_thread;
+}
+
+void SetFaultReporter(std::function<void(uint64_t, const uint64_t*)> reporter) { g_fault_reporter = std::move(reporter); }
+
+void SampleGuestRips(std::vector<uint64_t>& out, std::vector<std::array<uint64_t, 16>>* regs_out) {
+#if defined(__aarch64__) && defined(__APPLE__)
+    std::vector<LiveThread> live;
+    {
+        std::scoped_lock lock {g_live_threads_mutex};
+        live = g_live_threads;
+    }
+    for (const auto& entry : live) {
+        if (entry.port == 0) continue;
+        thread_act_t port = entry.port;
+        if (thread_suspend(port) != KERN_SUCCESS) continue;
+        arm_thread_state64_t ss;
+        mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
+        if (thread_get_state(port, ARM_THREAD_STATE64, reinterpret_cast<thread_state_t>(&ss), &count) == KERN_SUCCESS) {
+            const uintptr_t pc = static_cast<uintptr_t>(arm_thread_state64_get_pc(ss));
+            if (entry.context->IsAddressInCodeBuffer(entry.thread, pc)) {
+                out.push_back(entry.context->RestoreRIPFromHostPC(entry.thread, pc));
+                if (regs_out != nullptr) {
+                    std::array<uint64_t, 16> r {};
+                    if (auto* d = g_any_delegator.load()) {
+                        const auto& config = d->GetConfig();
+                        for (size_t i = 0; i < config.SRAGPRCount && i < 16; ++i) r[i] = ss.__x[config.SRAGPRMapping[i]];
+                    }
+                    regs_out->push_back(r);
+                }
+            }
+        }
+        thread_resume(port);
+    }
+#endif
 }
 
 void DumpGuestThreads(const std::function<std::string(uint64_t)>& describe,

@@ -12,7 +12,9 @@
 #pragma once
 
 #include "guest_memory.h"
+#include <array>
 #include <functional>
+#include <vector>
 #include <pthread.h>
 
 #include <cstdint>
@@ -165,6 +167,12 @@ private:
 /// next one is loaded over it -- and FEXCore's block cache is keyed by guest address, so
 /// without this the new program runs the old program's compiled code.
 void InvalidateCompiledCode(uint64_t host_begin, uint64_t host_end);
+
+/// Called on a guest fault with the guest rip and rax..r15, to print more than the engine knows.
+void SetFaultReporter(std::function<void(uint64_t, const uint64_t*)> reporter);
+
+/// Appends the guest rip of every thread currently inside compiled code.
+void SampleGuestRips(std::vector<uint64_t>& out, std::vector<std::array<uint64_t, 16>>* regs_out = nullptr);
 
 /// Suspends every guest thread in turn and logs where it is. For hangs.
 void DumpGuestThreads(const std::function<std::string(uint64_t)>& describe = {},

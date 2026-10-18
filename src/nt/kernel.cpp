@@ -107,8 +107,19 @@ uint64_t NtThread::Handle(uint64_t number, uint64_t a1, uint64_t a2, uint64_t a3
     // step past it now. Handlers that put the thread somewhere else overwrite this.
     if (control != nullptr) control->AdvanceGuestRip(2);
     has_raw_result = false;
+    has_pending_step = false;
     const NTSTATUS status = kernel_.Dispatch(*this, static_cast<uint32_t>(number), args);
     current_args = nullptr;
+    if (has_pending_step && control != nullptr) {
+        // A host method asked for a guest call: make it now, remembering where to come back to.
+        has_pending_step = false;
+        GuestCpuState caller;
+        if (control->CaptureCpuState(&caller)) {
+            guest_frames.push_back({caller, pending_step.cont});
+            kernel_.StartGuestCall(*this, pending_step, caller);
+        }
+        return 0;
+    }
     if (has_raw_result) return raw_result;
     return static_cast<uint64_t>(static_cast<int64_t>(status));
 }
@@ -286,12 +297,141 @@ std::string Kernel::NtPathFromHost(const std::string& host) const {
 // Dispatch
 // ---------------------------------------------------------------------------------------
 
+uint64_t Kernel::GuestReturnStub() {
+    if (guest_return_stub_ == 0) {
+        uint64_t base = 0, size = 0x1000;
+        vm_->Allocate(&base, &size, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE, RegionKind::Private, "guest return");
+        auto* p = reinterpret_cast<uint8_t*>(base);
+        p[0] = 0x4C; p[1] = 0x8B; p[2] = 0xD0;                 // mov r10, rax
+        p[3] = 0xB8; const uint32_t n = 0xFFFFFFF0u; std::memcpy(p + 4, &n, 4);  // mov eax, 0xFFFFFFF0
+        p[8] = 0x0F; p[9] = 0x05;                               // syscall
+        p[10] = 0xCC;
+        guest_return_stub_ = base;
+    }
+    return guest_return_stub_;
+}
+
+void Kernel::StartGuestCall(NtThread& thread, const GuestStep& step, const GuestCpuState& caller) {
+    GuestCpuState st = caller;
+    // A fresh frame below the caller's stack pointer: [ret][shadow x4] with the return address at rsp.
+    const uint64_t base = (caller.gregs[4] - 0x80) & ~0xFull;
+    *reinterpret_cast<uint64_t*>(base - 8) = GuestReturnStub();
+    st.gregs[4] = base - 8;
+    st.gregs[1] = step.args[0];
+    st.gregs[2] = step.args[1];
+    st.gregs[8] = step.args[2];
+    st.gregs[9] = step.args[3];
+    st.rip = step.fn;
+    thread.control->RestoreCpuState(st);
+}
+
+void Kernel::OnGuestReturn(NtThread& thread, uint64_t rax) {
+    if (thread.guest_frames.empty()) { UT_ERROR("guest return with no pending host call"); return; }
+    GuestFrame frame = std::move(thread.guest_frames.back());
+    thread.guest_frames.pop_back();
+    GuestStep step = frame.cont ? frame.cont(thread, rax) : GuestStep::Return(rax);
+    if (step.call) {
+        thread.guest_frames.push_back({frame.saved, step.cont});
+        StartGuestCall(thread, step, frame.saved);
+        return;
+    }
+    GuestCpuState st = frame.saved;
+    st.gregs[0] = step.result;
+    thread.control->RestoreCpuState(st);
+    thread.has_raw_result = true;
+    thread.raw_result = step.result;
+}
+
 const char* Kernel::SyscallName(uint32_t number) const {
     auto it = numbers_.find(number);
     return it == numbers_.end() ? "?" : it->second.c_str();
 }
 
 NTSTATUS Kernel::Dispatch(NtThread& thread, uint32_t number, SyscallArgs& args) {
+    if (number == 0xFFFFFFF0u) {  // a guest function called from the host returned; r10 holds its rax
+        OnGuestReturn(thread, args.reg[0]);
+        return STATUS_SUCCESS;
+    }
+    {
+        uint64_t result;
+        if (DispatchHle(thread, number, args, &result)) {
+            thread.has_raw_result = true;
+            thread.raw_result = result;
+            return STATUS_SUCCESS;
+        }
+    }
+    if (number == 0xFFFF7001u) {  // a traced function returned
+        if (thread.tp_returns.empty()) return STATUS_SUCCESS;
+        const auto [ret, id] = thread.tp_returns.back();
+        thread.tp_returns.pop_back();
+        UT_INFO("[%llu] TP%d returned rax=%#llx", (unsigned long long)thread.tid_, id, (unsigned long long)args.reg[0]);
+        GuestCpuState st;
+        if (thread.control != nullptr && thread.control->CaptureCpuState(&st)) {
+            st.rip = ret;
+            st.gregs[0] = args.reg[0];  // r10 carried rax
+            thread.control->RestoreCpuState(st);
+            thread.has_raw_result = true;
+            thread.raw_result = args.reg[0];
+        }
+        return STATUS_SUCCESS;
+    }
+    if (number >= 0xFFFF0000u) {  // a tracepoint
+        const uint32_t id = number - 0xFFFF0000u;
+        const uint64_t ret = args.rsp != 0 ? *reinterpret_cast<uint64_t*>(args.rsp + 32) : 0;
+        if (id == 0) {  // vDbgPrintExWithPrefix(prefix, component, level, format, arglist)
+            auto readable = [&](uint64_t p, uint64_t n = 8) { return p > 0x10000 && vm_->Contains(p, n); };
+            const char* fmt = readable(args.reg[3]) ? reinterpret_cast<const char*>(args.reg[3]) : nullptr;
+            uint64_t va_ptr = readable(args.rsp + 0x48) ? *reinterpret_cast<uint64_t*>(args.rsp + 0x48) : 0;
+            const uint64_t* va = readable(va_ptr, 64) ? reinterpret_cast<const uint64_t*>(va_ptr) : nullptr;
+            std::string out;
+            int arg = 0;
+            for (const char* f = fmt; f != nullptr && *f; ++f) {
+                if (*f != '%') { out += *f; continue; }
+                std::string spec = "%";
+                ++f;
+                while (*f && std::strchr("-+ #0123456789.*hlIwLqjzt", *f)) spec += *f++;
+                char buf[512];
+                const uint64_t v = va ? va[arg] : 0;
+                switch (*f) {
+                case 's': ++arg; if (spec.find('w') != std::string::npos || spec.find('l') != std::string::npos) {
+                              out += readable(v, 2) ? Utf16ToUtf8(std::u16string(reinterpret_cast<const char16_t*>(v))) : "(bad)";
+                          } else {
+                              out += readable(v, 1) ? reinterpret_cast<const char*>(v) : "(bad)";
+                          } break;
+                case 'S': ++arg; out += readable(v, 2) ? Utf16ToUtf8(std::u16string(reinterpret_cast<const char16_t*>(v))) : "(bad)"; break;
+                case 'Z': { ++arg; out += readable(v, 16) ? Utf16ToUtf8(ReadUnicodeString(reinterpret_cast<const UNICODE_STRING*>(v))) : "(bad)"; break; }
+                case 'c': ++arg; out += static_cast<char>(v); break;
+                case 'd': case 'i': ++arg; std::snprintf(buf, sizeof buf, (spec + (spec.find("I64") != std::string::npos || spec.find("ll") != std::string::npos ? "" : "") + "lld").c_str(), spec.find("I64") != std::string::npos || spec.find("ll") != std::string::npos ? static_cast<long long>(v) : static_cast<long long>(static_cast<int32_t>(v))); out += buf; break;
+                case 'u': case 'x': case 'X': case 'o': { ++arg; const bool wide = spec.find("I64") != std::string::npos || spec.find("ll") != std::string::npos; std::string s2 = spec; size_t p2; while ((p2 = s2.find("I64")) != std::string::npos) s2.erase(p2, 3); s2 += "ll"; s2 += *f; std::snprintf(buf, sizeof buf, s2.c_str(), static_cast<unsigned long long>(wide ? v : static_cast<uint32_t>(v))); out += buf; break; }
+                case 'p': ++arg; std::snprintf(buf, sizeof buf, "%#llx", static_cast<unsigned long long>(v)); out += buf; break;
+                case '%': out += '%'; break;
+                default: out += spec; out += *f; break;
+                }
+            }
+            while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
+            UT_INFO("[%llu] ntdll: %s", (unsigned long long)thread.tid_, out.c_str());
+            return STATUS_SUCCESS;
+        }
+        UT_INFO("[%llu] TP%u %s rcx=%#llx rdx=%#llx r8=%#llx r9=%#llx <- %s", (unsigned long long)thread.tid_, id,
+                id < tracepoints.size() ? tracepoints[id].name.c_str() : "?", (unsigned long long)args.reg[0],
+                (unsigned long long)args.reg[1], (unsigned long long)args.reg[2], (unsigned long long)args.reg[3],
+                Describe(ret).c_str());
+        DumpRequestedMemory("UTSURO_TPDUMP");
+        if (id < tracepoints.size() && tracepoints[id].log_return && tp_return_stub_ != 0 && args.rsp != 0) {
+            auto* slot = reinterpret_cast<uint64_t*>(args.rsp + 32);
+            thread.tp_returns.emplace_back(*slot, static_cast<int>(id));
+            *slot = tp_return_stub_;
+        }
+        if (std::getenv("UTSURO_TPBT") != nullptr && thread.control != nullptr && id < tracepoints.size()) {
+            GuestCpuState st;
+            if (thread.control->CaptureCpuState(&st)) {
+                st.gregs[4] = args.rsp + 32;  // past the stub's four pushes: at the return address
+                const auto frames = Backtrace(tracepoints[id].address, st.gregs, 12);
+                for (size_t i = 0; i < frames.size(); ++i) UT_INFO("      #%zu %s", i, Describe(frames[i]).c_str());
+            }
+        }
+        return STATUS_SUCCESS;
+    }
     auto it = syscalls_.find(number);
     if (it == syscalls_.end()) {
         UT_ERROR("[%llu] unknown syscall %u (%s) from %#llx", (unsigned long long)thread.tid_, number, SyscallName(number),
@@ -348,6 +488,7 @@ void Kernel::RegisterSyscalls() {
     RegisterThreadSyscalls(handlers_);
     RegisterInfoSyscalls(handlers_);
     RegisterMiscSyscalls(handlers_);
+    RegisterRegistrySyscalls(handlers_);
     // Numbers come from the ntdll stubs themselves: `mov r10, rcx; mov eax, N; syscall`.
     const auto exports = ListExports(ntdll_base_);
     for (const auto& [name, address] : exports) ntdll_symbols_[address] = name;
@@ -380,14 +521,14 @@ uint32_t SectionProtect(uint32_t c) {
 }
 } // namespace
 
-NTSTATUS Kernel::MapImageSection(SectionObject& section, uint64_t* base_io, uint64_t* size_io) {
+NTSTATUS Kernel::MapImageSection(SectionObject& section, uint64_t* base_io, uint64_t* size_io, bool relocate) {
     PeImage& pe = *section.image;
     uint64_t base = *base_io;
     uint64_t size = pe.size_of_image;
     NTSTATUS rc = vm_->Allocate(&base, &size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE, RegionKind::Image, pe.nt_path);
     if (rc != STATUS_SUCCESS) return rc;
     std::string error;
-    if (!PlaceImage(pe, base, error)) {
+    if (!PlaceImage(pe, base, error, relocate)) {
         UT_ERROR("image %s: %s", pe.path.c_str(), error.c_str());
         uint64_t b = base, s = 0;
         vm_->Free(&b, &s, MEM_RELEASE);
@@ -403,6 +544,13 @@ NTSTATUS Kernel::MapImageSection(SectionObject& section, uint64_t* base_io, uint
     {
         std::scoped_lock lock {image_mutex};
         image_names[base] = pe.nt_path;
+    }
+    if (kusd_ != 0) {
+        ApplyKusdPatches(pe, base);
+        std::string lower = pe.path.substr(pe.path.rfind('/') + 1);
+        for (auto& ch : lower) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        ApplyHleHooks(lower, base);
+        if (lower != "ntdll.dll") InstallTracepointsFor(lower, base);
     }
     section.last_base = base;
     UT_INFO("image %s mapped at %#llx (preferred %#llx)", pe.nt_path.c_str(), (unsigned long long)base,

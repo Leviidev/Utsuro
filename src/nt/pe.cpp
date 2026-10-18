@@ -87,7 +87,7 @@ std::unique_ptr<PeImage> LoadPe(const std::string& path, std::string& error) {
     return pe;
 }
 
-bool PlaceImage(const PeImage& pe, uint64_t base, std::string& error) {
+bool PlaceImage(const PeImage& pe, uint64_t base, std::string& error, bool relocate) {
     auto* mem = reinterpret_cast<uint8_t*>(base);
     std::memcpy(mem, pe.file.data(), std::min<size_t>(pe.size_of_headers, pe.file.size()));
     for (const auto& s : pe.sections) {
@@ -98,7 +98,7 @@ bool PlaceImage(const PeImage& pe, uint64_t base, std::string& error) {
         }
         std::memcpy(mem + s.rva, pe.file.data() + s.raw_offset, n);
     }
-    if (base == pe.image_base || pe.reloc_size == 0) {
+    if (!relocate || base == pe.image_base || pe.reloc_size == 0) {
         if (base != pe.image_base && pe.reloc_size == 0) {
             error = "image has no relocations and cannot move";
             return false;

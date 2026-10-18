@@ -26,6 +26,8 @@ NTSTATUS NtAllocateVirtualMemory(Kernel& k, NtThread&, SyscallArgs& a) {
     const uint32_t prot = static_cast<uint32_t>(a[5]);
     uint64_t b = *base, s = *size;
     const NTSTATUS rc = k.Vm().Allocate(&b, &s, type, prot);
+    UT_DEBUG("vm alloc(base %#llx size %#llx type %#x prot %#x) -> %#x base %#llx size %#llx", (unsigned long long)*base,
+             (unsigned long long)*size, type, prot, (uint32_t)rc, (unsigned long long)b, (unsigned long long)s);
     if (rc == STATUS_SUCCESS) {
         *base = b;
         *size = s;
@@ -40,6 +42,8 @@ NTSTATUS NtFreeVirtualMemory(Kernel& k, NtThread&, SyscallArgs& a) {
     auto* size = a.Ptr<uint64_t>(2);
     uint64_t b = *base, s = *size;
     const NTSTATUS rc = k.Vm().Free(&b, &s, static_cast<uint32_t>(a[3]));
+    UT_DEBUG("vm free(base %#llx size %#llx type %#x) -> %#x", (unsigned long long)*base, (unsigned long long)*size,
+             (uint32_t)a[3], (uint32_t)rc);
     if (rc == STATUS_SUCCESS) {
         *base = b;
         *size = s;
@@ -124,6 +128,18 @@ NTSTATUS NtQueryVirtualMemory(Kernel& k, NtThread&, SyscallArgs& a) {
         *reinterpret_cast<uint64_t*>(buf + 16) = info.alloc_size;
         *reinterpret_cast<uint64_t*>(buf + 24) = info.commit_size;
         if (ret) *ret = 32;
+        return STATUS_SUCCESS;
+    }
+    if (cls == 4) {  // MemoryWorkingSetExInformation: {VirtualAddress, VirtualAttributes} pairs
+        const uint64_t count = len / 16;
+        for (uint64_t i = 0; i < count; ++i) {
+            const uint64_t va = *reinterpret_cast<uint64_t*>(buf + i * 16);
+            const auto inf = k.Vm().Query(va);
+            uint64_t attrs = 0;
+            if (inf.state == MEM_COMMIT) attrs = 1;  // Valid
+            *reinterpret_cast<uint64_t*>(buf + i * 16 + 8) = attrs;
+        }
+        if (ret) *ret = count * 16;
         return STATUS_SUCCESS;
     }
     UT_DEBUG("NtQueryVirtualMemory class %u not handled", cls);

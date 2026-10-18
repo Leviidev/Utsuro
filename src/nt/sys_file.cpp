@@ -94,6 +94,21 @@ NTSTATUS DoCreate(Kernel& k, NtThread&, HANDLE* out, uint32_t access, const OBJE
                   uint32_t disposition, uint32_t options) {
     std::string nt_path;
     if (!NameFromAttributes(k, oa, &nt_path)) return STATUS_OBJECT_NAME_INVALID;
+    // Devices the Era userland opens that have no file behind them.
+    {
+        std::string low = nt_path;
+        for (auto& c : low) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (low == "\\device\\cng" || low == "\\device\\ksecdd" || low == "\\device\\null" || low == "\\??\\nul") {
+            auto dev = std::make_shared<FileObject>();
+            dev->is_device = true;
+            dev->nt_path = nt_path;
+            dev->host_path = "/dev/null";
+            dev->fd = open("/dev/null", O_RDWR);
+            *out = k.AddHandle(dev);
+            SetIosb(iosb, STATUS_SUCCESS, FILE_OPENED);
+            return STATUS_SUCCESS;
+        }
+    }
     std::string host;
     bool exists = false;
     if (!k.ResolvePath(nt_path, &host, &exists)) {
@@ -672,6 +687,34 @@ NTSTATUS NtDeleteFile(Kernel& k, NtThread&, SyscallArgs& a) {
 
 NTSTATUS Unsupported(Kernel&, NtThread&, SyscallArgs&) { return STATUS_NOT_SUPPORTED; }
 
+// NtDeviceIoControlFile(Handle, Event, ApcRoutine, ApcContext, IOSB, IoControlCode, InBuf, InLen, OutBuf, OutLen):
+// the CNG device answers requests for random bytes; anything else is logged and refused.
+NTSTATUS NtDeviceIoControlFile(Kernel& k, NtThread&, SyscallArgs& a) {
+    auto f = k.Get<FileObject>(a[0], ObjType::File);
+    if (!f) return STATUS_INVALID_HANDLE;
+    auto* iosb = a.Ptr<IO_STATUS_BLOCK>(4);
+    const uint32_t code = static_cast<uint32_t>(a[5]);
+    auto* out = a.Ptr<uint8_t>(8);
+    const uint32_t out_len = static_cast<uint32_t>(a[9]);
+    if (f->is_device) {
+        UT_DEBUG("DeviceIoControl %s code %#x in %u out %u", f->nt_path.c_str(), code, (uint32_t)a[7], out_len);
+        if (const auto* in = a.Ptr<uint8_t>(6)) {
+            std::string hex;
+            for (uint32_t i = 0; i < std::min<uint32_t>(static_cast<uint32_t>(a[7]), 112); ++i) { char b[4]; std::snprintf(b, sizeof b, "%02x", in[i]); hex += b; if (i % 8 == 7) hex += ' '; }
+            UT_DEBUG("  in: %s", hex.c_str());
+        }
+        if (out != nullptr && out_len != 0) {
+            // 0x390402 is a CNG call whose 8-byte answer starts with a status: zero is success.
+            for (uint32_t i = 0; i < out_len; ++i) out[i] = code == 0x390402 ? 0 : static_cast<uint8_t>(arc4random());
+            SetIosb(iosb, STATUS_SUCCESS, out_len);
+        } else {
+            SetIosb(iosb, STATUS_SUCCESS, 0);
+        }
+        return STATUS_SUCCESS;
+    }
+    return STATUS_NOT_SUPPORTED;
+}
+
 NTSTATUS Succeed(Kernel&, NtThread&, SyscallArgs&) { return STATUS_SUCCESS; }
 
 // NtNotifyChangeDirectoryFile never completes here.
@@ -708,7 +751,7 @@ void RegisterFileSyscalls(std::unordered_map<std::string, SyscallFn>& t) {
     t["NtCancelIoFileEx"] = Succeed;
     t["NtCancelSynchronousIoFile"] = Succeed;
     t["NtFsControlFile"] = Unsupported;
-    t["NtDeviceIoControlFile"] = Unsupported;
+    t["NtDeviceIoControlFile"] = NtDeviceIoControlFile;
 }
 
 } // namespace utsuro::nt

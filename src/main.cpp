@@ -12,6 +12,7 @@
 extern "C" void utsuro_install_crash_handler(const char* log_path);
 
 int RunSelfTest();
+namespace utsuro::nt { void InitRegistry(const std::string&); void DumpActivatableClasses(); }
 
 using namespace utsuro;
 
@@ -20,6 +21,11 @@ int main(int argc, char** argv) {
     std::string dump;
     std::string exe;
     if (argc > 1 && std::string(argv[1]) == "--selftest") return RunSelfTest();
+    if (argc > 2 && std::string(argv[1]) == "--classes") {
+        nt::InitRegistry(std::string(argv[2]) + "/EmbeddedXvd/Windows/System32/config");
+        nt::DumpActivatableClasses();
+        return 0;
+    }
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--trace") opt.trace = true;

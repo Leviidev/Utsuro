@@ -1,0 +1,5 @@
+A 24485 7  ; cmp byte ptr [0x7ffe02d4], al
+A 2462f 7  ; cmp byte ptr [0x7ffe02d4], al
+A 246eb 7  ; cmp byte ptr [0x7ffe02d4], al
+A 2f4c7 7  ; cmp byte ptr [0x7ffe02d4], al
+B 77b90 5 eax  ; mov eax, 0x7ffe0014

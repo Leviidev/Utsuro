@@ -110,6 +110,7 @@ struct FileObject : Object {
     std::string host_path;
     std::string nt_path;
     bool is_dir {false};
+    bool is_device {false};  ///< An NT device with no host file behind it, e.g. \Device\CNG.
     bool synchronous {true};
     uint32_t access {0};
     uint32_t options {0};
@@ -159,6 +160,31 @@ struct PendingApc {
     uint64_t routine, arg1, arg2, arg3;
 };
 
+/// What a host continuation decides after a guest call it made has returned.
+struct GuestStep {
+    bool call {false};
+    uint64_t fn {0};
+    uint64_t args[4] {};
+    uint64_t result {0};
+    std::function<GuestStep(NtThread&, uint64_t)> cont;
+
+    static GuestStep Return(uint64_t result) { GuestStep s; s.result = result; return s; }
+    static GuestStep Call(uint64_t fn, std::initializer_list<uint64_t> a, std::function<GuestStep(NtThread&, uint64_t)> cont = nullptr) {
+        GuestStep s;
+        s.call = true;
+        s.fn = fn;
+        size_t i = 0;
+        for (uint64_t v : a) if (i < 4) s.args[i++] = v;
+        s.cont = std::move(cont);
+        return s;
+    }
+};
+
+struct GuestFrame {
+    GuestCpuState saved;   ///< Where to resume the code that made the host call.
+    std::function<GuestStep(NtThread&, uint64_t)> cont;
+};
+
 class NtThread : public Object, public SyscallSink {
 public:
     NtThread(Kernel& kernel, uint64_t tid) : Object(ObjType::Thread), kernel_ {kernel}, tid_ {tid} {}
@@ -195,6 +221,13 @@ public:
     uint64_t current_syscall {0};
     uint64_t current_rip {0};
     uint64_t current_ret {0};
+    /// Host code that needs the guest to run a function (a COM method, a callback) asks here; the
+    /// call is made when the host method returns, and the continuation sees its result.
+    void CallGuest(const GuestStep& step) { pending_step = step; has_pending_step = true; }
+    std::vector<GuestFrame> guest_frames;
+    GuestStep pending_step;
+    bool has_pending_step {false};
+    std::vector<std::pair<uint64_t, int>> tp_returns;  ///< Saved return addresses of traced calls in flight.
     bool has_raw_result {false};  ///< A handler that sets the full 64-bit rax itself.
     uint64_t raw_result {0};
     GuestThreadControl* control {nullptr};
@@ -277,13 +310,26 @@ public:
         uint64_t size {};
         PeImage* pe {};
     };
-    NTSTATUS MapImageSection(SectionObject& section, uint64_t* base_io, uint64_t* size_io);
+    NTSTATUS MapImageSection(SectionObject& section, uint64_t* base_io, uint64_t* size_io, bool relocate = false);
 
     // Dispatch
     NTSTATUS Dispatch(NtThread& thread, uint32_t number, SyscallArgs& args);
     const char* SyscallName(uint32_t number) const;
     /// "image+rva (nearest export+off)" for traces.
     std::string Describe(uint64_t address);
+    /// Rewrites an image's references to KUSER_SHARED_DATA (0x7ffe0000, which this host cannot map)
+    /// to use the copy beside ntdll, following the table in data/kusd made by tools/kusd_scan.py.
+    void ApplyKusdPatches(const PeImage& pe, uint64_t base);
+    /// Replaces selected exports of a mapped image with host implementations (hle.cpp).
+    void ApplyHleHooks(const std::string& image, uint64_t base);
+    bool DispatchHle(NtThread& thread, uint32_t number, SyscallArgs& args, uint64_t* result);
+    /// Applies a host request to run a guest function (see NtThread::CallGuest).
+    void StartGuestCall(NtThread& thread, const GuestStep& step, const GuestCpuState& caller);
+    /// A guest function called by the host has returned (via the return stub).
+    void OnGuestReturn(NtThread& thread, uint64_t rax);
+    uint64_t GuestReturnStub();
+    /// Unwinds a guest stack using the images' .pdata. `regs` is rax..r15 in encoding order.
+    std::vector<uint64_t> Backtrace(uint64_t rip, const uint64_t* regs, int max_frames = 24);
 
     FexEngine& Engine() { return *engine_; }
 
@@ -310,15 +356,20 @@ public:
 
     uint32_t NumberOfProcessors() const { return nprocs_; }
 
+    /// A tracepoint is a patch in guest code that logs and carries on; see InstallTracepoints.
+    struct Tracepoint { std::string name; uint64_t address; bool log_return {false}; };
+    std::vector<Tracepoint> tracepoints;
+
 private:
     void RegisterSyscalls();
     bool PrepareNtdll(std::string& error);
     bool BuildProcess(std::string& error);
     void DumpLoaderState();
+    void DumpRequestedMemory(const char* env);
     void DumpHashTable();
     void DumpImportProgress(uint64_t base);
     void BuildKusd();
-    void PatchKusdReferences();
+    void InstallTracepointsFor(const std::string& image, uint64_t base);
     uint64_t BuildProcessParameters();
     void TimerThreadMain();
 
@@ -347,6 +398,12 @@ private:
     uint64_t exe_base_ {0};
     uint64_t peb_ {0};
     uint64_t kusd_ {0};
+    uint64_t kusd_stub_next_ {0};
+    uint64_t tp_stub_next_ {0};
+    uint64_t tp_return_stub_ {0};
+    bool winrt_init_pending_ {false};
+    uint64_t hle_stub_next_ {0};
+    uint64_t guest_return_stub_ {0};
     uint64_t process_heap_ {0};
     uint32_t nprocs_ {4};
     std::unique_ptr<PeImage> ntdll_image_;
@@ -366,6 +423,8 @@ void RegisterSyncSyscalls(std::unordered_map<std::string, SyscallFn>& table);
 void RegisterThreadSyscalls(std::unordered_map<std::string, SyscallFn>& table);
 void RegisterInfoSyscalls(std::unordered_map<std::string, SyscallFn>& table);
 void RegisterMiscSyscalls(std::unordered_map<std::string, SyscallFn>& table);
+void RegisterRegistrySyscalls(std::unordered_map<std::string, SyscallFn>& table);
+void InitRegistry(const std::string& config_dir);
 
 bool BuildNlsTables(VirtualMemory& vm, uint64_t* ansi, uint64_t* oem, uint64_t* casemap);
 

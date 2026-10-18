@@ -60,7 +60,8 @@ uint64_t VirtualMemory::FindFree(uint64_t size, bool top_down) const {
         }
     } else {
         for (auto& h : holes) {
-            if (h.second - h.first >= size) return h.first;
+            const uint64_t start = AlignUp(h.first, kAllocGranularity);
+            if (start < h.second && h.second - start >= size) return start;
         }
     }
     return 0;
@@ -189,6 +190,38 @@ NTSTATUS VirtualMemory::Free(uint64_t* base_io, uint64_t* size_io, uint32_t type
     Region* r = RegionAt(base);
     if (r == nullptr) return STATUS_UNABLE_TO_FREE_VM;
 
+    if ((type & MEM_RELEASE) && size != 0 && !(r->base == base && AlignUp(size, kPage) >= r->used)) {
+        // Releasing part of a reservation, which heaps do to align their base: the region
+        // splits around the released range.
+        const uint64_t start = AlignDown(base, kPage);
+        const uint64_t end = AlignUp(base + size, kPage);
+        if (end > r->base + r->size) return STATUS_UNABLE_TO_FREE_VM;
+        const uint64_t first = (start - r->base) / kPage;
+        const uint64_t count = (end - start) / kPage;
+        for (uint64_t i = 0; i < count; ++i)
+            if (r->pages[first + i] != 0) return STATUS_UNABLE_TO_FREE_VM;  // committed pages cannot be released this way
+        Region old = std::move(*r);
+        regions_.erase(old.base);
+        auto make = [&](uint64_t from_page, uint64_t to_page) {
+            if (to_page <= from_page) return;
+            Region piece;
+            piece.base = old.base + from_page * kPage;
+            piece.size = (to_page - from_page) * kPage;
+            piece.used = std::min(piece.size, old.used > from_page * kPage ? old.used - from_page * kPage : 0);
+            if (piece.used == 0) piece.used = piece.size;
+            piece.alloc_protect = old.alloc_protect;
+            piece.kind = old.kind;
+            piece.name = old.name;
+            piece.pages.assign(old.pages.begin() + static_cast<long>(from_page), old.pages.begin() + static_cast<long>(to_page));
+            regions_[piece.base] = std::move(piece);
+        };
+        make(0, first);
+        make(first + count, old.size / kPage);
+        space_.Release(start, end - start);
+        *base_io = start;
+        *size_io = end - start;
+        return STATUS_SUCCESS;
+    }
     if (type & MEM_RELEASE) {
         if (r->base != base || size != 0) return STATUS_FREE_VM_NOT_AT_BASE;
         const uint64_t rbase = r->base;

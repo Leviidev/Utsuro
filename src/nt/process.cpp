@@ -1,6 +1,7 @@
 // process.cpp -- bringing a process into existence: ntdll, the executable, the PEB, the
 // first thread; and the thread machinery shared with NtCreateThreadEx.
 #include "nt/kernel.h"
+#include "nt/winrt.h"
 
 #include "engine/log.h"
 
@@ -55,11 +56,82 @@ bool Kernel::Boot(std::string& error) {
     if (!engine_) { error = "engine: " + e; return false; }
     vm_ = std::make_unique<VirtualMemory>(*space_, space_->Base(), space_->Size());
 
+    InitRegistry(options_.system_root + "/System32/config");
+    winrt_init_pending_ = true;
     if (!PrepareNtdll(error)) return false;
     RegisterSyscalls();
     BuildKusd();
-    PatchKusdReferences();
+    ApplyKusdPatches(*ntdll_image_, ntdll_base_);
+    winrt::Runtime::Get().Init(*this);
+    InstallTracepointsFor("ntdll.dll", ntdll_base_);
     timer_thread_ = std::thread([this] { TimerThreadMain(); });
+    SetFaultReporter([this](uint64_t rip, const uint64_t* regs) {
+        const auto frames = Backtrace(rip, regs, 24);
+        for (size_t i = 0; i < frames.size(); ++i) UT_WARN("    #%zu %s", i, Describe(frames[i]).c_str());
+        {
+            // The top of the stack, annotated: enough to spot a return address or an argument.
+            const uint64_t sp = regs[4];
+            for (int i = 0; i < 24; ++i) {
+                const uint64_t w = *reinterpret_cast<uint64_t*>(sp + i * 8);
+                UT_WARN("    [rsp+%#x] %#llx %s", i * 8, (unsigned long long)w, w > 0x1000000000ull ? Describe(w).c_str() : "");
+            }
+        }
+        DumpRequestedMemory("UTSURO_FAULTDUMP");
+    });
+    if (const char* sm = std::getenv("UTSURO_SAMPLE")) {
+        // Histogram of guest rips over `sm` seconds, printed once: where is the time going?
+        const int seconds = std::max(1, std::atoi(sm));
+        std::thread([this, seconds] {
+            pthread_setname_np("utsuro-sampler");
+            std::map<uint64_t, int> hist;
+            std::map<std::string, int> pairs;
+            std::map<std::string, int> chains;
+            std::map<uint64_t, int> rsps;
+            const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+            while (std::chrono::steady_clock::now() < end) {
+                std::vector<uint64_t> rips;
+                std::vector<std::array<uint64_t, 16>> regs;
+                SampleGuestRips(rips, &regs);
+                for (size_t i = 0; i < rips.size(); ++i) {
+                    ++hist[rips[i] & ~0xFull];
+                    {
+                        // The first few image-looking words on the stack, as a crude call chain.
+                        std::string chain;
+                        int got = 0;
+                        for (uint64_t w = 0; w < 400 && got < 7; ++w) {
+                            const uint64_t v = *reinterpret_cast<uint64_t*>(regs[i][4] + w * 8);
+                            if (v < 0x1000000000ull) continue;
+                            std::string d = Describe(v);
+                            if (d.empty() || d[0] == '0' || d.find("+0x") == std::string::npos || d.find("+0x0") == 0) continue;
+                            const auto plus = d.find(" (");
+                            chain += " <" + (plus == std::string::npos ? d : d.substr(0, plus));
+                            ++got;
+                        }
+                        ++chains[chain];
+                        ++rsps[regs[i][4]];
+                        if (Describe(rips[i]).find("LdrResolveDelayLoadsFromDll+0x11") != std::string::npos) {
+                            char b[200];
+                            std::snprintf(b, sizeof b, "head=%#llx [head]=%#llx [head+8]=%#llx cur=%#llx [cur]=%#llx [cur+8]=%#llx hash@entry=%#x r13=%#llx", (unsigned long long)regs[i][14], (unsigned long long)*reinterpret_cast<uint64_t*>(regs[i][14]), (unsigned long long)*reinterpret_cast<uint64_t*>(regs[i][14] + 8), (unsigned long long)regs[i][15], (unsigned long long)*reinterpret_cast<uint64_t*>(regs[i][15]), (unsigned long long)*reinterpret_cast<uint64_t*>(regs[i][15] + 8), *reinterpret_cast<uint32_t*>(regs[i][15] - 0x70 + 0x100), (unsigned long long)regs[i][13]);
+                            ++pairs[b];
+                        }
+                    }
+                    if (Describe(rips[i]).find("RtlEqualUnicodeString+0x") != std::string::npos && regs[i][1] > 0x10000 && regs[i][2] > 0x10000) {
+                        auto s = [](uint64_t p) { return Utf16ToUtf8(ReadUnicodeString(reinterpret_cast<const UNICODE_STRING*>(p))); };
+                        ++pairs[s(regs[i][1]).substr(0, 60) + "  vs  " + s(regs[i][2]).substr(0, 60)];
+                    }
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            std::vector<std::pair<int, uint64_t>> sorted;
+            for (auto& [a, n] : hist) sorted.emplace_back(n, a);
+            std::sort(sorted.rbegin(), sorted.rend());
+            for (size_t i = 0; i < sorted.size() && i < 60; ++i) UT_WARN("sample %5d  %#llx %s", sorted[i].first, (unsigned long long)sorted[i].second, Describe(sorted[i].second).c_str());
+            for (auto& [k, n] : pairs) UT_WARN("pair %5d  %s", n, k.c_str());
+            for (auto& [k, n] : rsps) UT_WARN("rsp %#llx x%d", (unsigned long long)k, n);
+            for (auto& [k, n] : chains) if (n > 30) UT_WARN("chain %5d %s", n, k.c_str());
+            std::fflush(stderr);
+        }).detach();
+    }
     if (const char* wd = std::getenv("UTSURO_WATCHDOG")) {
         const int ms = std::max(100, std::atoi(wd) * 1000);
         std::thread([this, ms] {
@@ -67,23 +139,23 @@ bool Kernel::Boot(std::string& error) {
             for (;;) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(ms));
                 DumpGuestThreads([this](uint64_t a) { return Describe(a); }, [this](uint64_t rip, const uint64_t* regs) {
-                    const uint64_t rsp = regs[4];
+                    const auto frames = Backtrace(rip, regs, 20);
+                    for (size_t i = 0; i < frames.size(); ++i) UT_WARN("    #%zu %s", i, Describe(frames[i]).c_str());
                     if (Describe(rip).find("RtlEqualUnicodeString") != std::string::npos) {
                         auto s = [](uint64_t p) { return p > 0x10000 ? Utf16ToUtf8(ReadUnicodeString(reinterpret_cast<const UNICODE_STRING*>(p))) : std::string("?"); };
                         UT_WARN("    RtlEqualUnicodeString(\"%s\", \"%s\")", s(regs[1]).c_str(), s(regs[2]).c_str());
                     }
-                    // A poor man's backtrace: stack words that point into an image.
-                    int shown = 0;
-                    for (uint64_t i = 0; i < 700 && shown < 60; ++i) {
-                        const uint64_t v = *reinterpret_cast<uint64_t*>(rsp + i * 8);
-                        if (v < 0x1000000000ull) continue;
-                        const std::string d = Describe(v);
-                        if (d.find('+') == std::string::npos || d[0] == '0') continue;
-                        UT_WARN("    [rsp+%#llx] %s", (unsigned long long)(i * 8), d.c_str());
-                        ++shown;
-                    }
-                    (void)rip;
                 });
+                if (const char* dump = std::getenv("UTSURO_DUMP")) {
+                    // UTSURO_DUMP=rva:len writes that part of ntdll as it is in memory now.
+                    const uint64_t rva = std::strtoull(dump, nullptr, 16);
+                    const char* colon = std::strchr(dump, ':');
+                    const size_t len = colon ? std::strtoull(colon + 1, nullptr, 0) : 256;
+                    if (FILE* f = std::fopen("/tmp/utsuro-dump.bin", "wb")) {
+                        std::fwrite(reinterpret_cast<void*>(ntdll_base_ + rva), 1, len, f);
+                        std::fclose(f);
+                    }
+                }
                 DumpLoaderState();
                 DumpHashTable();
                 UT_WARN("globals: 9c410=%#llx 9c470=%#llx", (unsigned long long)*reinterpret_cast<uint64_t*>(ntdll_base_ + 0x9c410),
@@ -94,6 +166,29 @@ bool Kernel::Boot(std::string& error) {
     }
     if (!BuildProcess(error)) return false;
     return true;
+}
+
+// UTSURO_xxx=image+rva:len[:deref] dumps qwords of a loaded image (following the pointer stored there when
+// ":deref" is given).
+void Kernel::DumpRequestedMemory(const char* env) {
+    const char* fd = std::getenv(env);
+    if (fd == nullptr) return;
+    const std::string spec = fd;
+    const auto plus = spec.find('+'), colon = spec.find(':');
+    if (plus == std::string::npos || colon == std::string::npos) return;
+    std::string want = spec.substr(0, plus);
+    for (auto& c : want) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    std::scoped_lock lock {image_mutex};
+    for (auto& [b, n] : image_names) {
+        std::string low = n.substr(n.rfind('\\') + 1);
+        for (auto& c : low) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (low != want) continue;
+        uint64_t at = b + std::strtoull(spec.c_str() + plus + 1, nullptr, 16);
+        const size_t len = std::strtoull(spec.c_str() + colon + 1, nullptr, 0);
+        if (spec.find(":deref") != std::string::npos) at = *reinterpret_cast<uint64_t*>(at);
+        for (size_t o = 0; o < len; o += 16)
+            UT_WARN("    %#llx: %016llx %016llx", (unsigned long long)(at + o), (unsigned long long)*reinterpret_cast<uint64_t*>(at + o), (unsigned long long)*reinterpret_cast<uint64_t*>(at + o + 8));
+    }
 }
 
 void Kernel::DumpLoaderState() {
@@ -115,6 +210,7 @@ void Kernel::DumpLoaderState() {
             const auto* q = reinterpret_cast<const uint32_t*>(node);
             UT_WARN("loader:     ddag node %#llx: %08x %08x %08x %08x | %08x %08x %08x %08x | %08x %08x %08x %08x", (unsigned long long)node,
                     q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7], q[8], q[9], q[10], q[11]);
+            UT_WARN("loader:     state=%d (node+0x38)  deps=%u  node+0x20=%08x %08x  +0x28=%08x%08x +0x30=%08x%08x", q[14], q[8], q[8], q[9], q[11], q[10], q[13], q[12]);
         }
         cur = *reinterpret_cast<uint64_t*>(cur);
         ++n;
@@ -166,7 +262,7 @@ bool Kernel::PrepareNtdll(std::string& error) {
     SectionObject section;
     section.image = std::move(ntdll_image_);
     uint64_t base = 0, size = 0;
-    const NTSTATUS rc = MapImageSection(section, &base, &size);
+    const NTSTATUS rc = MapImageSection(section, &base, &size, true);
     ntdll_image_ = std::move(section.image);
     if (rc != STATUS_SUCCESS && rc != STATUS_IMAGE_NOT_AT_BASE) { error = "cannot map ntdll"; return false; }
     ntdll_base_ = base;
@@ -221,98 +317,86 @@ void Kernel::BuildKusd() {
     PutU32(kusd_, 0x1c, static_cast<uint32_t>(now >> 32));
 }
 
-void Kernel::PatchKusdReferences() {
+// UTSURO_TP="image+0xRVA:len,..." patches the function at that address to log every call
+// (arguments and caller) before running its displaced first `len` bytes, which must be whole
+// instructions with no relative operands or relocations. "ntdll" is patched at boot, other
+// images when they are mapped.
+void Kernel::InstallTracepointsFor(const std::string& image, uint64_t base) {
     if (kusd_ == 0) return;
-    // KUSER_SHARED_DATA is at 0x7ffe0000 on Windows and this host cannot map anything
-    // below 4 GB, so the ntdll instructions that name it are rewritten to use the copy
-    // that sits beside ntdll. The forms found in a 64-bit ntdll:
-    //   [rex] op modrm sib=0x25 disp32      (absolute operand)  -> rip-relative, nop in front
-    //   mov r32, imm32 / mov r64, simm32    (address as a value) -> jmp to a stub that loads
-    //                                                              the full 64-bit address
-    //   movabs r64, imm64                                         -> immediate widened in place
-    int sib_patched = 0, stub_patched = 0, abs_patched = 0, unknown = 0;
-    uint64_t stub_area = kusd_ + 0x1000;
-    uint64_t stub_next = stub_area;
-    auto make_stub = [&](int reg, uint64_t value, uint64_t return_to) -> uint64_t {
-        auto* p = reinterpret_cast<uint8_t*>(stub_next);
-        p[0] = static_cast<uint8_t>(0x48 | (reg >> 3));
-        p[1] = static_cast<uint8_t>(0xB8 + (reg & 7));
-        std::memcpy(p + 2, &value, 8);
-        p[10] = 0xE9;
-        const int32_t rel = static_cast<int32_t>(return_to - (stub_next + 15));
-        std::memcpy(p + 11, &rel, 4);
-        const uint64_t at = stub_next;
-        stub_next += 16;
-        return at;
-    };
-    for (const auto& s : ntdll_image_->sections) {
-        if ((s.characteristics & 0x20000000) == 0) continue;
-        auto* code = reinterpret_cast<uint8_t*>(ntdll_base_ + s.rva);
-        const uint32_t len = std::max(s.vsize, s.raw_size);
-        for (uint32_t i = 8; i + 8 < len; ++i) {
-            if (code[i + 2] != 0xFE || code[i + 3] != 0x7F || code[i + 1] > 0x0F) continue;
-            const uint32_t offset = (static_cast<uint32_t>(code[i + 1]) << 8) | code[i];
-            const uint64_t target = kusd_ + offset;
-            // movabs r64, imm64 with the high half zero.
-            if (code[i + 4] == 0 && code[i + 5] == 0 && code[i + 6] == 0 && code[i + 7] == 0 &&
-                (code[i - 2] & 0xFE) == 0x48 && code[i - 1] >= 0xB8 && code[i - 1] <= 0xBF) {
-                std::memcpy(code + i, &target, 8);
-                ++abs_patched;
-                continue;
-            }
-            // Absolute operand through SIB.
-            if (i >= 4 && code[i - 1] == 0x25 && (code[i - 2] & 0xC7) == 0x04) {
-                const uint32_t sib = i - 1;
-                // Layout: [prefixes][rex] opcode(1-2 bytes) modrm sib disp32, modrm at sib-1.
-                uint32_t first = (code[sib - 3] == 0x0F) ? sib - 3 : sib - 2;
-                if ((code[first - 1] & 0xF0) == 0x40) --first;
-                while (code[first - 1] == 0x66 || code[first - 1] == 0xF2 || code[first - 1] == 0xF3) --first;
-                const uint8_t modrm = static_cast<uint8_t>((code[sib - 1] & 0x38) | 0x05);
-                std::memmove(code + first + 1, code + first, sib - 1 - first);
-                code[first] = 0x90;
-                code[sib] = modrm;
-                const int32_t rel = static_cast<int32_t>(target - reinterpret_cast<uint64_t>(code + i + 4));
-                std::memcpy(code + i, &rel, 4);
-                ++sib_patched;
-                continue;
-            }
-            // mov r32, imm32  (b8+r), optionally with a REX.B prefix.
-            if (code[i - 1] >= 0xB8 && code[i - 1] <= 0xBF && code[i + 4] != 0xFF) {
-                int reg = code[i - 1] - 0xB8;
-                uint32_t start = i - 1;
-                if (code[i - 2] == 0x41) { reg += 8; start = i - 2; }
-                const uint64_t after = reinterpret_cast<uint64_t>(code + i + 4);
-                const uint64_t stub = make_stub(reg, target, after);
-                code[start] = 0xE9;
-                const int32_t rel = static_cast<int32_t>(stub - (reinterpret_cast<uint64_t>(code + start) + 5));
-                std::memcpy(code + start + 1, &rel, 4);
-                for (uint32_t k2 = start + 5; k2 < i + 4; ++k2) code[k2] = 0x90;
-                ++stub_patched;
-                continue;
-            }
-            // mov r64, simm32  (rex.W c7 /0)
-            if ((code[i - 3] & 0xFE) == 0x48 && code[i - 2] == 0xC7 && (code[i - 1] & 0xF8) == 0xC0) {
-                const int reg = (code[i - 1] & 7) + ((code[i - 3] & 1) ? 8 : 0);
-                const uint32_t start = i - 3;
-                const uint64_t after = reinterpret_cast<uint64_t>(code + i + 4);
-                const uint64_t stub = make_stub(reg, target, after);
-                code[start] = 0xE9;
-                const int32_t rel = static_cast<int32_t>(stub - (reinterpret_cast<uint64_t>(code + start) + 5));
-                std::memcpy(code + start + 1, &rel, 4);
-                for (uint32_t k2 = start + 5; k2 < i + 4; ++k2) code[k2] = 0x90;
-                ++stub_patched;
-                continue;
-            }
-            ++unknown;
-            UT_WARN("ntdll+%#x: unhandled KUSER_SHARED_DATA reference (%02x %02x %02x %02x %02x %02x %02x %02x)",
-                    s.rva + i, code[i - 4], code[i - 3], code[i - 2], code[i - 1], code[i], code[i + 1], code[i + 2], code[i + 3]);
+    if (tp_stub_next_ == 0) tp_stub_next_ = kusd_ + 0xA000;
+    std::vector<std::string> specs;
+    if (image == "ntdll.dll") {
+        char b[64];
+        std::snprintf(b, sizeof b, "ntdll.dll+%llx:6", (unsigned long long)(FindExport(ntdll_base_, "vDbgPrintExWithPrefix") - ntdll_base_ + 0x20));
+        specs.push_back(b);  // always on: ntdll's own diagnostics (DbgPrint)
+    }
+    if (const char* user = std::getenv("UTSURO_TP")) {
+        std::string s = user;
+        size_t pos = 0;
+        while (pos < s.size()) {
+            size_t end = s.find(',', pos);
+            if (end == std::string::npos) end = s.size();
+            specs.push_back(s.substr(pos, end - pos));
+            pos = end + 1;
         }
     }
-    // The stubs are code.
-    uint64_t sb = stub_area, ss = 0x1000;
-    vm_->Protect(&sb, &ss, PAGE_EXECUTE_READ, nullptr);
-    space_->NotifyContentsReplaced(ntdll_base_, kusd_ + 0x2000);
-    UT_INFO("KUSER_SHARED_DATA: %d operand, %d value (stub), %d absolute rewrites; %d left", sib_patched, stub_patched, abs_patched, unknown);
+    bool any = false;
+    for (const auto& item : specs) {
+        const bool want_return = !item.empty() && item.back() == '!';
+        const auto plus = item.find('+');
+        const auto colon = item.find(':');
+        if (plus == std::string::npos || colon == std::string::npos) continue;
+        std::string want = item.substr(0, plus);
+        for (auto& c : want) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (want == "ntdll") want = "ntdll.dll";
+        if (want != image) continue;
+        const uint64_t rva = std::strtoull(item.substr(plus + 1, colon - plus - 1).c_str(), nullptr, 16);
+        const unsigned len = static_cast<unsigned>(std::atoi(item.substr(colon + 1).c_str()));
+        if (len < 5 || len > 16) continue;
+        const uint64_t at = base + rva;
+        auto* fn = reinterpret_cast<uint8_t*>(at);
+        auto* stub = reinterpret_cast<uint8_t*>(tp_stub_next_);
+        const int id = static_cast<int>(tracepoints.size());
+        size_t n = 0;
+        auto put = [&](std::initializer_list<uint8_t> bytes) { for (uint8_t b : bytes) stub[n++] = b; };
+        put({0x50, 0x51, 0x41, 0x53, 0x41, 0x52});            // push rax, rcx, r11, r10
+        put({0x4C, 0x8B, 0xD1});                              // mov r10, rcx
+        put({0xB8});
+        const uint32_t number = 0xFFFF0000u + static_cast<uint32_t>(id);
+        std::memcpy(stub + n, &number, 4); n += 4;            // mov eax, number
+        put({0x0F, 0x05});                                    // syscall
+        put({0x41, 0x5A, 0x41, 0x5B, 0x59, 0x58});            // pop r10, r11, rcx, rax
+        std::memcpy(stub + n, fn, len); n += len;             // the displaced instructions
+        stub[n++] = 0xE9;
+        const int32_t back = static_cast<int32_t>((at + len) - (tp_stub_next_ + n + 4));
+        std::memcpy(stub + n, &back, 4); n += 4;
+        fn[0] = 0xE9;
+        const int32_t fwd = static_cast<int32_t>(tp_stub_next_ - (at + 5));
+        std::memcpy(fn + 1, &fwd, 4);
+        for (unsigned k2 = 5; k2 < len; ++k2) fn[k2] = 0x90;
+        tracepoints.push_back({item.substr(0, colon), at, want_return});
+        UT_INFO("tracepoint %d at %s", id, item.substr(0, colon).c_str());
+        tp_stub_next_ += (n + 15) & ~15ull;
+        if (want_return && tp_return_stub_ == 0) {
+            auto* rs = reinterpret_cast<uint8_t*>(tp_stub_next_);
+            size_t m = 0;
+            rs[m++] = 0x4C; rs[m++] = 0x8B; rs[m++] = 0xD0;            // mov r10, rax
+            rs[m++] = 0xB8;
+            const uint32_t rn = 0xFFFF7001u;
+            std::memcpy(rs + m, &rn, 4); m += 4;                        // mov eax, 0xFFFF7001
+            rs[m++] = 0x0F; rs[m++] = 0x05;                            // syscall
+            rs[m++] = 0xCC;
+            tp_return_stub_ = tp_stub_next_;
+            tp_stub_next_ += 16;
+        }
+        any = true;
+    }
+    if (any) {
+        uint64_t sb = kusd_ + 0x1000, ss = 0xF000;
+        vm_->Protect(&sb, &ss, PAGE_EXECUTE_READ, nullptr);
+        space_->NotifyContentsReplaced(base, base + 0x1000000);
+        space_->NotifyContentsReplaced(kusd_ + 0x1000, kusd_ + 0x10000);
+    }
 }
 
 uint64_t Kernel::BuildProcessParameters() {
@@ -382,7 +466,7 @@ bool Kernel::BuildProcess(std::string& error) {
     SectionObject section;
     section.image = std::move(exe);
     uint64_t base = 0, size = 0;
-    const NTSTATUS rc = MapImageSection(section, &base, &size);
+    const NTSTATUS rc = MapImageSection(section, &base, &size, false);  // ntdll relocates the executable itself
     exe_image_ = std::move(section.image);
     if (rc != STATUS_SUCCESS && rc != STATUS_IMAGE_NOT_AT_BASE) { error = "cannot map the executable"; return false; }
     exe_base_ = base;

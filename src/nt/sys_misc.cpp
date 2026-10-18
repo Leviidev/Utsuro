@@ -15,34 +15,7 @@ namespace utsuro::nt {
 
 namespace {
 
-std::string KeyName(Kernel& k, const OBJECT_ATTRIBUTES* oa) {
-    if (oa == nullptr || oa->ObjectName == 0) return {};
-    std::string name = Utf16ToUtf8(ReadUnicodeString(reinterpret_cast<const UNICODE_STRING*>(oa->ObjectName)));
-    if (oa->RootDirectory != 0) {
-        auto root = k.Get<KeyObject>(oa->RootDirectory, ObjType::Key);
-        if (root) name = root->path + "\\" + name;
-    }
-    return name;
-}
-
-// NtOpenKey(PHANDLE, Access, POBJECT_ATTRIBUTES): nothing exists yet.
-NTSTATUS NtOpenKey(Kernel& k, NtThread&, SyscallArgs& a) {
-    const std::string name = KeyName(k, a.Ptr<OBJECT_ATTRIBUTES>(2));
-    UT_DEBUG("registry open %s", name.c_str());
-    return STATUS_OBJECT_NAME_NOT_FOUND;
-}
-
-NTSTATUS NtCreateKey(Kernel& k, NtThread&, SyscallArgs& a) {
-    // (PHANDLE, Access, POBJECT_ATTRIBUTES, TitleIndex, Class, Options, PULONG Disposition)
-    const std::string name = KeyName(k, a.Ptr<OBJECT_ATTRIBUTES>(2));
-    UT_DEBUG("registry create %s", name.c_str());
-    auto key = std::make_shared<KeyObject>();
-    key->path = name;
-    *a.Ptr<HANDLE>(0) = k.AddHandle(key);
-    if (auto* d = a.Ptr<uint32_t>(6)) *d = 1;  // REG_CREATED_NEW_KEY
-    return STATUS_SUCCESS;
-}
-
+NTSTATUS DebugFilterEnabled(Kernel&, NtThread&, SyscallArgs&) { return 1; }
 NTSTATUS NotFound(Kernel&, NtThread&, SyscallArgs&) { return STATUS_OBJECT_NAME_NOT_FOUND; }
 NTSTATUS NoMore(Kernel&, NtThread&, SyscallArgs&) { return STATUS_NO_MORE_ENTRIES; }
 NTSTATUS Succeed(Kernel&, NtThread&, SyscallArgs&) { return STATUS_SUCCESS; }
@@ -73,6 +46,32 @@ NTSTATUS NtGetNlsSectionPtr(Kernel& k, NtThread&, SyscallArgs& a) {
         return STATUS_SUCCESS;
     }
     return STATUS_OBJECT_NAME_NOT_FOUND;
+}
+
+// NtInitializeNlsFiles(PVOID* BaseAddress, PLCID DefaultLocaleId, PLARGE_INTEGER DefaultCasingTableSize):
+// maps locale.nls, the system's locale data, and reports the default locale.
+NTSTATUS NtInitializeNlsFiles(Kernel& k, NtThread&, SyscallArgs& a) {
+    std::string host;
+    bool exists = false;
+    if (!k.ResolvePath("C:\\Windows\\System32\\locale.nls", &host, &exists) || !exists) return STATUS_OBJECT_NAME_NOT_FOUND;
+    FILE* f = std::fopen(host.c_str(), "rb");
+    if (f == nullptr) return STATUS_OBJECT_NAME_NOT_FOUND;
+    std::fseek(f, 0, SEEK_END);
+    const long sz = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    uint64_t base = 0, size = static_cast<uint64_t>(sz);
+    if (k.Vm().Allocate(&base, &size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE, RegionKind::Mapped, "locale.nls") != STATUS_SUCCESS) {
+        std::fclose(f);
+        return STATUS_NO_MEMORY;
+    }
+    std::fread(reinterpret_cast<void*>(base), 1, static_cast<size_t>(sz), f);
+    std::fclose(f);
+    uint64_t pb = base, ps = size;
+    k.Vm().Protect(&pb, &ps, PAGE_READONLY, nullptr);
+    *a.Ptr<uint64_t>(0) = base;
+    *a.Ptr<uint32_t>(1) = 0x0409;
+    if (auto* c = a.Ptr<int64_t>(2)) *c = sz;
+    return STATUS_SUCCESS;
 }
 
 // NtTraceEvent(Handle, Flags, FieldSize, Fields): drop ETW events.
@@ -129,20 +128,8 @@ NTSTATUS NtCreateDirectoryObject(Kernel& k, NtThread& t, SyscallArgs& a) { retur
 } // namespace
 
 void RegisterMiscSyscalls(std::unordered_map<std::string, SyscallFn>& t) {
-    t["NtOpenKey"] = NtOpenKey;
-    t["NtOpenKeyEx"] = NtOpenKey;
-    t["NtCreateKey"] = NtCreateKey;
-    t["NtQueryKey"] = NotFound;
-    t["NtQueryValueKey"] = NotFound;
-    t["NtEnumerateKey"] = NoMore;
-    t["NtEnumerateValueKey"] = NoMore;
-    t["NtSetValueKey"] = Succeed;
-    t["NtDeleteKey"] = Succeed;
-    t["NtDeleteValueKey"] = Succeed;
-    t["NtFlushKey"] = Succeed;
-    t["NtNotifyChangeKey"] = Succeed;
     t["NtGetNlsSectionPtr"] = NtGetNlsSectionPtr;
-    t["NtInitializeNlsFiles"] = Unsupported;
+    t["NtInitializeNlsFiles"] = NtInitializeNlsFiles;
     t["NtTraceEvent"] = NtTraceEvent;
     t["NtTraceControl"] = Unsupported;
     t["NtOpenDirectoryObject"] = NtOpenDirectoryObject;
@@ -154,7 +141,7 @@ void RegisterMiscSyscalls(std::unordered_map<std::string, SyscallFn>& t) {
     t["NtQueryWnfStateData"] = NotImplemented;
     t["NtUpdateWnfStateData"] = NotImplemented;
     t["NtSubscribeWnfStateChange"] = NotImplemented;
-    t["NtQueryDebugFilterState"] = Succeed;
+    t["NtQueryDebugFilterState"] = DebugFilterEnabled;
     t["NtQueryIntervalProfile"] = Succeed;
 }
 

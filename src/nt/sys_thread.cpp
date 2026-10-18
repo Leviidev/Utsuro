@@ -138,10 +138,37 @@ NTSTATUS NtRaiseException(Kernel& k, NtThread& t, SyscallArgs& a) {
         t.control->RestoreCpuState(st);
         return STATUS_SUCCESS;
     }
+    if (rec->ExceptionCode == 0x40010006 || rec->ExceptionCode == 0x4001000A) {
+        // OutputDebugString / DbgPrint: ExceptionInformation = {length, pointer}.
+        std::string text;
+        if (rec->ExceptionCode == 0x40010006) text.assign(reinterpret_cast<const char*>(rec->ExceptionInformation[1]), rec->ExceptionInformation[0] ? rec->ExceptionInformation[0] - 1 : 0);
+        else text = Utf16ToUtf8(std::u16string(reinterpret_cast<const char16_t*>(rec->ExceptionInformation[1]), rec->ExceptionInformation[0] ? rec->ExceptionInformation[0] - 1 : 0));
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+        UT_INFO("[%llu] dbgprint: %s", (unsigned long long)t.tid_, text.c_str());
+        GuestCpuState st;
+        if (t.control != nullptr && t.control->CaptureCpuState(&st)) {
+            ContextToState(ctx, &st, ctx->ContextFlags ? ctx->ContextFlags : CONTEXT_FULL);
+            t.control->RestoreCpuState(st);
+            t.has_raw_result = true;
+            t.raw_result = ctx->Rax;
+        }
+        return STATUS_SUCCESS;
+    }
     UT_ERROR("[%llu] unhandled exception %#x at %#llx (flags %#x), rsp %#llx", (unsigned long long)t.tid_, rec->ExceptionCode,
              (unsigned long long)rec->ExceptionAddress, rec->ExceptionFlags, (unsigned long long)ctx->Rsp);
     for (uint32_t i = 0; i < rec->NumberParameters && i < 4; ++i)
         UT_ERROR("  parameter[%u] = %#llx", i, (unsigned long long)rec->ExceptionInformation[i]);
+    if (rec->NumberParameters >= 2 && rec->ExceptionCode == 0xE06D7363 && rec->ExceptionInformation[1] > 0x10000) {
+        // A C++ exception object: print the start of it, which for Platform::Exception holds the HRESULT.
+        const auto* o = reinterpret_cast<const uint32_t*>(rec->ExceptionInformation[1]);
+        UT_ERROR("  thrown object: %08x %08x %08x %08x %08x %08x %08x %08x", o[0], o[1], o[2], o[3], o[4], o[5], o[6], o[7]);
+    }
+    {
+        uint64_t regs[16] = {ctx->Rax, ctx->Rcx, ctx->Rdx, ctx->Rbx, ctx->Rsp, ctx->Rbp, ctx->Rsi, ctx->Rdi,
+                             ctx->R8, ctx->R9, ctx->R10, ctx->R11, ctx->R12, ctx->R13, ctx->R14, ctx->R15};
+        const auto frames = k.Backtrace(ctx->Rip, regs, 24);
+        for (size_t i = 0; i < frames.size(); ++i) UT_ERROR("    #%zu %s", i, k.Describe(frames[i]).c_str());
+    }
     k.ExitProcess(static_cast<int32_t>(rec->ExceptionCode));
 }
 

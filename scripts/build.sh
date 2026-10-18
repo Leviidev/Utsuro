@@ -24,9 +24,9 @@ pids=()
 while IFS= read -r src; do
     obj="$OUT/obj/$(echo "${src#$ROOT/src/}" | tr '/' '_' | sed 's/\.cpp$/.o/')"
     objs+=("$obj")
-    if [[ ! -f "$obj" || "$src" -nt "$obj" || -n "$(find "$ROOT/src" -name '*.h' -newer "$obj" -print -quit)" ]]; then
+    if [[ ! -f "$obj" || "$src" -nt "$obj" || -n "$(find "$ROOT/src" \( -name '*.h' -o -name '*.inc' \) -newer "$obj" -print -quit)" ]]; then
         clang++ -target arm64-apple-macos27.0 -std=c++20 -O1 -g -DARCHITECTURE_arm64=1 \
-            -Wall -Wno-unused-parameter -DMETA_NO_STD_FORWARD_DECLARATIONS \
+            -Wall -Wno-unused-parameter -DMETA_NO_STD_FORWARD_DECLARATIONS -DUTSURO_DATA_DIR=\"$ROOT/data\" \
             "${INCLUDES[@]}" -c "$src" -o "$obj" &
         pids+=($!)
     fi

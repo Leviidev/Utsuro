@@ -1,0 +1,3 @@
+D a0ef5 5  ; cmp eax, 0x7ffe0000
+D c8c2e 6  ; cmp ecx, 0x7ffe0000
+D 25e902 5  ; cmp eax, 0x7ffe0000
