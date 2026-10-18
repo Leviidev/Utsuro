@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/icon.png" width="128" alt="Utsuro"></p>
+
 # Utsuro
 
 An Xbox One (Durango) translation layer for macOS, later iOS. It does not emulate the console's
