@@ -244,9 +244,15 @@ NTSTATUS VirtualMemory::Free(uint64_t* base_io, uint64_t* size_io, uint32_t type
         if (page_end > r->base + r->size) return STATUS_UNABLE_TO_FREE_VM;
         const uint64_t first = (page_begin - r->base) / kPage;
         const uint64_t count = (page_end - page_begin) / kPage;
-        for (uint64_t i = 0; i < count; ++i) r->pages[first + i] = 0;
-        SyncArena(*r, first, count);
+        // The host protects 16 KB pages: open the whole span to zero it, then put every page in it
+        // (including neighbours that share a host page) back to what its NT state says.
+        constexpr uint64_t kHost = 0x4000;
+        const uint64_t lo = std::max(r->base, AlignDown(page_begin, kHost));
+        const uint64_t hi = std::min(r->base + r->size, AlignUp(page_end, kHost));
+        space_.Protect(lo, hi - lo, (kGuestProtRead | kGuestProtWrite));
         ZeroPages(page_begin, page_end - page_begin);
+        for (uint64_t i = 0; i < count; ++i) r->pages[first + i] = 0;
+        SyncArena(*r, (lo - r->base) / kPage, (hi - lo) / kPage);
         *base_io = page_begin;
         *size_io = page_end - page_begin;
         return STATUS_SUCCESS;

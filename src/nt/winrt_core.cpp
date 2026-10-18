@@ -31,6 +31,11 @@ void RegisterCoreClasses(Runtime& rt) {
         Get("get_Kind", I32), Get("get_PreviousExecutionState", I32), Get("get_SplashScreen", Ptr),
     });
 
+    Iface& launch_args = rt.DefineInterface("ILaunchActivatedEventArgs", "FBC93E26-A14A-4B4F-82B0-33BED920AF52", {
+        Fn("get_Arguments", Ptr, [](Call& c) -> uint32_t { *c.Ptr<uint64_t>(0) = Runtime::Get().MakeHString(u""); return 0; }),
+        Fn("get_TileId", Ptr, [](Call& c) -> uint32_t { *c.Ptr<uint64_t>(0) = Runtime::Get().MakeHString(u""); return 0; }),
+    });
+
     // ---- the dispatcher --------------------------------------------------------------
     Iface& dispatcher = rt.DefineInterface("ICoreDispatcher", "60DB2FA8-B705-4FDE-A7D6-EBBB1891D39E", {
         Fn("get_HasThreadAccess", Bool, [](Call& c) -> uint32_t { *c.Ptr<uint8_t>(0) = 1; return 0; }),
@@ -138,7 +143,7 @@ void RegisterCoreClasses(Runtime& rt) {
             *c.Ptr<uint64_t>(0) = Runtime::Get().Pointer(*v, view);
             return 0;
         }),
-        Fn("Run", None, [&rt, &view, &window, &activated_args, get_view, get_window](Call& c) -> uint32_t {
+        Fn("Run", None, [&rt, &view, &window, &activated_args, &launch_args, get_view, get_window](Call& c) -> uint32_t {
             const uint64_t source = c.Arg(0);
             Obj* v = get_view();
             Obj* w = get_window();
@@ -146,7 +151,7 @@ void RegisterCoreClasses(Runtime& rt) {
             const uint64_t window_ptr = rt.Pointer(*w, window);
             const uint64_t scratch = rt.AllocGuest(16);
             const uint64_t entry = rt.MakeHString(u"App");
-            auto args_obj = rt.NewObject("Windows.ApplicationModel.Activation.LaunchActivatedEventArgs", {&activated_args});
+            auto args_obj = rt.NewObject("Windows.ApplicationModel.Activation.LaunchActivatedEventArgs", {&activated_args, &launch_args});
             const uint64_t args_ptr = rt.Pointer(*args_obj, activated_args);
             UT_INFO("CoreApplication.Run: view source %#llx", (unsigned long long)source);
             // IFrameworkViewSource::CreateView -> IFrameworkView::{Initialize, SetWindow, Load}, Activated, Run, Uninitialize

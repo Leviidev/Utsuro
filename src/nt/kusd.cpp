@@ -136,6 +136,12 @@ void Kernel::ApplyKusdPatches(const PeImage& pe, uint64_t base) {
             for (int i = 5; i < len; ++i) code[i] = 0x90;
             kusd_stub_next_ += (n + 15) & ~15ull;
             ++b;
+        } else if (kind == 'G') {
+            // A 32-bit operation on a register that now holds a 64-bit address: widen it.
+            const int pos = std::atoi(reg);
+            if (pos < 0 || pos >= len || (code[pos] & 0xF0) != 0x40) { ++skipped; continue; }
+            code[pos] |= 0x08;
+            ++b;
         } else {
             ++skipped;
             UT_WARN("kusd: %s+%llx has a reference form that is not rewritten: %s", name.c_str(), rva, line + 0);

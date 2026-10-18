@@ -57,6 +57,7 @@ bool Kernel::Boot(std::string& error) {
     vm_ = std::make_unique<VirtualMemory>(*space_, space_->Base(), space_->Size());
 
     InitRegistry(options_.system_root + "/System32/config");
+    RegisterPackageClasses(options_.title_root + "/AppxManifest.xml");
     winrt_init_pending_ = true;
     if (!PrepareNtdll(error)) return false;
     RegisterSyscalls();

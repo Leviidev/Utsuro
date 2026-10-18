@@ -1,5 +1,8 @@
 #include "nt/winrt.h"
 
+#include "nt/d3d.h"
+#include "nt/xaudio2.h"
+
 #include "engine/log.h"
 
 #include <algorithm>
@@ -16,6 +19,7 @@ constexpr uint32_t kRegdbClassNotReg = 0x80040154u;
 Guid kIUnknown = Guid::Parse("00000000-0000-0000-C000-000000000046");
 Guid kIInspectable = Guid::Parse("AF86E2E0-B12D-4C6A-9C5A-D7AA65101E90");
 Guid kIAgileObject = Guid::Parse("94EA2B94-E9CC-49E0-C0FF-EE64CA8F5B90");
+Guid kIGraphicsUnknown = Guid::Parse("ACEEEA63-E0A9-4A1C-BBEC-71B2F485F758");
 } // namespace
 
 Guid Guid::Parse(const char* text) {
@@ -83,11 +87,13 @@ void Runtime::Init(Kernel& kernel) {
     }});
     Materialize(*activation_factory_);
     RegisterClasses(*this);
+    d3d::Register(*this);
+    xaudio2::Register(*this);
     UT_INFO("winrt: %zu classes, %zu interfaces", classes_.size(), ifaces_.size());
 }
 
 void Runtime::Materialize(Iface& iface) {
-    const size_t slots = 6 + iface.methods.size();
+    const size_t slots = static_cast<size_t>(iface.base_slots) + iface.methods.size();
     iface.vtable = AllocGuest(slots * 8, 16);
     iface.first_id = static_cast<uint32_t>(method_table_.size());
     for (size_t s = 0; s < slots; ++s) {
@@ -112,8 +118,14 @@ Iface& Runtime::DefineInterface(const std::string& name, const char* iid, std::v
     i->guessed = guessed;
     Iface& ref = *i;
     ifaces_.push_back(std::move(i));
-    if (ready_ && !ref.methods.empty()) Materialize(ref);
     return ref;
+}
+
+Iface& Runtime::DefineComInterface(const std::string& name, const char* iid, std::vector<Method> methods, HostFn fallback) {
+    Iface& i = DefineInterface(name, iid, std::move(methods));
+    i.base_slots = 3;
+    i.fallback = std::move(fallback);
+    return i;
 }
 
 Iface* Runtime::FindInterface(const std::string& name) {
@@ -129,6 +141,15 @@ bool Runtime::Override(const std::string& iface, const std::string& method, Host
     }
     UT_WARN("winrt: %s has no method %s", iface.c_str(), method.c_str());
     return false;
+}
+
+int Runtime::OverrideAllNamed(const std::string& iface, const std::string& method, HostFn fn) {
+    Iface* i = FindInterface(iface);
+    if (i == nullptr) { UT_WARN("winrt: no interface %s to override", iface.c_str()); return 0; }
+    int n = 0;
+    for (auto& m : i->methods) if (m.name == method) { m.fn = fn; ++n; }
+    if (n == 0) UT_WARN("winrt: %s has no method %s", iface.c_str(), method.c_str());
+    return n;
 }
 
 void Runtime::DefineClass(const std::string& runtime_name, std::function<Obj*(Runtime&)> create, Iface* statics) {
@@ -176,8 +197,10 @@ Obj* Runtime::NewObject(const std::string& class_name, std::vector<Iface*> iface
     for (size_t i = 0; i < o->ifaces.size(); ++i) {
         Iface* f = o->ifaces[i];
         if (f->vtable == 0) Materialize(*f);
-        const uint64_t block = AllocGuest(32, 16);
+        const size_t slots = static_cast<size_t>(f->base_slots) + f->methods.size();
+        const uint64_t block = AllocGuest(f->inline_table != 0 ? f->inline_table + slots * 8 + 64 : 32, 16);
         reinterpret_cast<uint64_t*>(block)[0] = f->vtable;
+        if (f->inline_table != 0) std::memcpy(reinterpret_cast<void*>(block + f->inline_table), reinterpret_cast<void*>(f->vtable), slots * 8);
         reinterpret_cast<uint64_t*>(block)[1] = o->id;
         reinterpret_cast<uint64_t*>(block)[2] = i;
         o->blocks.push_back(block);
@@ -191,19 +214,70 @@ Obj* Runtime::NewObject(const std::string& class_name, std::vector<Iface*> iface
 uint64_t Runtime::Pointer(Obj& obj, Iface& iface) {
     for (size_t i = 0; i < obj.ifaces.size(); ++i)
         if (obj.ifaces[i] == &iface) return obj.blocks[i];
+    for (size_t i = 0; i < obj.ifaces.size(); ++i)
+        for (const Guid& a : obj.ifaces[i]->aliases)
+            if (a == iface.iid) return obj.blocks[i];
     return 0;
 }
 
 uint64_t Runtime::QueryInterface(Obj& obj, const Guid& iid) {
-    if (iid == kIUnknown || iid == kIInspectable || iid == kIAgileObject) return obj.blocks.empty() ? 0 : obj.blocks[0];
+    if (iid == kIUnknown || iid == kIInspectable || iid == kIAgileObject || iid == kIGraphicsUnknown) return obj.blocks.empty() ? 0 : obj.blocks[0];
     for (size_t i = 0; i < obj.ifaces.size(); ++i)
         if (obj.ifaces[i]->iid == iid) return obj.blocks[i];
+    for (size_t i = 0; i < obj.ifaces.size(); ++i)
+        for (const Guid& a : obj.ifaces[i]->aliases)
+            if (a == iid) return obj.blocks[i];
     return 0;
+}
+
+Obj* Runtime::FromPointer(uint64_t pointer) {
+    if (pointer <= 0x10000) return nullptr;
+    const uint64_t id = reinterpret_cast<const uint64_t*>(pointer)[1];
+    std::scoped_lock lock {mutex_};
+    auto it = objects_.find(id);
+    return it == objects_.end() ? nullptr : it->second.get();
+}
+
+Obj* Runtime::NewGhost(const std::string& class_name) {
+    Obj* o = NewObject(class_name, {activation_factory_});
+    o->ghost = true;
+    return o;
+}
+
+uint64_t Runtime::AddGhostInterface(Obj& obj, const Guid& iid) {
+    Iface& f = DefineInterface("ghost:" + obj.class_name + ":" + iid.ToString(), "00000000-0000-0000-0000-000000000000", {});
+    f.iid = iid;
+    for (int i = 0; i < 64; ++i) {
+        Method m;
+        m.name = "slot" + std::to_string(6 + i);
+        f.methods.push_back(std::move(m));
+    }
+    f.fallback = [](Call& c) -> uint32_t {
+        UT_INFO("winrt ghost: %s %s slot %u (%#llx, %#llx, %#llx)", c.obj.class_name.c_str(), c.iface.iid.ToString().c_str(), c.slot + 6,
+                (unsigned long long)c.Arg(0), (unsigned long long)c.Arg(1), (unsigned long long)c.Arg(2));
+        return 0;
+    };
+    Materialize(f);
+    const uint64_t block = AllocGuest(32, 16);
+    reinterpret_cast<uint64_t*>(block)[0] = f.vtable;
+    reinterpret_cast<uint64_t*>(block)[1] = obj.id;
+    reinterpret_cast<uint64_t*>(block)[2] = obj.ifaces.size();
+    obj.ifaces.push_back(&f);
+    obj.blocks.push_back(block);
+    return block;
 }
 
 uint32_t Runtime::GetActivationFactory(const std::string& name, const Guid& iid, uint64_t* out) {
     auto it = classes_.find(name);
-    if (it == classes_.end()) return kRegdbClassNotReg;
+    if (it == classes_.end()) {
+        // The Xbox system classes the host does not model yet answer as ghosts, so the title carries on.
+        if (name.rfind("Windows.Xbox.", 0) != 0 && name.rfind("Windows.Kinect.", 0) != 0) return kRegdbClassNotReg;
+        UT_INFO("winrt: %s is a ghost class", name.c_str());
+        Obj* factory = NewGhost(name);
+        std::string captured = name;
+        classes_[name] = ClassDef {[captured](Runtime& r) -> Obj* { Obj* g = r.NewObject(captured, {r.activation_factory_iface()}); g->ghost = true; return g; }, nullptr, {}, factory};
+        it = classes_.find(name);
+    }
     ClassDef& def = it->second;
     if (def.factory == nullptr) {
         std::vector<Iface*> ifaces {activation_factory_};
@@ -260,6 +334,7 @@ bool Runtime::Dispatch(NtThread& thread, uint32_t number, SyscallArgs& args, uin
         *result = kEFail;
         return true;
     }
+    if (slot >= static_cast<uint32_t>(iface->base_slots)) goto method;
     switch (slot) {
     case 0: {  // QueryInterface(riid, ppv)
         const Guid iid = *reinterpret_cast<const Guid*>(args[1]);
@@ -275,6 +350,7 @@ bool Runtime::Dispatch(NtThread& thread, uint32_t number, SyscallArgs& args, uin
                 }
             }
         }
+        if (p == 0 && obj->ghost) p = AddGhostInterface(*obj, iid);
         if (p == 0) {
             UT_INFO("winrt: %s does not implement %s", obj->class_name.c_str(), iid.ToString().c_str());
             *reinterpret_cast<uint64_t*>(args[2]) = 0;
@@ -302,10 +378,25 @@ bool Runtime::Dispatch(NtThread& thread, uint32_t number, SyscallArgs& args, uin
     case 5: *reinterpret_cast<uint32_t*>(args[1]) = 0; *result = kSOk; return true;  // GetTrustLevel
     default: break;
     }
-    Method& m = iface->methods[slot - 6];
-    Call call {*kernel_, thread, args, *obj, *iface, slot - 6};
+method:
+    Method& m = iface->methods[slot - iface->base_slots];
+    Call call {*kernel_, thread, args, *obj, *iface, slot - static_cast<uint32_t>(iface->base_slots)};
     UT_DEBUG("winrt: %s.%s::%s", obj->class_name.c_str(), iface->name.c_str(), m.name.c_str());
     if (m.fn) { *result = m.fn(call); return true; }
+    if (iface->fallback) { *result = iface->fallback(call); return true; }
+    if (m.ctor) {
+        auto it = classes_.find(obj->class_name);
+        Obj* instance = it == classes_.end() ? nullptr : it->second.create(*this);
+        if (instance == nullptr) { *result = kEFail; return true; }
+        *call.Ptr<uint64_t>(m.ret_arg) = Pointer(*instance, *instance->ifaces[0]);
+        *result = kSOk;
+        return true;
+    }
+    if (m.async_op) {
+        if (auto* out = call.Ptr<uint64_t>(m.ret_arg)) *out = NewAsync(m.async_kind, 0);
+        *result = kSOk;
+        return true;
+    }
     if (m.event_add) {
         // add_X(handler, token*): remember the handler under the event's name.
         std::string event = m.name.substr(4);

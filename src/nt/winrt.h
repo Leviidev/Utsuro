@@ -35,6 +35,12 @@ struct Method {
     bool event_add {false};
     bool event_remove {false};
     HostFn fn;             ///< Optional; without it the default behaviour applies.
+    int params {0};        ///< Plain COM: parameter count after `this`.
+    int out_index {-1};    ///< Plain COM: the parameter that returns a new object, if any.
+    std::string out_type;  ///< Plain COM: that object's interface name.
+    bool ctor {false};     ///< A factory CreateInstance: makes a new instance of the factory's class.
+    bool async_op {false}; ///< Returns IAsyncOperation<T> / IAsyncAction through the trailing out parameter.
+    Out async_kind {Out::None};   ///< The T of that operation.
 };
 
 struct Iface {
@@ -44,6 +50,10 @@ struct Iface {
     uint64_t vtable {0};
     uint32_t first_id {0};
     bool guessed {false};              ///< The GUID is a placeholder; the first unknown IID asked for adopts it.
+    int base_slots {6};                ///< 6 for WinRT (IUnknown + IInspectable), 3 for plain COM.
+    HostFn fallback;                   ///< Runs for methods without their own `fn` (plain COM).
+    uint32_t inline_table {0};         ///< Non-zero: the object embeds a copy of the vtable at this offset (Xbox device contexts).
+    std::vector<Guid> aliases;         ///< Other IIDs answered with this interface's pointer (its bases).
 };
 
 struct Obj {
@@ -56,7 +66,9 @@ struct Obj {
     /// Event handlers (guest COM delegates) by event name, each with its registration token.
     std::map<std::string, std::vector<std::pair<uint64_t, uint64_t>>> delegates;
     std::vector<uint64_t> queue;       ///< Pending work items (guest delegates) for a dispatcher.
+    std::vector<uint64_t> items;       ///< Elements of a host collection.
     int refs {1};
+    bool ghost {false};                ///< Answers every IID it is asked for (a class the host does not model).
 };
 
 /// One call into a host method.
@@ -79,6 +91,8 @@ public:
     bool Ready() const { return ready_; }
 
     Iface& DefineInterface(const std::string& name, const char* iid, std::vector<Method> methods, bool guessed = false);
+    /// A plain COM interface (IUnknown only); slots are `methods` in order.
+    Iface& DefineComInterface(const std::string& name, const char* iid, std::vector<Method> methods, HostFn fallback);
     /// Registers an activatable class: `statics` (may be null) is the factory's second interface.
     void DefineClass(const std::string& runtime_name, std::function<Obj*(Runtime&)> create, Iface* statics = nullptr);
     /// A class with several statics interfaces.
@@ -93,6 +107,16 @@ public:
     bool Override(const std::string& iface, const std::string& method, HostFn fn, int nth = 0);
     /// RoGetActivationFactory for a registered class. Returns an HRESULT.
     uint32_t GetActivationFactory(const std::string& name, const Guid& iid, uint64_t* out);
+    /// An already-completed IAsyncOperation<T> (or IAsyncAction when kind is None); returns its guest pointer.
+    uint64_t NewAsync(Out kind, uint64_t value, uint32_t hr = 0);
+    /// A read-only vector of interface pointers (IVectorView<T> for any T); returns the guest pointer.
+    uint64_t NewVectorView(std::vector<uint64_t> items);
+    /// A read-only String -> interface map; `key_value_pairs` is key HSTRING, value pointer, key, value...
+    uint64_t NewMapView(std::vector<uint64_t> key_value_pairs);
+    /// Replaces the body of every method called `method` in the interface called `iface`.
+    int OverrideAllNamed(const std::string& iface, const std::string& method, HostFn fn);
+    /// A stand-in object whose every interface succeeds without doing anything (logged).
+    Obj* NewGhost(const std::string& class_name);
 
     uint64_t MakeHString(const std::u16string& s);
     static std::u16string ReadHString(uint64_t h);
@@ -106,6 +130,7 @@ private:
     Runtime() = default;
     void Materialize(Iface& iface);
     uint64_t QueryInterface(Obj& obj, const Guid& iid);
+    uint64_t AddGhostInterface(Obj& obj, const Guid& iid);
 
     Kernel* kernel_ {nullptr};
     bool ready_ {false};
@@ -121,6 +146,9 @@ private:
     uint64_t next_token_ {1};
     friend struct Call;
 public:
+    /// The host object a guest interface pointer belongs to, or null.
+    Obj* FromPointer(uint64_t pointer);
+    Iface* activation_factory_iface() { return activation_factory_; }
     uint64_t NextToken() { return next_token_++; }
     /// Remembers `delegate` as a handler of `event` on `obj`; returns the registration token.
     uint64_t AddDelegate(Obj& obj, const std::string& event, uint64_t delegate);
@@ -132,6 +160,10 @@ public:
 
 /// Registers every class the runtime provides (winrt_classes.cpp).
 void RegisterClasses(Runtime& rt);
+uint64_t CurrentUserPointer();   ///< The one signed-in Windows.Xbox.System.User.
 void RegisterCoreClasses(Runtime& rt);
+void RegisterCollections(Runtime& rt);
+void RegisterAsync(Runtime& rt);
+void RegisterStorage(Runtime& rt);
 
 } // namespace utsuro::nt::winrt

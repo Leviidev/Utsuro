@@ -8,14 +8,62 @@ Each output file is named <image>_<timestamp>_<sizeofimage>.txt, one record per 
   C <rva> <len>                indexed operand [idx*scale+disp32]: needs a hand stub (reported)
   E <rva> <len>                mov qword ptr [rsp], imm32: stub stores the full 64-bit address
   F <rva> <len> <reg>          add reg64, imm32: stub adds the full 64-bit address
+  G <rva> <len> <pos>          32-bit lea/mov/add on a register holding a relocated address: set REX.W at byte <pos>
   D <rva> <len>                anything else (reported)
 """
-import os, sys, struct
+import os, sys, struct, re
 import pefile
 from capstone import Cs, CS_ARCH_X86, CS_MODE_64, CS_OP_MEM, CS_OP_IMM, CS_OP_REG
 from capstone.x86 import X86_REG_INVALID, X86_REG_RSP
 
 LO, HI = 0x7FFE0000, 0x7FFE1000
+
+_Q = {'eax': 'rax', 'ecx': 'rcx', 'edx': 'rdx', 'ebx': 'rbx', 'esp': 'rsp', 'ebp': 'rbp', 'esi': 'rsi', 'edi': 'rdi'}
+
+def norm(name):
+    if name in _Q: return _Q[name]
+    if re.match(r'^r\d+d$', name): return name[:-1]
+    return name
+
+def rex_pos(code):
+    for i, b in enumerate(code[:5]):
+        if 0x40 <= b <= 0x4F: return i
+        if b not in (0x66, 0x67, 0xF2, 0xF3, 0x2E, 0x3E, 0x26, 0x36, 0x64, 0x65): return None
+    return None
+
+def derived(md, img, b_records, covered):
+    """Instructions after a `mov r32, <kusd>` that keep the address in 32 bits, which a relocated
+    (64-bit) address would truncate: lea r32,[R+d], mov r32,R32, add/sub r32,imm."""
+    out = []
+    for kind, rva, ln, reg, _ in b_records:
+        if kind != 'B': continue
+        holding = {norm(reg)}
+        off = rva + ln
+        for _step in range(24):
+            ins = next(md.disasm(img[off:off + 15], off), None)
+            if ins is None: break
+            off += len(ins.bytes)
+            if ins.mnemonic in ('ret', 'jmp', 'call', 'int3'): break
+            ops = ins.operands
+            if not ops or ops[0].type != CS_OP_REG: continue
+            dst = norm(ins.reg_name(ops[0].reg))
+            promote = False
+            if ins.mnemonic == 'lea' and ops[0].size == 4 and ops[1].type == CS_OP_MEM:
+                m = ops[1].mem
+                if m.base != X86_REG_INVALID and norm(ins.reg_name(m.base)) in holding and m.index == X86_REG_INVALID: promote = True
+            elif ins.mnemonic == 'mov' and ops[0].size == 4 and len(ops) > 1 and ops[1].type == CS_OP_REG and norm(ins.reg_name(ops[1].reg)) in holding:
+                promote = True
+            elif ins.mnemonic in ('add', 'sub') and ops[0].size == 4 and dst in holding and len(ops) > 1 and ops[1].type == CS_OP_IMM:
+                promote = True
+            if promote:
+                pos = rex_pos(bytes(ins.bytes))
+                if pos is not None and ins.address not in covered:
+                    out.append(('G', ins.address, len(ins.bytes), str(pos), ins.mnemonic + ' ' + ins.op_str))
+                    covered.add(ins.address)
+                holding.add(dst)
+            elif dst in holding:
+                holding.discard(dst)
+    return out
 
 def scan(path):
     pe = pefile.PE(path, fast_load=True)
@@ -97,6 +145,7 @@ def scan(path):
                         hit = ('D', None)
             if hit:
                 records.append((hit[0], ins.address, len(ins.bytes), hit[1], ins.mnemonic + ' ' + ins.op_str))
+    records += derived(md, img, [r for r in records if r[0] == 'B'], {r[1] for r in records})
     return pe, sorted(records, key=lambda r: r[1])
 
 def main():

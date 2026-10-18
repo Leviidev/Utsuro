@@ -2,6 +2,9 @@
 // DEFAULT). Hives are read-only; writes go to an in-memory overlay and are lost on exit.
 #include "nt/kernel.h"
 
+#include <fstream>
+#include <sstream>
+
 #include "engine/log.h"
 
 #include <algorithm>
@@ -157,6 +160,7 @@ struct Node {
 
 struct Overlay {
     bool created {false};
+    std::string display_name;   ///< The key's name as it was created, with its case.
     std::map<std::string, Hive::Value> values;   // key: lower-cased value name
     std::set<std::string> deleted_values;
 };
@@ -282,6 +286,11 @@ public:
 
     std::string NameOf(const Node& n) {
         if (n.hive != nullptr) return n.hive->Name(n.cell);
+        {
+            std::scoped_lock lock {mutex_};
+            auto it = overlay_.find(n.path);
+            if (it != overlay_.end() && !it->second.display_name.empty()) return it->second.display_name;
+        }
         const auto slash = n.path.rfind('\\');
         return slash == std::string::npos ? n.path : n.path.substr(slash + 1);
     }
@@ -556,6 +565,64 @@ NTSTATUS Succeed(Kernel&, NtThread&, SyscallArgs&) { return STATUS_SUCCESS; }
 } // namespace
 
 void InitRegistry(const std::string& config_dir) { g_registry.Init(config_dir); }
+
+/// Registers the in-process activatable classes a package's manifest declares, the way package
+/// deployment does: ActivatableClassId\<name> with the DLL that serves it.
+void RegisterPackageClasses(const std::string& manifest_path) {
+    std::ifstream in(manifest_path);
+    if (!in) return;
+    std::stringstream ss;
+    ss << in.rdbuf();
+    const std::string xml = ss.str();
+    auto utf16 = [](const std::string& text) {
+        std::vector<uint8_t> out;
+        for (char c : text) { out.push_back(static_cast<uint8_t>(c)); out.push_back(0); }
+        out.push_back(0); out.push_back(0);
+        return out;
+    };
+    auto dword = [](uint32_t v) { std::vector<uint8_t> out(4); std::memcpy(out.data(), &v, 4); return out; };
+    size_t count = 0, at = 0;
+    while ((at = xml.find("<InProcessServer>", at)) != std::string::npos) {
+        const size_t end = xml.find("</InProcessServer>", at);
+        if (end == std::string::npos) break;
+        const std::string block = xml.substr(at, end - at);
+        at = end;
+        const size_t p0 = block.find("<Path>"), p1 = block.find("</Path>");
+        if (p0 == std::string::npos || p1 == std::string::npos) continue;
+        const std::string dll = block.substr(p0 + 6, p1 - p0 - 6);
+        size_t c = 0;
+        while ((c = block.find("ActivatableClassId=\"", c)) != std::string::npos) {
+            c += 20;
+            const size_t q = block.find('"', c);
+            if (q == std::string::npos) break;
+            const std::string id = block.substr(c, q - c);
+            auto& ov = g_registry.OverlayFor("machine\\software\\microsoft\\windowsruntime\\activatableclassid\\" + Lower(id));
+            ov.created = true;
+            ov.display_name = id;
+            {
+                // combase resolves a class through a CLSID: ActivatableClassId\<id>\CLSID, then WindowsRuntime\CLSID\{clsid}.
+                uint64_t h1 = 1469598103934665603ull, h2 = 0x9E3779B97F4A7C15ull;
+                for (char ch : id) { h1 = (h1 ^ static_cast<uint8_t>(ch)) * 1099511628211ull; h2 = (h2 + static_cast<uint8_t>(ch)) * 0xBF58476D1CE4E5B9ull; }
+                char guid[48];
+                std::snprintf(guid, sizeof guid, "{%08x-%04x-%04x-%04x-%012llx}", static_cast<uint32_t>(h1 >> 32), static_cast<uint32_t>(h1 >> 16) & 0xFFFF,
+                              0x4000 | (static_cast<uint32_t>(h2 >> 48) & 0x0FFF), 0x8000 | (static_cast<uint32_t>(h2 >> 32) & 0x3FFF),
+                              static_cast<unsigned long long>(h2 & 0xFFFFFFFFFFFFull));
+                ov.values["clsid"] = {"CLSID", 1, utf16(guid)};
+                auto& cv = g_registry.OverlayFor("machine\\software\\microsoft\\windowsruntime\\clsid\\" + Lower(guid));
+                cv.created = true;
+                cv.display_name = guid;
+                cv.values["activatableclassid"] = {"ActivatableClassId", 1, utf16(id)};
+            }
+            ov.values["dllpath"] = {"DllPath", 1, utf16("G:\\" + dll)};
+            ov.values["activationtype"] = {"ActivationType", 4, dword(0)};
+            ov.values["threading"] = {"Threading", 4, dword(0)};
+            ov.values["trustlevel"] = {"TrustLevel", 4, dword(0)};
+            ++count;
+            c = q;
+        }
+    }
+    UT_INFO("registry: %zu package classes from %s", count, manifest_path.c_str());
+}
 
 /// Development aid: prints every WinRT activatable class with the DLL that serves it.
 void DumpActivatableClasses() {

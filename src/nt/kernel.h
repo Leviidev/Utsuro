@@ -49,7 +49,7 @@ using SyscallFn = NTSTATUS (*)(Kernel&, NtThread&, SyscallArgs&);
 
 enum class ObjType {
     File, Section, Event, Semaphore, Mutant, Thread, Process, Key, Timer, IoCompletion,
-    Directory, SymbolicLink, Token, KeyedEvent, Job, Generic
+    Directory, SymbolicLink, Token, KeyedEvent, Job, WorkerFactory, Generic
 };
 
 struct Object : std::enable_shared_from_this<Object> {
@@ -96,11 +96,27 @@ struct TimerObject : Object {
     uint64_t apc_tid {0};
 };
 
+struct WorkerFactoryObject;
+
 struct IoCompletionObject : Object {
     IoCompletionObject() : Object(ObjType::IoCompletion) {}
     bool IsWaitable() const override { return true; }
     struct Packet { uint64_t key, apc_context; int32_t status; uint64_t information; };
     std::deque<Packet> queue;
+    std::weak_ptr<WorkerFactoryObject> factory;   ///< The thread pool serving this port, if any.
+};
+
+/// The Windows 8 thread pool's kernel half: worker threads started on demand that take their
+/// work from an I/O completion port.
+struct WorkerFactoryObject : Object {
+    WorkerFactoryObject() : Object(ObjType::WorkerFactory) {}
+    std::shared_ptr<IoCompletionObject> port;
+    uint64_t start_routine {0}, start_parameter {0};
+    uint64_t stack_reserve {0}, stack_commit {0};
+    uint32_t min_threads {0}, max_threads {0x7FFFFFFF};
+    uint32_t total {0}, waiting {0}, binding {0};
+    int64_t timeout {0}, retry_timeout {0}, idle_timeout {0};
+    bool paused {false}, shutdown {false};
 };
 
 struct FileObject : Object {
@@ -423,8 +439,12 @@ void RegisterSyncSyscalls(std::unordered_map<std::string, SyscallFn>& table);
 void RegisterThreadSyscalls(std::unordered_map<std::string, SyscallFn>& table);
 void RegisterInfoSyscalls(std::unordered_map<std::string, SyscallFn>& table);
 void RegisterMiscSyscalls(std::unordered_map<std::string, SyscallFn>& table);
+void RegisterWorkerFactorySyscalls(std::unordered_map<std::string, SyscallFn>& table);
+/// Starts a worker thread when a packet arrives at a port whose pool has none idle.
+void WorkerFactoryPacketQueued(Kernel& k, const std::shared_ptr<IoCompletionObject>& port);
 void RegisterRegistrySyscalls(std::unordered_map<std::string, SyscallFn>& table);
 void InitRegistry(const std::string& config_dir);
+void RegisterPackageClasses(const std::string& manifest_path);
 
 bool BuildNlsTables(VirtualMemory& vm, uint64_t* ansi, uint64_t* oem, uint64_t* casemap);
 

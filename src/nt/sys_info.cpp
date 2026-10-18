@@ -64,7 +64,7 @@ NTSTATUS NtQueryObject(Kernel& k, NtThread&, SyscallArgs& a) {
     if (!o) return STATUS_INVALID_HANDLE;
     static const char* const names[] = {"File", "Section", "Event", "Semaphore", "Mutant", "Thread", "Process", "Key",
                                         "Timer", "IoCompletion", "Directory", "SymbolicLink", "Token", "KeyedEvent",
-                                        "Job", "Object"};
+                                        "Job", "TpWorkerFactory", "Object"};
     switch (cls) {
     case 0: {  // ObjectBasicInformation
         if (len < 56) return STATUS_INFO_LENGTH_MISMATCH;
@@ -281,9 +281,65 @@ NTSTATUS NtQuerySystemInformation(Kernel& k, NtThread&, SyscallArgs& a) {
     }
 }
 
-NTSTATUS NtQuerySystemInformationEx(Kernel&, NtThread&, SyscallArgs& a) {
-    UT_DEBUG("NtQuerySystemInformationEx class %u not handled", static_cast<uint32_t>(a[0]));
-    return STATUS_INVALID_INFO_CLASS;
+// NtQuerySystemInformationEx(Class, Input, InputLength, Output, OutputLength, PULONG ReturnLength)
+NTSTATUS NtQuerySystemInformationEx(Kernel& k, NtThread&, SyscallArgs& a) {
+    const uint32_t cls = static_cast<uint32_t>(a[0]);
+    if (cls != 107) {   // SystemLogicalProcessorAndGroupInformation: GetLogicalProcessorInformationEx
+        UT_DEBUG("NtQuerySystemInformationEx class %u not handled", cls);
+        return STATUS_INVALID_INFO_CLASS;
+    }
+    const uint32_t relationship = a[1] != 0 && static_cast<uint32_t>(a[2]) >= 4 ? *a.Ptr<uint32_t>(1) : 0xFFFF;
+    const uint32_t n = k.NumberOfProcessors();
+    const uint64_t all = n >= 64 ? ~0ull : (1ull << n) - 1;
+    std::vector<uint8_t> out;
+    auto record = [&](uint32_t rel, uint32_t size) -> uint8_t* {
+        const size_t at = out.size();
+        out.resize(at + size);
+        *reinterpret_cast<uint32_t*>(&out[at]) = rel;
+        *reinterpret_cast<uint32_t*>(&out[at + 4]) = size;
+        return &out[at + 8];
+    };
+    auto affinity = [](uint8_t* p, uint64_t mask) { *reinterpret_cast<uint64_t*>(p) = mask; };   // Mask, Group 0
+    if (relationship == 0 || relationship == 0xFFFF) {
+        for (uint32_t i = 0; i < n; ++i) {
+            uint8_t* r = record(0, 48);   // RelationProcessorCore
+            r[0] = 0;
+            *reinterpret_cast<uint16_t*>(r + 22) = 1;
+            affinity(r + 24, 1ull << i);
+        }
+    }
+    if (relationship == 1 || relationship == 0xFFFF) {
+        uint8_t* r = record(1, 48);       // RelationNumaNode
+        affinity(r + 24, all);
+    }
+    if (relationship == 2 || relationship == 0xFFFF) {
+        for (uint32_t level = 1; level <= 3; ++level) {
+            uint8_t* r = record(2, 56);   // RelationCache: Level, Associativity, LineSize, CacheSize, Type
+            r[0] = static_cast<uint8_t>(level);
+            r[1] = 8;
+            *reinterpret_cast<uint16_t*>(r + 2) = 64;
+            *reinterpret_cast<uint32_t*>(r + 4) = level == 1 ? 32 * 1024 : level == 2 ? 256 * 1024 : 4 * 1024 * 1024;
+            *reinterpret_cast<uint32_t*>(r + 8) = level == 1 ? 1 : 2;   // data / unified
+            affinity(r + 32, all);
+        }
+    }
+    if (relationship == 3 || relationship == 0xFFFF) {
+        uint8_t* r = record(3, 48);       // RelationProcessorPackage
+        *reinterpret_cast<uint16_t*>(r + 22) = 1;
+        affinity(r + 24, all);
+    }
+    if (relationship == 4 || relationship == 0xFFFF) {
+        uint8_t* r = record(4, 80);       // RelationGroup
+        *reinterpret_cast<uint16_t*>(r) = 1;
+        *reinterpret_cast<uint16_t*>(r + 2) = 1;
+        r[24] = static_cast<uint8_t>(n);
+        r[25] = static_cast<uint8_t>(n);
+        affinity(r + 24 + 40, all);
+    }
+    if (auto* ret = a.Ptr<uint32_t>(5)) *ret = static_cast<uint32_t>(out.size());
+    if (static_cast<uint32_t>(a[4]) < out.size()) return STATUS_INFO_LENGTH_MISMATCH;
+    std::memcpy(a.Ptr<uint8_t>(3), out.data(), out.size());
+    return STATUS_SUCCESS;
 }
 
 // NtQueryDefaultLocale(BOOLEAN UserProfile, PLCID)

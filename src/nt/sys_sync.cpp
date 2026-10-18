@@ -11,7 +11,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <atomic>
 #include <cstring>
+#include <thread>
 
 namespace utsuro::nt {
 
@@ -588,10 +590,12 @@ NTSTATUS NtOpenIoCompletion(Kernel&, NtThread&, SyscallArgs&) { return STATUS_OB
 NTSTATUS NtSetIoCompletion(Kernel& k, NtThread&, SyscallArgs& a) {
     auto c = k.Get<IoCompletionObject>(a[0], ObjType::IoCompletion);
     if (!c) return STATUS_INVALID_HANDLE;
-    std::scoped_lock lock {k.WaitMutex()};
+    std::unique_lock lock {k.WaitMutex()};
     c->queue.push_back({a[1], a[2], static_cast<int32_t>(a[3]), a[4]});
     c->signaled = true;
     k.NotifyAll();
+    lock.unlock();
+    WorkerFactoryPacketQueued(k, c);
     return STATUS_SUCCESS;
 }
 
@@ -599,10 +603,12 @@ NTSTATUS NtSetIoCompletionEx(Kernel& k, NtThread&, SyscallArgs& a) {
     // (Port, ReserveHandle, Key, ApcContext, Status, Information)
     auto c = k.Get<IoCompletionObject>(a[0], ObjType::IoCompletion);
     if (!c) return STATUS_INVALID_HANDLE;
-    std::scoped_lock lock {k.WaitMutex()};
+    std::unique_lock lock {k.WaitMutex()};
     c->queue.push_back({a[2], a[3], static_cast<int32_t>(a[4]), a[5]});
     c->signaled = true;
     k.NotifyAll();
+    lock.unlock();
+    WorkerFactoryPacketQueued(k, c);
     return STATUS_SUCCESS;
 }
 
@@ -784,7 +790,83 @@ bool Kernel::DeliverUserApc(NtThread& thread) {
     return true;
 }
 
+// Wait completion packets -------------------------------------------------------------
+//
+// The thread pool's wait objects: a packet ties a waitable object to an I/O completion port; when
+// the object is signalled the packet's key/context arrive on the port, once.
+
+namespace {
+
+struct WaitCompletionPacket : Object {
+    WaitCompletionPacket() : Object(ObjType::Generic) {}
+    int state {0};              ///< 0 idle, 1 waiting for the target, 2 delivered. Guarded by the wait mutex.
+    uint64_t generation {0};    ///< Bumped by every association and cancellation; stale watchers stop.
+};
+
+std::shared_ptr<WaitCompletionPacket> GetPacket(Kernel& k, HANDLE h) {
+    return std::dynamic_pointer_cast<WaitCompletionPacket>(k.GetObject(h));
+}
+
+} // namespace
+
+NTSTATUS NtCreateWaitCompletionPacket(Kernel& k, NtThread&, SyscallArgs& a) {
+    *a.Ptr<HANDLE>(0) = k.AddHandle(std::make_shared<WaitCompletionPacket>());
+    return STATUS_SUCCESS;
+}
+
+// NtAssociateWaitCompletionPacket(Packet, IoCompletion, Target, Key, ApcContext, IoStatus, Information, PBOOLEAN AlreadySignaled)
+NTSTATUS NtAssociateWaitCompletionPacket(Kernel& k, NtThread&, SyscallArgs& a) {
+    auto pkt = GetPacket(k, a[0]);
+    auto port = k.Get<IoCompletionObject>(a[1], ObjType::IoCompletion);
+    auto target = k.GetObject(a[2]);
+    if (!pkt || !port || !target) return STATUS_INVALID_HANDLE;
+    const IoCompletionObject::Packet delivery {a[3], a[4], static_cast<int32_t>(a[5]), a[6]};
+    uint64_t generation;
+    {
+        std::scoped_lock lock {k.WaitMutex()};
+        if (pkt->state == 1) return STATUS_INVALID_PARAMETER;
+        pkt->state = 1;
+        generation = ++pkt->generation;
+    }
+    if (auto* already = a.Ptr<uint8_t>(7)) *already = 0;
+    std::thread([&k, pkt, port, target, delivery, generation] {
+        NtThread waiter {k, 0};
+        std::unique_lock lock {k.WaitMutex()};
+        for (;;) {
+            if (pkt->generation != generation || pkt->state != 1 || k.exiting) return;
+            k.CheckTimersLocked();
+            const NTSTATUS r = TryAcquire(*target, waiter);
+            if (r == STATUS_WAIT_0 || r == STATUS_ABANDONED_WAIT_0) break;
+            k.WaitCv().wait_for(lock, std::chrono::milliseconds(20));
+        }
+        pkt->state = 2;
+        port->queue.push_back(delivery);
+        port->signaled = true;
+        k.NotifyAll();
+        lock.unlock();
+        WorkerFactoryPacketQueued(k, port);
+    }).detach();
+    return STATUS_SUCCESS;
+}
+
+// NtCancelWaitCompletionPacket(Packet, BOOLEAN RemoveSignaledPacketFromQueue)
+NTSTATUS NtCancelWaitCompletionPacket(Kernel& k, NtThread&, SyscallArgs& a) {
+    auto pkt = GetPacket(k, a[0]);
+    if (!pkt) return STATUS_INVALID_HANDLE;
+    std::scoped_lock lock {k.WaitMutex()};
+    if (pkt->state == 1) {
+        pkt->state = 0;
+        ++pkt->generation;
+        k.NotifyAll();
+        return STATUS_SUCCESS;
+    }
+    return pkt->state == 2 ? static_cast<NTSTATUS>(0xC0000120) /* STATUS_NOT_CANCELLED */ : STATUS_SUCCESS;
+}
+
 void RegisterSyncSyscalls(std::unordered_map<std::string, SyscallFn>& t) {
+    t["NtCreateWaitCompletionPacket"] = NtCreateWaitCompletionPacket;
+    t["NtAssociateWaitCompletionPacket"] = NtAssociateWaitCompletionPacket;
+    t["NtCancelWaitCompletionPacket"] = NtCancelWaitCompletionPacket;
     t["NtWaitForSingleObject"] = NtWaitForSingleObject;
     t["NtWaitForMultipleObjects"] = NtWaitForMultipleObjects;
     t["NtSignalAndWaitForSingleObject"] = NtSignalAndWaitForSingleObject;

@@ -16,15 +16,62 @@ Method Put(const char* name) { return Method {name, Out::None, 0, false, false, 
 Method Add(const char* name) { return Method {name, Out::None, 0, true, false, nullptr}; }
 Method Remove(const char* name) { return Method {name, Out::None, 0, false, true, nullptr}; }
 Method Result(const char* name, Out out, int in_params) { return Method {name, out, in_params, false, false, nullptr}; }
+Method Ctor(const char* name, int in_params) {
+    Method m;
+    m.name = name;
+    m.ret_arg = in_params;
+    m.ctor = true;
+    return m;
+}
+Method AsyncResult(const char* name, Out kind, int in_params) {
+    Method m;
+    m.name = name;
+    m.ret_arg = in_params;
+    m.async_op = true;
+    m.async_kind = kind;
+    return m;
+}
 Method Fn(const char* name, Out out, HostFn fn) { return Method {name, out, 0, false, false, std::move(fn)}; }
 
 #include "nt/winrt_generated.inc"
 
 } // namespace
 
+uint64_t CurrentUserPointer() {
+    static Obj* user = nullptr;
+    Runtime& r = Runtime::Get();
+    Iface* user_if = r.FindInterface("IUser");
+    if (user == nullptr) user = r.NewObject("Windows.Xbox.System.User", {user_if});
+    ++user->refs;
+    return r.Pointer(*user, *user_if);
+}
+
 void RegisterClasses(Runtime& rt) {
     RegisterGenerated(rt);
     RegisterCoreClasses(rt);
+    RegisterCollections(rt);
+    RegisterAsync(rt);
+    RegisterStorage(rt);
+    // One signed-in user, id 1, who plays on the one pad.
+    {
+        rt.Override("IUserStatics", "get_Users", [](Call& c) -> uint32_t {
+            *c.Ptr<uint64_t>(0) = Runtime::Get().NewVectorView({CurrentUserPointer()});
+            return 0;
+        });
+        rt.Override("IUserStatics", "GetUserById", [](Call& c) -> uint32_t {
+            *c.Ptr<uint64_t>(1) = c.Arg(0) == 1 ? CurrentUserPointer() : 0;
+            return 0;
+        });
+        rt.Override("IUser", "get_Id", [](Call& c) -> uint32_t { *c.Ptr<uint32_t>(0) = 1; return 0; });
+        rt.Override("IUser", "get_IsSignedIn", [](Call& c) -> uint32_t { *c.Ptr<uint8_t>(0) = 1; return 0; });
+        rt.Override("IUser", "get_XboxUserId", [](Call& c) -> uint32_t { *c.Ptr<uint64_t>(0) = Runtime::Get().MakeHString(u"2535400000000001"); return 0; });
+        rt.Override("IUser", "get_XboxUserHash", [](Call& c) -> uint32_t { *c.Ptr<uint64_t>(0) = Runtime::Get().MakeHString(u"utsuro"); return 0; });
+    }
+    // The pads attached: none until input is wired.
+    rt.Override("IGamepadStatics", "get_Gamepads", [](Call& c) -> uint32_t {
+        *c.Ptr<uint64_t>(0) = Runtime::Get().NewVectorView({});
+        return 0;
+    });
     // Windows.ApplicationModel.Store.CurrentApp: the title is always licensed and never a trial.
     Iface& license = rt.DefineInterface("ILicenseInformation", "8EBCAB32-0B5A-4A8A-A0A7-DC4B4B3C0D56", {
         Get("get_ProductLicenses", Out::Ptr),

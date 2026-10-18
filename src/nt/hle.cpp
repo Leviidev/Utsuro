@@ -1,8 +1,10 @@
 // hle.cpp -- exports of guest DLLs that are implemented by the host instead. The entry of
 // the guest function is overwritten with `mov r10, rcx; mov eax, N; syscall; ret`, which
 // lands in Kernel::Dispatch like any other syscall; the host function's result is rax.
+#include "nt/d3d.h"
 #include "nt/kernel.h"
 #include "nt/winrt.h"
+#include "nt/xaudio2.h"
 
 #include "engine/log.h"
 
@@ -48,8 +50,19 @@ std::string GuidToString(const uint8_t* g) {
     return b;
 }
 
+// Logs the guest call chain of a displaced-prologue hook (four pushes, then the return address).
+void LogCaller(Kernel& k, NtThread& thread, SyscallArgs& a, const char* what) {
+    GuestCpuState st;
+    if (thread.control == nullptr || !thread.control->CaptureCpuState(&st)) return;
+    const uint64_t ret = *reinterpret_cast<uint64_t*>(a.rsp + 32);
+    st.gregs[4] = a.rsp + 40;
+    const auto frames = k.Backtrace(ret, st.gregs, 10);
+    UT_INFO("%s called from:", what);
+    for (size_t i = 0; i < frames.size(); ++i) UT_INFO("      #%zu %s", i, k.Describe(frames[i]).c_str());
+}
+
 // combase!RoGetActivationFactory(HSTRING activatableClassId, REFIID iid, void** factory)
-uint64_t RoGetActivationFactory(Kernel&, NtThread&, SyscallArgs& a) {
+uint64_t RoGetActivationFactory(Kernel& k, NtThread& thread, SyscallArgs& a) {
     const std::string name = HstringToUtf8(a[0]);
     winrt::Guid iid;
     std::memcpy(iid.b, a.Ptr<uint8_t>(1), 16);
@@ -58,12 +71,15 @@ uint64_t RoGetActivationFactory(Kernel&, NtThread&, SyscallArgs& a) {
     const uint32_t hr = winrt::Runtime::Get().GetActivationFactory(name, iid, &p);
     if (hr == 0) { UT_DEBUG("RoGetActivationFactory(%s, %s) -> host class", name.c_str(), iid.ToString().c_str()); if (out) *out = p; return 0; }
     UT_INFO("RoGetActivationFactory(%s, %s): not a host class (%#x), using the system's", name.c_str(), iid.ToString().c_str(), hr);
+    LogCaller(k, thread, a, "RoGetActivationFactory");
     return ~0ull;  // decline: run the original
 }
 
 const Hook kHooks[] = {
     {"combase.dll", "RoGetActivationFactory", RoGetActivationFactory, 5},
     {"bcrypt.dll", "BCryptGenRandom", BCryptGenRandom, 0},
+    {"d3d11_x.dll", "D3D11CreateDevice", d3d::CreateDevice, 0},
+    {"xaudio2_9.dll", "CreateXAudio2Object", xaudio2::CreateXAudio2Object, 0},
 };
 
 constexpr uint32_t kHleBase = 0xFFFF8000u;  // below winrt::Runtime::kBase's span ends here

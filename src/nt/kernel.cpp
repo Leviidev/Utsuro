@@ -489,6 +489,7 @@ void Kernel::RegisterSyscalls() {
     RegisterInfoSyscalls(handlers_);
     RegisterMiscSyscalls(handlers_);
     RegisterRegistrySyscalls(handlers_);
+    RegisterWorkerFactorySyscalls(handlers_);
     // Numbers come from the ntdll stubs themselves: `mov r10, rcx; mov eax, N; syscall`.
     const auto exports = ListExports(ntdll_base_);
     for (const auto& [name, address] : exports) ntdll_symbols_[address] = name;

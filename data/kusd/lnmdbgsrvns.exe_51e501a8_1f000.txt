@@ -1,4 +1,6 @@
 B 1cf8 5 edx  ; mov edx, 0x7ffe0018
+G 1d02 4 0  ; lea r8d, [rdx - 4]
+G 1d06 4 0  ; lea r9d, [rdx + 4]
 A 11368 7  ; mov eax, dword ptr [0x7ffe0014]
 A 11373 7  ; mov eax, dword ptr [0x7ffe0018]
 A 113c1 7  ; mov eax, dword ptr [0x7ffe0008]

@@ -22,7 +22,15 @@ static void RegisterGenerated(Runtime& rt) {
         Add("add_CurrentUserChanged"),
         Remove("remove_CurrentUserChanged"),
     }, false);
-        rt.DefineClass("Windows.Xbox.ApplicationModel.Core.CoreApplicationContext", [](Runtime&) -> Obj* { return nullptr; }, &s_Windows_Xbox_ApplicationModel_Core_CoreApplicationContext);
+    Iface& s_Windows_Xbox_ApplicationModel_Core_CoreApplicationContext_0 = rt.DefineInterface("ICoreApplicationContext2", "E555452E-8E16-46A6-BF31-34189B6CAD40", {
+        Result("SetCurrentUser", None, 1),
+    }, false);
+    Iface& s_Windows_Xbox_ApplicationModel_Core_CoreApplicationContext_1 = rt.DefineInterface("ICoreApplicationContext3", "52DB8037-0ECB-48F6-974D-5796ECF34B69", {
+        Get("get_CurrentSystemUser", Ptr),
+        Add("add_CurrentSystemUserChanged"),
+        Remove("remove_CurrentSystemUserChanged"),
+    }, false);
+        rt.DefineClassMulti("Windows.Xbox.ApplicationModel.Core.CoreApplicationContext", [](Runtime&) -> Obj* { return nullptr; }, {&s_Windows_Xbox_ApplicationModel_Core_CoreApplicationContext, &s_Windows_Xbox_ApplicationModel_Core_CoreApplicationContext_0, &s_Windows_Xbox_ApplicationModel_Core_CoreApplicationContext_1});
     }
     {
     Iface& i_Windows_Xbox_ApplicationModel_Core_UserContextLookup = rt.DefineInterface("IUserContextLookup", "3E696DFE-2D61-42CC-9B58-C23301606C58", {
@@ -34,8 +42,8 @@ static void RegisterGenerated(Runtime& rt) {
     }
     {
     Iface& s_Windows_Xbox_ApplicationModel_Help = rt.DefineInterface("IHelpStatics", "3691495d-4bea-4c05-8791-7f51a9b2bf6b", {
-        Result("Show", Ptr, 1),
-        Result("ShowForError", Ptr, 2),
+        AsyncResult("Show", None, 1),
+        AsyncResult("ShowForError", None, 2),
     }, false);
         rt.DefineClass("Windows.Xbox.ApplicationModel.Help", [](Runtime&) -> Obj* { return nullptr; }, &s_Windows_Xbox_ApplicationModel_Help);
     }
@@ -47,17 +55,22 @@ static void RegisterGenerated(Runtime& rt) {
     }
     {
     Iface& s_Windows_Xbox_ApplicationModel_Store_Product = rt.DefineInterface("IProductStatics", "76efb705-bdd4-4f6a-8d89-a9511d40afe7", {
-        Result("ShowPurchaseAsync", Ptr, 2),
-        Result("ShowDetailsAsync", Ptr, 2),
-        Result("ShowMarketplaceAsync", Ptr, 4),
-        Result("ShowRedeemCodeAsync", Ptr, 2),
-        Result("ShowSubscriptionAsync", Ptr, 3),
-        Result("CheckPrivilegeAsync", Ptr, 4),
-        Result("CheckPrivilegesAsync", Ptr, 4),
+        AsyncResult("ShowPurchaseAsync", None, 2),
+        AsyncResult("ShowDetailsAsync", None, 2),
+        AsyncResult("ShowMarketplaceAsync", None, 4),
+        AsyncResult("ShowRedeemCodeAsync", None, 2),
+        AsyncResult("ShowSubscriptionAsync", None, 3),
+        AsyncResult("CheckPrivilegeAsync", I32, 4),
+        AsyncResult("CheckPrivilegesAsync", I32, 4),
         Add("add_ProductPurchased"),
         Remove("remove_ProductPurchased"),
     }, false);
-        rt.DefineClass("Windows.Xbox.ApplicationModel.Store.Product", [](Runtime&) -> Obj* { return nullptr; }, &s_Windows_Xbox_ApplicationModel_Store_Product);
+    Iface& s_Windows_Xbox_ApplicationModel_Store_Product_0 = rt.DefineInterface("IProductStaticsV2", "3B082748-9469-4EBD-AE49-AAE86A76F42C", {
+    // guessed GUID
+        AsyncResult("ShowPurchaseForStoreIdAsync", None, 2),
+        AsyncResult("ShowDetailsForStoreIdAsync", None, 2),
+    }, true);
+        rt.DefineClassMulti("Windows.Xbox.ApplicationModel.Store.Product", [](Runtime&) -> Obj* { return nullptr; }, {&s_Windows_Xbox_ApplicationModel_Store_Product, &s_Windows_Xbox_ApplicationModel_Store_Product_0});
     }
     {
     Iface& s_Windows_Xbox_ApplicationModel_Store_Configuration = rt.DefineInterface("IConfigurationStatics", "9d50b2e8-eeb6-4ced-b9f1-3eb95b3c1e0f", {
@@ -260,16 +273,67 @@ static void RegisterGenerated(Runtime& rt) {
         rt.DefineClass("Windows.Xbox.Chat.ChatChannel", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.Chat.ChatChannel", {&i_Windows_Xbox_Chat_ChatChannel}); }, nullptr);
     }
     {
-        rt.DefineClass("Windows.Xbox.Chat.ChatDecoder", [](Runtime&) -> Obj* { return nullptr; }, nullptr);
+    Iface& i_Windows_Xbox_Chat_ChatDecoder_0 = rt.DefineInterface("IChatDecoder", "3165955b-adcf-4239-9e63-07b2e9533bfd", {
+        Get("get_Format", Ptr),
+        Result("Decode", None, 2),
+    }, false);
+    Iface& i_Windows_Xbox_Chat_ChatDecoder_1 = rt.DefineInterface("IChatDecoder2", "4d519838-b712-42b0-a3c5-5658954fa76a", {
+        Get("get_IsDataInFlight", I32),
+    }, false);
+        rt.DefineClass("Windows.Xbox.Chat.ChatDecoder", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.Chat.ChatDecoder", {&i_Windows_Xbox_Chat_ChatDecoder_0, &i_Windows_Xbox_Chat_ChatDecoder_1}); }, nullptr);
     }
     {
-        rt.DefineClass("Windows.Xbox.Chat.ChatEncoder", [](Runtime&) -> Obj* { return nullptr; }, nullptr);
+    Iface& s_Windows_Xbox_Chat_ChatEncoder_0 = rt.DefineInterface("IChatEncoderFactory", "28215da3-3b46-4f4c-beb9-6e5569af65a6", {
+        Ctor("CreateInstance", 2),
+    }, false);
+    Iface& i_Windows_Xbox_Chat_ChatEncoder_1 = rt.DefineInterface("IChatEncoder", "ed67b7a3-3721-47ff-b506-7056a7966b09", {
+        Result("Encode", None, 2),
+    }, false);
+    Iface& i_Windows_Xbox_Chat_ChatEncoder_2 = rt.DefineInterface("IChatEncoder2", "25ce9936-2db9-4ce5-be78-5ab4f25aba86", {
+        Get("get_IsDataInFlight", I32),
+    }, false);
+    Iface& i_Windows_Xbox_Chat_ChatEncoder_3 = rt.DefineInterface("IChatEncoder3", "0baf41f7-2cba-4d5a-8caf-c7bfa64a345e", {
+        Result("Encode", None, 4),
+    }, false);
+        rt.DefineClass("Windows.Xbox.Chat.ChatEncoder", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.Chat.ChatEncoder", {&i_Windows_Xbox_Chat_ChatEncoder_1, &i_Windows_Xbox_Chat_ChatEncoder_2, &i_Windows_Xbox_Chat_ChatEncoder_3}); }, &s_Windows_Xbox_Chat_ChatEncoder_0);
     }
     {
-        rt.DefineClass("Windows.Xbox.Chat.ChatParticipant", [](Runtime&) -> Obj* { return nullptr; }, nullptr);
+    Iface& s_Windows_Xbox_Chat_ChatParticipant_0 = rt.DefineInterface("IChatParticipantFactory", "176e29d1-fad2-4cf8-bdee-997ff11f0a00", {
+        Ctor("CreateInstance", 1),
+    }, false);
+    Iface& i_Windows_Xbox_Chat_ChatParticipant_1 = rt.DefineInterface("IChatParticipant", "61c41b43-cbb3-4f33-ab96-d8b2dbdc49df", {
+        Get("get_User", Ptr),
+        Get("get_ParticipantType", I32),
+        Put("put_ParticipantType"),
+        Get("get_Volume", I32),
+        Put("put_Volume"),
+    }, false);
+    Iface& i_Windows_Xbox_Chat_ChatParticipant_2 = rt.DefineInterface("IChatParticipant2", "256db5b7-Fbb8-4e2f-ac9a-55e5a259062b", {
+        Result("SynthesizeTextMessageAsAudioBuffers", None, 2),
+    }, false);
+        rt.DefineClass("Windows.Xbox.Chat.ChatParticipant", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.Chat.ChatParticipant", {&i_Windows_Xbox_Chat_ChatParticipant_1, &i_Windows_Xbox_Chat_ChatParticipant_2}); }, &s_Windows_Xbox_Chat_ChatParticipant_0);
     }
     {
-        rt.DefineClass("Windows.Xbox.Chat.ChatSession", [](Runtime&) -> Obj* { return nullptr; }, nullptr);
+    Iface& s_Windows_Xbox_Chat_ChatSession_0 = rt.DefineInterface("IChatSessionFactory", "53cb6065-c211-4b21-a3ef-cd544d22aba1", {
+        Ctor("CreateInstance", 2),
+        Ctor("CreateInstance", 3),
+    }, false);
+    Iface& i_Windows_Xbox_Chat_ChatSession_1 = rt.DefineInterface("IChatSession", "9af8480a-16a5-4905-ac0a-5514f3427893", {
+        Get("get_Channels", Ptr),
+        Add("add_StateChangedEvent"),
+        Remove("remove_StateChangedEvent"),
+        AsyncResult("GetStateAsync", Ptr, 0),
+    }, false);
+    Iface& i_Windows_Xbox_Chat_ChatSession_2 = rt.DefineInterface("IChatSession2", "8840b65e-eb13-4629-8f63-2854624460ff", {
+        Get("get_TranscriptionEnabled", I32),
+        Put("put_TranscriptionEnabled"),
+        Result("CreateTranscribingEncoder", Ptr, 3),
+        Add("add_TranscribedTextReadyEvent"),
+        Remove("remove_TranscribedTextReadyEvent"),
+        Result("GetParticipantRelationship", I32, 2),
+        Result("GetDedicatedSynthesisDevice", Ptr, 1),
+    }, false);
+        rt.DefineClass("Windows.Xbox.Chat.ChatSession", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.Chat.ChatSession", {&i_Windows_Xbox_Chat_ChatSession_1, &i_Windows_Xbox_Chat_ChatSession_2}); }, &s_Windows_Xbox_Chat_ChatSession_0);
     }
     {
     Iface& i_Windows_Xbox_Chat_ChatCaptureSource = rt.DefineInterface("IChatCaptureSource", "8c00bb0d-dc50-4512-b6b1-71bffec00333", {
@@ -549,7 +613,13 @@ static void RegisterGenerated(Runtime& rt) {
         Result("Create", Ptr, 2),
         Result("Create", Ptr, 1),
     }, false);
-        rt.DefineClass("Windows.Xbox.Management.Deployment.PackageTransferWatcher", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.Management.Deployment.PackageTransferWatcher", {&i_Windows_Xbox_Management_Deployment_PackageTransferWatcher}); }, &s_Windows_Xbox_Management_Deployment_PackageTransferWatcher);
+    Iface& i_Windows_Xbox_Management_Deployment_PackageTransferWatcher_0 = rt.DefineInterface("IPackageTransferWatcherTransferInfo", "BA1BAD13-11E1-43CE-BE44-845759796A7F", {
+        Get("get_TransferStatus", I32),
+        Get("get_TransferType", I32),
+        Add("add_TransferStatusChanged"),
+        Remove("remove_TransferStatusChanged"),
+    }, false);
+        rt.DefineClass("Windows.Xbox.Management.Deployment.PackageTransferWatcher", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.Management.Deployment.PackageTransferWatcher", {&i_Windows_Xbox_Management_Deployment_PackageTransferWatcher, &i_Windows_Xbox_Management_Deployment_PackageTransferWatcher_0}); }, &s_Windows_Xbox_Management_Deployment_PackageTransferWatcher);
     }
     {
     Iface& s_Windows_Xbox_Management_Deployment_PackageTransferWatcherStaticsForChunkSpecifiers = rt.DefineInterface("IPackageTransferWatcherStaticsForChunkSpecifiers", "6603ECCC-2664-4688-8212-922E5BA28716", {
@@ -559,7 +629,6 @@ static void RegisterGenerated(Runtime& rt) {
     }
     {
     Iface& i_Windows_Xbox_Management_Deployment_PackageTransferManager = rt.DefineInterface("IPackageTransferManager", "C2D4B94B-0413-4380-B2F2-AB9872D08285", {
-        Get("get_Current", Ptr),
         Result("UpdateInstallOrder", None, 2),
         Result("IsChunkInstalled", Bool, 1),
         Result("AreChunksInstalled", Bool, 1),
@@ -567,9 +636,25 @@ static void RegisterGenerated(Runtime& rt) {
         Get("get_TransferStatus", I32),
     }, false);
     Iface& s_Windows_Xbox_Management_Deployment_PackageTransferManager = rt.DefineInterface("IPackageTransferManagerStatics", "D6CF4CAE-9EB1-4CBE-B426-7E75D429F846", {
+        Get("get_Current", Ptr),
         Result("Create", Ptr, 1),
     }, false);
-        rt.DefineClass("Windows.Xbox.Management.Deployment.PackageTransferManager", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.Management.Deployment.PackageTransferManager", {&i_Windows_Xbox_Management_Deployment_PackageTransferManager}); }, &s_Windows_Xbox_Management_Deployment_PackageTransferManager);
+    Iface& s_Windows_Xbox_Management_Deployment_PackageTransferManager_0 = rt.DefineInterface("IContentUpdateStatics", "8D81C55A-6DC1-492B-8E31-1A71AACDE300", {
+        AsyncResult("CheckForUpdateAsync", Ptr, 1),
+        AsyncResult("RequestUpdatePackageAsync", Ptr, 1),
+        AsyncResult("RequestUpdateCurrentPackageAsync", Ptr, 0),
+    }, false);
+    Iface& i_Windows_Xbox_Management_Deployment_PackageTransferManager_1 = rt.DefineInterface("IPackageTransferManagerTransferInfo", "681618F3-B8BD-4553-8C1E-BA1D992667EB", {
+        Get("get_TransferType", I32),
+    }, false);
+    Iface& i_Windows_Xbox_Management_Deployment_PackageTransferManager_2 = rt.DefineInterface("IPackageTransferManagerForChunkSpecifiers", "96130573-D1AD-468C-AA25-9967781FB2F3", {
+        Get("get_AvailableChunkSpecifiers", Ptr),
+        Result("GetInstallationState", I32, 1),
+        Result("GetInstallationState", I32, 1),
+        AsyncResult("AddChunkSpecifiersAsync", Ptr, 1),
+        AsyncResult("RemoveChunkSpecifiersAsync", None, 1),
+    }, false);
+        rt.DefineClassMulti("Windows.Xbox.Management.Deployment.PackageTransferManager", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.Management.Deployment.PackageTransferManager", {&i_Windows_Xbox_Management_Deployment_PackageTransferManager, &i_Windows_Xbox_Management_Deployment_PackageTransferManager_1, &i_Windows_Xbox_Management_Deployment_PackageTransferManager_2}); }, {&s_Windows_Xbox_Management_Deployment_PackageTransferManager, &s_Windows_Xbox_Management_Deployment_PackageTransferManager_0});
     }
     {
     Iface& s_Windows_Xbox_Management_Deployment_PackageTransferWatcherForContentPackages = rt.DefineInterface("IPackageTransferWatcherStaticsForContentPackages", "A1111AAB-1881-AAAA-AAAA-AA11AA111143", {
@@ -631,13 +716,89 @@ static void RegisterGenerated(Runtime& rt) {
         rt.DefineClass("Windows.Xbox.Management.Deployment.ContentPackage", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.Management.Deployment.ContentPackage", {&i_Windows_Xbox_Management_Deployment_ContentPackage}); }, nullptr);
     }
     {
+    Iface& s_Windows_Xbox_Media_Capture_DiagnosticCapture_0 = rt.DefineInterface("IDiagnosticCaptureStatics", "39f20721-379c-4255-b558-c133e3359857", {
+        AsyncResult("RecordTemporaryClipAsync", Ptr, 2),
+    }, false);
+        rt.DefineClass("Windows.Xbox.Media.Capture.DiagnosticCapture", [](Runtime&) -> Obj* { return nullptr; }, &s_Windows_Xbox_Media_Capture_DiagnosticCapture_0);
     }
     {
+    Iface& s_Windows_Xbox_Media_Capture_ApplicationClipInfo_0 = rt.DefineInterface("IApplicationClipInfoFactory", "509ccd19-fee4-45ab-8daa-7895328d452f", {
+        Ctor("CreateInstance", 1),
+    }, false);
+    Iface& i_Windows_Xbox_Media_Capture_ApplicationClipInfo_1 = rt.DefineInterface("IApplicationClipInfo", "13334140-c8b3-4e1a-8860-a8533918c814", {
+        Get("get_GreatestMomentId", Ptr),
+        Put("put_GreatestMomentId"),
+        Get("get_AdditionalUsers", Ptr),
+        Put("put_AdditionalUsers"),
+        Get("get_MultiplayerCorrelationId", Ptr),
+        Put("put_MultiplayerCorrelationId"),
+        Get("get_ThumbnailTimestamp", I64),
+        Put("put_ThumbnailTimestamp"),
+        Get("get_TitleData", Ptr),
+        Put("put_TitleData"),
+        Get("get_EventData", Ptr),
+        Put("put_EventData"),
+        Get("get_LocalizedClipName", Ptr),
+        Put("put_LocalizedClipName"),
+    }, false);
+        rt.DefineClass("Windows.Xbox.Media.Capture.ApplicationClipInfo", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.Media.Capture.ApplicationClipInfo", {&i_Windows_Xbox_Media_Capture_ApplicationClipInfo_1}); }, &s_Windows_Xbox_Media_Capture_ApplicationClipInfo_0);
     }
     {
+    Iface& s_Windows_Xbox_Media_Capture_ApplicationClip_0 = rt.DefineInterface("IApplicationClipStatics", "c0c846ba-0d69-4b4b-ac8b-dba211322f1d", {
+        AsyncResult("UpdateClipMetadataAsync", None, 5),
+        AsyncResult("DeleteClipAsync", None, 4),
+    }, false);
+    Iface& i_Windows_Xbox_Media_Capture_ApplicationClip_1 = rt.DefineInterface("IApplicationClip", "02755691-e987-4505-89f0-4a26e6e4351d", {
+        Get("get_LocalId", Ptr),
+        Get("get_CloudId", Ptr),
+        Get("get_ServiceConfigId", Ptr),
+        Get("get_OwnerXboxUserId", Ptr),
+        Get("get_ClipName", Ptr),
+        Get("get_GreatestMomentId", Ptr),
+        Get("get_Locations", Ptr),
+        Get("get_DateRecorded", I64),
+        Get("get_Duration", I64),
+        Get("get_MultiplayerCorrelationId", Ptr),
+        Get("get_TitleData", Ptr),
+        Get("get_UserCaption", Ptr),
+        Get("get_Rating", I64),
+        Get("get_RatingCount", I32),
+        Get("get_Views", I32),
+        Get("get_SavedByUser", Bool),
+        Get("get_Visibility", I32),
+        Result("GetCloudThumbnail", Ptr, 1),
+        AsyncResult("UpdateMetadataAsync", None, 2),
+        AsyncResult("DeleteAsync", None, 1),
+        Get("get_TitleId", Ptr),
+        Get("get_AchievementId", Ptr),
+        Get("get_Locale", Ptr),
+        Get("get_TitleName", Ptr),
+    }, false);
+    Iface& i_Windows_Xbox_Media_Capture_ApplicationClip_2 = rt.DefineInterface("IApplicationClip2", "093db0a4-cd38-4a14-b4e7-78206ad13a68", {
+        Get("get_ClipContentAttributes", Ptr),
+    }, false);
+        rt.DefineClass("Windows.Xbox.Media.Capture.ApplicationClip", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.Media.Capture.ApplicationClip", {&i_Windows_Xbox_Media_Capture_ApplicationClip_1, &i_Windows_Xbox_Media_Capture_ApplicationClip_2}); }, &s_Windows_Xbox_Media_Capture_ApplicationClip_0);
     }
     {
-        rt.DefineClass("Windows.Xbox.Media.Capture.ApplicationClipCapture", [](Runtime&) -> Obj* { return nullptr; }, nullptr);
+    Iface& s_Windows_Xbox_Media_Capture_ApplicationClipCapture_0 = rt.DefineInterface("IApplicationClipCaptureStatics", "82845b56-3150-4058-947a-b567537de0c2", {
+        AsyncResult("DisableRecordAsync", None, 0),
+        AsyncResult("EnableRecordAsync", None, 0),
+    }, false);
+    Iface& s_Windows_Xbox_Media_Capture_ApplicationClipCapture_1 = rt.DefineInterface("IApplicationClipCaptureStatics2", "2ac83090-107a-4cd7-8376-5188d3fcfa4e", {
+        Get("get_ClipContentAttributes", Ptr),
+        Put("put_ClipContentAttributes"),
+    }, false);
+    Iface& i_Windows_Xbox_Media_Capture_ApplicationClipCapture_2 = rt.DefineInterface("IApplicationClipCapture", "dcd7c675-e80d-4a81-ac81-b02087b18013", {
+        AsyncResult("StartRecordAsync", None, 1),
+        AsyncResult("StopRecordAsync", Ptr, 1),
+        AsyncResult("RecordTimespanAsync", Ptr, 4),
+        Result("CancelRecord", None, 0),
+        Add("add_Failed"),
+        Remove("remove_Failed"),
+        Add("add_RecordLimitationExceeded"),
+        Remove("remove_RecordLimitationExceeded"),
+    }, false);
+        rt.DefineClassMulti("Windows.Xbox.Media.Capture.ApplicationClipCapture", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.Media.Capture.ApplicationClipCapture", {&i_Windows_Xbox_Media_Capture_ApplicationClipCapture_2}); }, {&s_Windows_Xbox_Media_Capture_ApplicationClipCapture_0, &s_Windows_Xbox_Media_Capture_ApplicationClipCapture_1});
     }
     {
     Iface& i_Windows_Xbox_Media_Capture_ApplicationClipCaptureFailedEventArgs = rt.DefineInterface("IApplicationClipCaptureFailedEventArgs", "b942aa55-1c09-4c9a-9078-850a512ec757", {
@@ -682,10 +843,38 @@ static void RegisterGenerated(Runtime& rt) {
         rt.DefineClass("Windows.Xbox.Media.Capture.TemporaryClip", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.Media.Capture.TemporaryClip", {&i_Windows_Xbox_Media_Capture_TemporaryClip}); }, nullptr);
     }
     {
-        rt.DefineClass("Windows.Xbox.Media.Capture.ApplicationClipEventData", [](Runtime&) -> Obj* { return nullptr; }, nullptr);
+    Iface& i_Windows_Xbox_Media_Capture_ApplicationClipEventData_0 = rt.DefineInterface("IApplicationClipEventData", "4d5fc7fa-98ee-49e8-8f08-d373f36ec0bd", {
+        Get("get_SectionId", I32),
+        Put("put_SectionId"),
+        Get("get_PlayerSessionId", Ptr),
+        Put("put_PlayerSessionId"),
+        Get("get_GameplayMode", I32),
+        Put("put_GameplayMode"),
+        Get("get_DifficultyLevelId", I32),
+        Put("put_DifficultyLevelId"),
+        Get("get_ObjectiveId", I32),
+        Put("put_ObjectiveId"),
+        Get("get_ExitStatusId", I32),
+        Put("put_ExitStatusId"),
+        Get("get_LocationX", I32),
+        Put("put_LocationX"),
+        Get("get_LocationY", I32),
+        Put("put_LocationY"),
+        Get("get_LocationZ", I32),
+        Put("put_LocationZ"),
+    }, false);
+        rt.DefineClass("Windows.Xbox.Media.Capture.ApplicationClipEventData", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.Media.Capture.ApplicationClipEventData", {&i_Windows_Xbox_Media_Capture_ApplicationClipEventData_0}); }, nullptr);
     }
     {
-        rt.DefineClass("Windows.Xbox.Media.Capture.ApplicationClipQuery", [](Runtime&) -> Obj* { return nullptr; }, nullptr);
+    Iface& i_Windows_Xbox_Media_Capture_ApplicationClipQuery_0 = rt.DefineInterface("IApplicationClipQuery", "d340c8bd-cf53-4b5b-903f-c0e3a93a481b", {
+        AsyncResult("GetClipsAsync", Ptr, 1),
+        AsyncResult("GetClipsForServiceConfigurationAsync", Ptr, 2),
+        AsyncResult("GetNextClipsAsync", Ptr, 0),
+    }, false);
+    Iface& i_Windows_Xbox_Media_Capture_ApplicationClipQuery_1 = rt.DefineInterface("IApplicationClipQuery2", "c2d95416-127e-4342-b433-d95e7dc31baa", {
+        AsyncResult("GetClipsForUserAsync", Ptr, 2),
+    }, false);
+        rt.DefineClass("Windows.Xbox.Media.Capture.ApplicationClipQuery", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.Media.Capture.ApplicationClipQuery", {&i_Windows_Xbox_Media_Capture_ApplicationClipQuery_0, &i_Windows_Xbox_Media_Capture_ApplicationClipQuery_1}); }, nullptr);
     }
     {
     Iface& i_Windows_Xbox_Media_Capture_BroadcastEventArgs = rt.DefineInterface("IBroadcastEventArgs", "4cff3c18-c81f-48eb-a721-922a998bf42a", {
@@ -737,6 +926,15 @@ static void RegisterGenerated(Runtime& rt) {
         rt.DefineClass("Windows.Xbox.Media.GameTransportControls", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.Media.GameTransportControls", {&i_Windows_Xbox_Media_GameTransportControls}); }, nullptr);
     }
     {
+    Iface& s_Windows_Xbox_Multiplayer_PartyConfig_0 = rt.DefineInterface("IPartyConfigStatics_SuppressGameSessionReadyToast", "2FCEC780-2E70-437A-AE46-72298AE2BAC2", {
+        Get("get_SuppressGameSessionReadyToast", Bool),
+        Put("put_SuppressGameSessionReadyToast"),
+    }, false);
+    Iface& s_Windows_Xbox_Multiplayer_PartyConfig_1 = rt.DefineInterface("ISuppressGameSessionReadyToast2", "6938FC66-ED0C-4B86-A240-009DA675A0EC", {
+        Get("get_SuppressGameSessionReadyToastMode", I32),
+        Put("put_SuppressGameSessionReadyToastMode"),
+    }, false);
+        rt.DefineClassMulti("Windows.Xbox.Multiplayer.PartyConfig", [](Runtime&) -> Obj* { return nullptr; }, {&s_Windows_Xbox_Multiplayer_PartyConfig_0, &s_Windows_Xbox_Multiplayer_PartyConfig_1});
     }
     {
     Iface& i_Windows_Xbox_Multiplayer_MultiplayerSessionReference = rt.DefineInterface("IMultiplayerSessionReference", "77023BD9-8452-4FE0-886B-4229DD69972B", {
@@ -838,10 +1036,21 @@ static void RegisterGenerated(Runtime& rt) {
         rt.DefineClass("Windows.Xbox.Multiplayer.UserPartyAssociation", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.Multiplayer.UserPartyAssociation", {&i_Windows_Xbox_Multiplayer_UserPartyAssociation}); }, nullptr);
     }
     {
+    Iface& i_Windows_Xbox_Multiplayer_PartyView_0 = rt.DefineInterface("IPartyView", "B9C0121F-0236-4FF0-9AF9-F28CDA93F643", {
+        Get("get_ReservedMembers", Ptr),
+        Get("get_Members", Ptr),
+        Get("get_MembersGroupedByDevice", Ptr),
+        Get("get_MatchSession", Ptr),
+        Get("get_GameSession", Ptr),
+        Get("get_IsPartyInAnotherTitle", Bool),
+    }, false);
+    Iface& i_Windows_Xbox_Multiplayer_PartyView_1 = rt.DefineInterface("IPartyView2", "6D6A525B-133F-4DBB-9E35-ED39F6DD7D12", {
+    }, false);
+        rt.DefineClass("Windows.Xbox.Multiplayer.PartyView", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.Multiplayer.PartyView", {&i_Windows_Xbox_Multiplayer_PartyView_0, &i_Windows_Xbox_Multiplayer_PartyView_1}); }, nullptr);
     }
     {
     Iface& s_Windows_Xbox_Multiplayer_PartyChat = rt.DefineInterface("IPartyChatStatics", "CC1BCF39-99F3-42A2-AFB6-CDC07B29755F", {
-        Result("GetPartyChatViewAsync", Ptr, 0),
+        AsyncResult("GetPartyChatViewAsync", Ptr, 0),
         Add("add_PartyChatViewChanged"),
         Remove("remove_PartyChatViewChanged"),
         Get("get_IsPartyChatActive", Bool),
@@ -855,6 +1064,46 @@ static void RegisterGenerated(Runtime& rt) {
         rt.DefineClass("Windows.Xbox.Multiplayer.PartyChat", [](Runtime&) -> Obj* { return nullptr; }, &s_Windows_Xbox_Multiplayer_PartyChat);
     }
     {
+    Iface& s_Windows_Xbox_Multiplayer_Party_0 = rt.DefineInterface("IPartyStatics", "E6110C4C-3660-4230-9880-208B149A3CA4", {
+        AsyncResult("RegisterGameSessionAsync", None, 2),
+        AsyncResult("RegisterMatchSessionAsync", None, 2),
+        AsyncResult("InviteToPartyAsync", None, 2),
+        AsyncResult("GetPartyViewAsync", Ptr, 0),
+        AsyncResult("AddLocalUsersAsync", None, 2),
+        AsyncResult("PullInactivePlayersAsync", None, 2),
+        AsyncResult("PullReservedPlayersAsync", None, 2),
+        AsyncResult("GetAvailableGamePlayersAsync", Ptr, 1),
+        AsyncResult("GetAvailableGamePlayersGroupedByDeviceAsync", Ptr, 1),
+        AsyncResult("SwitchPartyTitleAsync", None, 1),
+        Add("add_GameSessionReady"),
+        Remove("remove_GameSessionReady"),
+        Add("add_PartyStateChanged"),
+        Remove("remove_PartyStateChanged"),
+        Add("add_PartyRosterChanged"),
+        Remove("remove_PartyRosterChanged"),
+        Add("add_MatchStatusChanged"),
+        Remove("remove_MatchStatusChanged"),
+        Add("add_GamePlayersChanged"),
+        Remove("remove_GamePlayersChanged"),
+    }, false);
+    Iface& s_Windows_Xbox_Multiplayer_Party_1 = rt.DefineInterface("IPartyStatics2", "87521843-2298-43C4-81F1-C7C50AB794E1", {
+        AsyncResult("GetPartyViewAsyncEx", Ptr, 1),
+    }, false);
+    Iface& s_Windows_Xbox_Multiplayer_Party_2 = rt.DefineInterface("IPartyStatics3", "15946429-17A1-4FDF-9D67-766ED0F4B868", {
+        AsyncResult("RemoveLocalUsersAsync", None, 1),
+        Get("get_PartyId", Ptr),
+        AsyncResult("DisassociateGameSessionAsync", None, 2),
+    }, false);
+    Iface& s_Windows_Xbox_Multiplayer_Party_3 = rt.DefineInterface("IPartyStatics4", "4B907F32-9165-4193-9CCE-1D5CCDDD060E", {
+        AsyncResult("RegisterGameSessionCompareAsync", None, 3),
+        AsyncResult("RegisterMatchSessionCompareAsync", None, 3),
+        AsyncResult("GetUserPartyAssociationsAsync", Ptr, 2),
+        AsyncResult("GetPartyViewByPartyIdAsync", Ptr, 2),
+        AsyncResult("JoinPartyByIdAsync", None, 2),
+        Get("get_Joinability", I32),
+        Put("put_Joinability"),
+    }, false);
+        rt.DefineClassMulti("Windows.Xbox.Multiplayer.Party", [](Runtime&) -> Obj* { return nullptr; }, {&s_Windows_Xbox_Multiplayer_Party_0, &s_Windows_Xbox_Multiplayer_Party_1, &s_Windows_Xbox_Multiplayer_Party_2, &s_Windows_Xbox_Multiplayer_Party_3});
     }
     {
     Iface& s_Windows_Xbox_Networking_ErrorMessages = rt.DefineInterface("IErrorMessagesStatics", "0759380D-A6D3-443A-9441-E45EDC7677E6", {
@@ -889,7 +1138,7 @@ static void RegisterGenerated(Runtime& rt) {
     }
     {
     Iface& s_Windows_Xbox_Networking_QualityOfService = rt.DefineInterface("IQualityOfServiceStatics", "D7D51FB8-4E8E-4E11-B2A4-930F9C344A6A", {
-        Result("MeasureQualityOfServiceAsync", Ptr, 4),
+        AsyncResult("MeasureQualityOfServiceAsync", Ptr, 4),
         Result("PublishPrivatePayload", None, 1),
         Result("ClearPrivatePayload", None, 0),
         Result("ConfigureQualityOfService", None, 3),
@@ -939,7 +1188,7 @@ static void RegisterGenerated(Runtime& rt) {
     Iface& i_Windows_Xbox_Networking_SecureDeviceAssociation = rt.DefineInterface("ISecureDeviceAssociation", "CCE4FE47-86FC-467C-A121-83061F4B0286", {
         Add("add_StateChanged"),
         Remove("remove_StateChanged"),
-        Result("DestroyAsync", Ptr, 0),
+        AsyncResult("DestroyAsync", None, 0),
         Result("GetRemoteSocketAddressBytes", Bool, 0),
         Result("GetLocalSocketAddressBytes", Bool, 0),
         Get("get_State", I32),
@@ -960,10 +1209,10 @@ static void RegisterGenerated(Runtime& rt) {
     Iface& i_Windows_Xbox_Networking_SecureDeviceAssociationTemplate = rt.DefineInterface("ISecureDeviceAssociationTemplate", "5479611E-35FA-4241-95BA-DF8E8338C739", {
         Add("add_AssociationIncoming"),
         Remove("remove_AssociationIncoming"),
-        Result("CreateAssociationAsync", Ptr, 2),
-        Result("CreateAssociationForPortsAsync", Ptr, 4),
-        Result("CreateCertificateRequestAsync", Ptr, 1),
-        Result("InstallCertificateAsync", Ptr, 1),
+        AsyncResult("CreateAssociationAsync", Ptr, 2),
+        AsyncResult("CreateAssociationForPortsAsync", Ptr, 4),
+        AsyncResult("CreateCertificateRequestAsync", Ptr, 1),
+        AsyncResult("InstallCertificateAsync", None, 1),
         Get("get_Name", Ptr),
         Get("get_InitiatorSocketDescription", Ptr),
         Get("get_AcceptorSocketDescription", Ptr),
@@ -1099,7 +1348,11 @@ static void RegisterGenerated(Runtime& rt) {
         Get("get_RootRule", Ptr),
         Result("SetRootRule", None, 1),
     }, false);
-        rt.DefineClass("Windows.Xbox.Speech.Recognition.SpeechGrammarBuilder", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.Speech.Recognition.SpeechGrammarBuilder", {&i_Windows_Xbox_Speech_Recognition_SpeechGrammarBuilder}); }, nullptr);
+    Iface& s_Windows_Xbox_Speech_Recognition_SpeechGrammarBuilder_0 = rt.DefineInterface("ISpeechGrammarBuilderStatic", "8A7D628E-0337-46F6-BFC4-C97212587467", {
+        AsyncResult("CreateFromSpeechGrammarAsync", Ptr, 1),
+        AsyncResult("CreateFromStreamAsync", Ptr, 1),
+    }, false);
+        rt.DefineClass("Windows.Xbox.Speech.Recognition.SpeechGrammarBuilder", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.Speech.Recognition.SpeechGrammarBuilder", {&i_Windows_Xbox_Speech_Recognition_SpeechGrammarBuilder}); }, &s_Windows_Xbox_Speech_Recognition_SpeechGrammarBuilder_0);
     }
     {
     Iface& i_Windows_Xbox_Speech_Recognition_SpeechGrammarBuilderFactory = rt.DefineInterface("ISpeechGrammarBuilderFactory", "4918B04E-7D4C-4929-B7E3-B80931FF4D33", {
@@ -1249,8 +1502,8 @@ static void RegisterGenerated(Runtime& rt) {
     }
     {
     Iface& i_Windows_Xbox_Speech_Recognition_SpeechRecognizer = rt.DefineInterface("ISpeechRecognizer", "3A3AA19C-F4E9-4985-A53C-DBCC22795CA7", {
-        Result("RecognizeAsync", Ptr, 0),
-        Result("PreloadGrammarsAsync", Ptr, 0),
+        AsyncResult("RecognizeAsync", Ptr, 0),
+        AsyncResult("PreloadGrammarsAsync", None, 0),
         Get("get_Settings", Ptr),
         Get("get_Grammars", Ptr),
         Result("StartContinuousRecognition", None, 0),
@@ -1281,8 +1534,8 @@ static void RegisterGenerated(Runtime& rt) {
     }
     {
     Iface& s_Windows_Xbox_Speech_Recognition_SpeechRecognizerAnalyzer = rt.DefineInterface("ISpeechRecognizerAnalyzerStatic", "11E2BF59-A4E0-4BD7-A885-7728E3E57F59", {
-        Result("SerializeGrammarsToFolderAsync", Ptr, 3),
-        Result("CheckResultFromPhraseAsync", Ptr, 2),
+        AsyncResult("SerializeGrammarsToFolderAsync", None, 3),
+        AsyncResult("CheckResultFromPhraseAsync", Ptr, 2),
         Result("GetPronunciationFromPhrase", Ptr, 2),
     }, false);
         rt.DefineClass("Windows.Xbox.Speech.Recognition.SpeechRecognizerAnalyzer", [](Runtime&) -> Obj* { return nullptr; }, &s_Windows_Xbox_Speech_Recognition_SpeechRecognizerAnalyzer);
@@ -1352,23 +1605,64 @@ static void RegisterGenerated(Runtime& rt) {
     }
     {
     Iface& i_Windows_Xbox_Storage_BlobInfoQueryResult = rt.DefineInterface("IBlobInfoQueryResult", "5598379c-82de-4952-aa30-49ae329c5885", {
-        Result("GetBlobInfoAsync", Ptr, 2),
-        Result("GetBlobInfoAsync", Ptr, 0),
-        Result("GetItemCountAsync", Ptr, 0),
+        AsyncResult("GetBlobInfoAsync", Ptr, 2),
+        AsyncResult("GetBlobInfoAsync", Ptr, 0),
+        AsyncResult("GetItemCountAsync", I32, 0),
     }, false);
         rt.DefineClass("Windows.Xbox.Storage.BlobInfoQueryResult", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.Storage.BlobInfoQueryResult", {&i_Windows_Xbox_Storage_BlobInfoQueryResult}); }, nullptr);
     }
     {
     Iface& i_Windows_Xbox_Storage_ContainerInfoQueryResult = rt.DefineInterface("IContainerInfoQueryResult", "4f937563-bae3-4062-a67f-cbea61a2edc3", {
-        Result("GetContainerInfoAsync", Ptr, 2),
-        Result("GetContainerInfoAsync", Ptr, 0),
-        Result("GetItemCountAsync", Ptr, 0),
+        AsyncResult("GetContainerInfoAsync", Ptr, 2),
+        AsyncResult("GetContainerInfoAsync", Ptr, 0),
+        AsyncResult("GetItemCountAsync", I32, 0),
     }, false);
-        rt.DefineClass("Windows.Xbox.Storage.ContainerInfoQueryResult", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.Storage.ContainerInfoQueryResult", {&i_Windows_Xbox_Storage_ContainerInfoQueryResult}); }, nullptr);
+    Iface& i_Windows_Xbox_Storage_ContainerInfoQueryResult_0 = rt.DefineInterface("IContainerInfo2QueryResult", "f8a8cdfe-1d10-42a5-b01e-41718e183ca9", {
+        AsyncResult("GetContainerInfo2Async", Ptr, 2),
+        AsyncResult("GetContainerInfo2Async", Ptr, 0),
+    }, false);
+        rt.DefineClass("Windows.Xbox.Storage.ContainerInfoQueryResult", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.Storage.ContainerInfoQueryResult", {&i_Windows_Xbox_Storage_ContainerInfoQueryResult, &i_Windows_Xbox_Storage_ContainerInfoQueryResult_0}); }, nullptr);
     }
     {
+    Iface& i_Windows_Xbox_Storage_ConnectedStorageContainer_0 = rt.DefineInterface("IConnectedStorageContainer", "885c65fe-e884-4cff-ba58-fb82cc32b552", {
+        Get("get_Name", Ptr),
+        Get("get_OwningSpace", Ptr),
+        AsyncResult("SubmitUpdatesAsync", None, 2),
+        AsyncResult("ReadAsync", None, 1),
+        AsyncResult("GetAsync", Ptr, 1),
+        AsyncResult("SubmitPropertySetUpdatesAsync", None, 2),
+    }, false);
+    Iface& i_Windows_Xbox_Storage_ConnectedStorageContainer_1 = rt.DefineInterface("IConnectedStorageContainer2", "af964b72-ec65-46de-935c-845ad0194f0d", {
+        AsyncResult("SubmitUpdatesAsync", None, 3),
+        AsyncResult("SubmitPropertySetUpdatesAsync", None, 3),
+        Result("CreateBlobInfoQuery", Ptr, 1),
+    }, false);
+        rt.DefineClass("Windows.Xbox.Storage.ConnectedStorageContainer", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.Storage.ConnectedStorageContainer", {&i_Windows_Xbox_Storage_ConnectedStorageContainer_0, &i_Windows_Xbox_Storage_ConnectedStorageContainer_1}); }, nullptr);
     }
     {
+    Iface& s_Windows_Xbox_Storage_ConnectedStorageSpace_0 = rt.DefineInterface("IConnectedStorageSpaceStatics", "07020414-b3e9-47c8-a36f-f24e2dc65573", {
+        AsyncResult("GetForUserAsync", Ptr, 1),
+        AsyncResult("GetForUserAsync", Ptr, 2),
+        AsyncResult("GetForMachineAsync", Ptr, 0),
+        AsyncResult("GetForMachineAsync", Ptr, 1),
+    }, false);
+    Iface& s_Windows_Xbox_Storage_ConnectedStorageSpace_1 = rt.DefineInterface("IConnectedStorageSpaceStatics2", "df3fe390-13fa-4814-91c1-fb92f90f641d", {
+        AsyncResult("GetSyncOnDemandForUserAsync", Ptr, 1),
+        AsyncResult("GetSyncOnDemandForUserAsync", Ptr, 2),
+    }, false);
+    Iface& i_Windows_Xbox_Storage_ConnectedStorageSpace_2 = rt.DefineInterface("IConnectedStorageSpace", "b48eea29-8323-41bc-bbad-2c26e27bda22", {
+        Get("get_User", Ptr),
+        Get("get_ServiceConfigurationId", Ptr),
+        Get("get_IsReadOnly", Bool),
+        Result("CreateContainer", Ptr, 1),
+        AsyncResult("DeleteContainerAsync", None, 1),
+        Result("CreateContainerInfoQuery", Ptr, 1),
+        AsyncResult("GetRemainingBytesInQuotaAsync", I32, 0),
+    }, false);
+    Iface& i_Windows_Xbox_Storage_ConnectedStorageSpace_3 = rt.DefineInterface("IConnectedStorageSpace2", "bc5b91a7-2afc-46fd-81d4-74b8188d748a", {
+        AsyncResult("GetRemainingBytesInQuota64Async", I64, 0),
+    }, false);
+        rt.DefineClassMulti("Windows.Xbox.Storage.ConnectedStorageSpace", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.Storage.ConnectedStorageSpace", {&i_Windows_Xbox_Storage_ConnectedStorageSpace_2, &i_Windows_Xbox_Storage_ConnectedStorageSpace_3}); }, {&s_Windows_Xbox_Storage_ConnectedStorageSpace_0, &s_Windows_Xbox_Storage_ConnectedStorageSpace_1});
     }
     {
     Iface& i_Windows_Xbox_System_GetPictureResult = rt.DefineInterface("IGetPictureResult", "DDCCAAAA-AAFC-ACDA-AAAA-AAAFFCCAABBA", {
@@ -1391,9 +1685,9 @@ static void RegisterGenerated(Runtime& rt) {
         Get("get_Sponsor", Ptr),
         Get("get_XboxUserHash", Ptr),
         Get("get_XboxUserId", Ptr),
-        Result("GetTokenAndSignatureAsync", Ptr, 3),
-        Result("GetTokenAndSignatureAsync", Ptr, 5),
-        Result("GetTokenAndSignatureAsync", Ptr, 4),
+        AsyncResult("GetTokenAndSignatureAsync", Ptr, 3),
+        AsyncResult("GetTokenAndSignatureAsync", Ptr, 5),
+        AsyncResult("GetTokenAndSignatureAsync", Ptr, 4),
     }, true);
     Iface& s_Windows_Xbox_System_User = rt.DefineInterface("IUserStatics", "b4f23a93-7fc6-4a50-b153-950016389e50", {
     // guessed GUID
@@ -1406,9 +1700,9 @@ static void RegisterGenerated(Runtime& rt) {
         Add("add_UserRemoved"),
         Remove("remove_UserRemoved"),
         Result("GetUserById", Ptr, 1),
-        Result("GetTokenAndSignatureForAllUsersAsync", Ptr, 3),
-        Result("GetTokenAndSignatureForAllUsersAsync", Ptr, 4),
-        Result("GetTokenAndSignatureForAllUsersAsync", Ptr, 4),
+        AsyncResult("GetTokenAndSignatureForAllUsersAsync", Ptr, 3),
+        AsyncResult("GetTokenAndSignatureForAllUsersAsync", Ptr, 4),
+        AsyncResult("GetTokenAndSignatureForAllUsersAsync", Ptr, 4),
         Add("add_AudioDeviceAdded"),
         Remove("remove_AudioDeviceAdded"),
         Add("add_AudioDeviceRemoved"),
@@ -1437,8 +1731,8 @@ static void RegisterGenerated(Runtime& rt) {
         Result("Reputation", I32, 0),
         Result("AgeGroup", I32, 0),
         Result("Privileges", Ptr, 0),
-        Result("GetApplicationPictureAsync", Ptr, 2),
-        Result("GetGamerPictureAsync", Ptr, 2),
+        AsyncResult("GetApplicationPictureAsync", Ptr, 2),
+        AsyncResult("GetGamerPictureAsync", Ptr, 2),
     }, true);
         rt.DefineClass("Windows.Xbox.System.UserDisplayInfo", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.System.UserDisplayInfo", {&i_Windows_Xbox_System_UserDisplayInfo}); }, nullptr);
     }
@@ -1614,38 +1908,103 @@ static void RegisterGenerated(Runtime& rt) {
         Result("SetSpeechToTextPositionHint", None, 1),
         Result("SendSpeechToTextString", None, 3),
     }, false);
-        rt.DefineClass("Windows.Xbox.UI.Accessibility", [](Runtime&) -> Obj* { return nullptr; }, &s_Windows_Xbox_UI_Accessibility);
+    Iface& s_Windows_Xbox_UI_Accessibility_0 = rt.DefineInterface("IPackageTransferWatcherTransferInfo", "394F1212-30D9-489E-994F-9B7AC693B21E", {
+        Result("BeginSpeechToTextHypothesisString", I32, 3),
+        Result("UpdateSpeechToTextHypothesisString", None, 2),
+        Result("FinalizeSpeechToTextHypothesisString", None, 2),
+        Result("CancelSpeechToTextHypothesisString", None, 1),
+        Result("ClearSpeechToTextStrings", None, 0),
+        Result("SendSpeechToTextStringWithColor", None, 4),
+    }, false);
+        rt.DefineClassMulti("Windows.Xbox.UI.Accessibility", [](Runtime&) -> Obj* { return nullptr; }, {&s_Windows_Xbox_UI_Accessibility, &s_Windows_Xbox_UI_Accessibility_0});
     }
     {
     Iface& s_Windows_Xbox_UI_CloudStreamingSystemUI = rt.DefineInterface("ICloudStreamingSystemUIStatics", "D8348323-1B4D-452A-83BA-89307E339D7E", {
         Result("ShouldRemoteSystemUI", Bool, 1),
-        Result("RemoteShowVirtualKeyboardAsync", Ptr, 7),
-        Result("RemoteShowMessageDialogAsync", Ptr, 8),
-        Result("RemoteShowPurchaseAsync", Ptr, 7),
-        Result("RemoteShowApplicationAsync", Ptr, 1),
-        Result("RemoteShowTimerExtensionAsync", Ptr, 3),
+        AsyncResult("RemoteShowVirtualKeyboardAsync", Ptr, 7),
+        AsyncResult("RemoteShowMessageDialogAsync", I32, 8),
+        AsyncResult("RemoteShowPurchaseAsync", Ptr, 7),
+        AsyncResult("RemoteShowApplicationAsync", None, 1),
+        AsyncResult("RemoteShowTimerExtensionAsync", Bool, 3),
         Result("SetCloudStreamingServiceForTest", None, 1),
-        Result("RemoteCheckPrivilegesAsync", Ptr, 4),
-        Result("RemoteShowProfileCardAsync", Ptr, 2),
-        Result("RemoteLaunchAchievementsAsync", Ptr, 2),
-        Result("RemoteAddRemoveFriendAsync", Ptr, 2),
-        Result("RemoteLaunchPartyAsync", Ptr, 2),
-        Result("RemoteShowComposeMessageAsync", Ptr, 3),
-        Result("RemotePeoplePickerAsync", Ptr, 6),
+        AsyncResult("RemoteCheckPrivilegesAsync", I32, 4),
+        AsyncResult("RemoteShowProfileCardAsync", None, 2),
+        AsyncResult("RemoteLaunchAchievementsAsync", None, 2),
+        AsyncResult("RemoteAddRemoveFriendAsync", Ptr, 2),
+        AsyncResult("RemoteLaunchPartyAsync", None, 2),
+        AsyncResult("RemoteShowComposeMessageAsync", None, 3),
+        AsyncResult("RemotePeoplePickerAsync", Ptr, 6),
         Result("ShouldRemoteAllProtocolActivations", Bool, 0),
         Result("ShouldBlockMultipleTCUIClientTransactions", Bool, 0),
-        Result("RemoteShowFeedbackAsync", Ptr, 0),
-        Result("RemoteShowMicrophoneSettingsAsync", Ptr, 0),
-        Result("RemoteToggleMuteAsync", Ptr, 0),
-        Result("RemoteShowPrivilegeBlockedAsync", Ptr, 4),
-        Result("RemoteShowGameTimeAsync", Ptr, 5),
-        Result("RemoteShowSendInvitesAsync", Ptr, 1),
-        Result("RemoteShowSendGameInvitesAsync", Ptr, 4),
-        Result("RemoteShowSendMultiplayerActivityInvitesAsync", Ptr, 2),
-        Result("RemoteShowStateShareAsync", Ptr, 3),
+        AsyncResult("RemoteShowFeedbackAsync", None, 0),
+        AsyncResult("RemoteShowMicrophoneSettingsAsync", None, 0),
+        AsyncResult("RemoteToggleMuteAsync", None, 0),
+        AsyncResult("RemoteShowPrivilegeBlockedAsync", Bool, 4),
+        AsyncResult("RemoteShowGameTimeAsync", None, 5),
+        AsyncResult("RemoteShowSendInvitesAsync", None, 1),
+        AsyncResult("RemoteShowSendGameInvitesAsync", None, 4),
+        AsyncResult("RemoteShowSendMultiplayerActivityInvitesAsync", None, 2),
+        AsyncResult("RemoteShowStateShareAsync", None, 3),
     }, false);
         rt.DefineClass("Windows.Xbox.UI.CloudStreamingSystemUI", [](Runtime&) -> Obj* { return nullptr; }, &s_Windows_Xbox_UI_CloudStreamingSystemUI);
     }
     {
+    Iface& s_Windows_Xbox_UI_SystemUI_0 = rt.DefineInterface("ISystemUIStatics", "1A0DD80E-3F9D-4CFA-8E50-0E2EBD1AA72F", {
+        AsyncResult("ShowEpgAsync", None, 2),
+        AsyncResult("ShowMiniguideAsync", None, 1),
+        AsyncResult("ShowProfileCardAsync", None, 2),
+        AsyncResult("ShowSendInvitesAsync", None, 1),
+        AsyncResult("ShowAccountPickerAsync", Ptr, 2),
+        AsyncResult("ShowVirtualKeyboardAsync", Ptr, 4),
+        AsyncResult("LaunchPartyAsync", None, 1),
+        AsyncResult("LaunchAchievementsAsync", None, 2),
+    }, false);
+    Iface& s_Windows_Xbox_UI_SystemUI_1 = rt.DefineInterface("ISystemUIStatics2", "FA2BDF0C-3698-4BF2-A101-276A5B390341", {
+        AsyncResult("LaunchKinectSetupAsync", None, 1),
+        AsyncResult("LaunchRecentPlayersAsync", None, 1),
+    }, false);
+    Iface& s_Windows_Xbox_UI_SystemUI_2 = rt.DefineInterface("ISystemUIStatics3", "14C3EB45-096B-4188-9CF6-985A35B81502", {
+        AsyncResult("SnapDefaultBroadcastApp", None, 1),
+    }, false);
+    Iface& s_Windows_Xbox_UI_SystemUI_3 = rt.DefineInterface("ISystemUIStatics4", "641D0270-D6D0-48FF-BB20-D08B4212CA28", {
+        AsyncResult("ShowComposeMessageAsync", None, 3),
+        AsyncResult("ShowAddRemoveFriendAsync", Ptr, 2),
+    }, false);
+    Iface& s_Windows_Xbox_UI_SystemUI_4 = rt.DefineInterface("ISystemUIStatics5", "1FAC25F1-2FA6-4A68-88D6-89D5454A6C0F", {
+        AsyncResult("ShowPeoplePickerAsync", Ptr, 6),
+        AsyncResult("TrySnapSelf", Bool, 0),
+        AsyncResult("TrySnapOther", Bool, 2),
+    }, false);
+    Iface& s_Windows_Xbox_UI_SystemUI_5 = rt.DefineInterface("ISystemUIStatics6", "E5B15E1D-AAA3-4FAB-94AF-1C9C75AD4F6A", {
+        AsyncResult("ShowMiniguideWithCommandAsync", None, 2),
+    }, false);
+    Iface& s_Windows_Xbox_UI_SystemUI_6 = rt.DefineInterface("ISystemUIStatics7", "01F75706-9DF0-44D8-837C-A930DA05A74A", {
+        AsyncResult("ShowVirtualKeyboardWithOptionsAsync", Ptr, 1),
+        AsyncResult("ShowSendGameInvitesAsync", None, 3),
+        AsyncResult("ShowSendGameInvitesWithDisplayTextAsync", None, 4),
+    }, false);
+    Iface& s_Windows_Xbox_UI_SystemUI_7 = rt.DefineInterface("ISystemUIStatics8", "197625D0-AF45-4F9C-B068-D5BDA0E60958", {
+        Result("SetNotificationPositionHint", None, 1),
+    }, false);
+    Iface& s_Windows_Xbox_UI_SystemUI_8 = rt.DefineInterface("ISystemUIStatics9", "94C1EE95-9D28-4383-896E-86060FD07677", {
+        AsyncResult("AuthenticateWithCallbackUriAsync", Ptr, 4),
+        AsyncResult("AuthenticateWithoutCallbackUriAsync", Ptr, 3),
+        Result("GetCurrentApplicationCallbackUri", Ptr, 1),
+    }, false);
+    Iface& s_Windows_Xbox_UI_SystemUI_9 = rt.DefineInterface("ISystemUIStatics10", "09D7DC41-D53B-496D-85B8-E7A6FE594757", {
+        AsyncResult("ShowPartyAndSendPartyInvitesAsync", None, 2),
+    }, false);
+    Iface& s_Windows_Xbox_UI_SystemUI_10 = rt.DefineInterface("ISystemUIStatics11", "E82C7850-07A5-4682-B7AD-F234CBD39A09", {
+        AsyncResult("ShowCreateLookingForGroupAsync", None, 4),
+        AsyncResult("ShowUserLookingForGroupsAsync", None, 1),
+        AsyncResult("ShowLookingForGroupResultsAsync", None, 2),
+    }, false);
+    Iface& s_Windows_Xbox_UI_SystemUI_11 = rt.DefineInterface("ISystemUIStatics12", "C20C73CB-3C60-4949-80C1-120579E4CD06", {
+        AsyncResult("ShowSendMultiplayerActivityGameInvites", None, 2),
+    }, false);
+    Iface& s_Windows_Xbox_UI_SystemUI_12 = rt.DefineInterface("ISystemUIStatics13", "D7BB05F1-B5EE-46BF-B82A-9B93E73F2B7F", {
+        AsyncResult("ShowStateShareAsync", None, 3),
+    }, false);
+        rt.DefineClassMulti("Windows.Xbox.UI.SystemUI", [](Runtime&) -> Obj* { return nullptr; }, {&s_Windows_Xbox_UI_SystemUI_0, &s_Windows_Xbox_UI_SystemUI_1, &s_Windows_Xbox_UI_SystemUI_2, &s_Windows_Xbox_UI_SystemUI_3, &s_Windows_Xbox_UI_SystemUI_4, &s_Windows_Xbox_UI_SystemUI_5, &s_Windows_Xbox_UI_SystemUI_6, &s_Windows_Xbox_UI_SystemUI_7, &s_Windows_Xbox_UI_SystemUI_8, &s_Windows_Xbox_UI_SystemUI_9, &s_Windows_Xbox_UI_SystemUI_10, &s_Windows_Xbox_UI_SystemUI_11, &s_Windows_Xbox_UI_SystemUI_12});
     }
 }
