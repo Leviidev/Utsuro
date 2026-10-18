@@ -4,6 +4,7 @@
 #include "engine/log.h"
 #include "nt/kernel.h"
 #include "gpu/dxbc.h"
+#include "host/window.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -59,11 +60,15 @@ int main(int argc, char** argv) {
     opt.exe_name = exe.empty() ? "Minecraft.Client.exe" : exe;
 
     utsuro_install_crash_handler("/tmp/utsuro-crash.log");
-    nt::Kernel kernel(std::move(opt));
-    std::string error;
-    if (!kernel.Boot(error)) {
-        std::fprintf(stderr, "boot failed: %s\n", error.c_str());
-        return 1;
-    }
-    return kernel.Run();
+    auto run = [opt = std::move(opt)]() mutable -> int {
+        nt::Kernel kernel(std::move(opt));
+        std::string error;
+        if (!kernel.Boot(error)) {
+            std::fprintf(stderr, "boot failed: %s\n", error.c_str());
+            return 1;
+        }
+        return kernel.Run();
+    };
+    if (std::getenv("UTSURO_HEADLESS") != nullptr) return run();
+    return host::RunWindowed(run);
 }

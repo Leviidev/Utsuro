@@ -430,6 +430,11 @@ method:
         *result = kSOk;
         return true;
     }
+    if (m.out == Out::Vec || m.out == Out::Map) {
+        if (auto* out = call.Ptr<uint64_t>(m.ret_arg)) *out = m.out == Out::Vec ? NewVectorView({}) : NewMapView({});
+        *result = kSOk;
+        return true;
+    }
     if (m.out != Out::None) {
         void* out = call.Ptr<void>(m.ret_arg);
         if (out != nullptr) {

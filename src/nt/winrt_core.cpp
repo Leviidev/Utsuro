@@ -10,7 +10,7 @@ namespace utsuro::nt::winrt {
 
 namespace {
 
-constexpr Out None = Out::None, Bool = Out::Bool, I32 = Out::I32, I64 = Out::I64, Ptr = Out::Ptr, GuidT = Out::Guid;
+constexpr Out None = Out::None, Bool = Out::Bool, I32 = Out::I32, I64 = Out::I64, Ptr = Out::Ptr, GuidT = Out::Guid, Vec = Out::Vec, Map = Out::Map;
 
 Method Get(const char* name, Out out) { return Method {name, out, 0, false, false, nullptr}; }
 Method Put(const char* name) { return Method {name, Out::None, 0, false, false, nullptr}; }

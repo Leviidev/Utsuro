@@ -51,6 +51,8 @@ def out_kind(t):
         return 'Async:' + out_kind(inner)
     if re.match(r'(?:Windows\.Foundation\.)?IAsyncAction(?:WithProgress<.*>)?\s*$', t):
         return 'Async:None'
+    if re.match(r'(?:Windows\.Foundation\.Collections\.)?IVector(?:View)?<', t): return 'Vec'
+    if re.match(r'(?:Windows\.Foundation\.Collections\.)?IMapView<', t): return 'Map'
     base = t.split('.')[-1]
     if base in SIZES: return SIZES[base]
     if base in enums: return 'I32'

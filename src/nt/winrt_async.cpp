@@ -51,6 +51,7 @@ void RegisterAsync(Runtime& rt) {
             case Out::I32: *static_cast<uint32_t*>(out) = static_cast<uint32_t>(v); break;
             case Out::I64: case Out::Ptr: *static_cast<uint64_t*>(out) = v; break;
             case Out::Guid: if (v) std::memcpy(out, reinterpret_cast<void*>(v), 16); else std::memset(out, 0, 16); break;
+            case Out::Vec: case Out::Map: break;
             case Out::None: break;
             }
             return 0;
@@ -66,6 +67,9 @@ void RegisterAsync(Runtime& rt) {
 }
 
 uint64_t Runtime::NewAsync(Out kind, uint64_t value, uint32_t hr) {
+    // An operation that yields a collection yields an empty one unless the caller gave its own.
+    if (kind == Out::Vec) { if (value == 0) value = NewVectorView({}); kind = Out::Ptr; }
+    else if (kind == Out::Map) { if (value == 0) value = NewMapView({}); kind = Out::Ptr; }
     Obj* o = NewObject("Windows.Foundation.AsyncOperation", {g_async, g_info});
     o->u64["kind"] = static_cast<uint64_t>(kind);
     o->u64["value"] = value;

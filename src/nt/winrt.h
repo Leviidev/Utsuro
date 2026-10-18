@@ -22,7 +22,7 @@ struct Guid {
 };
 
 /// What a default getter writes into its out parameter.
-enum class Out { None, Bool, I32, I64, Ptr, Guid };
+enum class Out { None, Bool, I32, I64, Ptr, Guid, Vec, Map };
 
 struct Obj;
 struct Call;
@@ -170,5 +170,6 @@ void RegisterCoreClasses(Runtime& rt);
 void RegisterCollections(Runtime& rt);
 void RegisterAsync(Runtime& rt);
 void RegisterStorage(Runtime& rt);
+void RegisterInput(Runtime& rt);
 
 } // namespace utsuro::nt::winrt

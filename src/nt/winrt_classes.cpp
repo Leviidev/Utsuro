@@ -9,7 +9,7 @@ namespace utsuro::nt::winrt {
 
 namespace {
 
-constexpr Out None = Out::None, Bool = Out::Bool, I32 = Out::I32, I64 = Out::I64, Ptr = Out::Ptr, GuidT = Out::Guid;
+constexpr Out None = Out::None, Bool = Out::Bool, I32 = Out::I32, I64 = Out::I64, Ptr = Out::Ptr, GuidT = Out::Guid, Vec = Out::Vec, Map = Out::Map;
 
 Method Get(const char* name, Out out) { return Method {name, out, 0, false, false, nullptr}; }
 Method Put(const char* name) { return Method {name, Out::None, 0, false, false, nullptr}; }
@@ -65,13 +65,24 @@ void RegisterClasses(Runtime& rt) {
         rt.Override("IUser", "get_Id", [](Call& c) -> uint32_t { *c.Ptr<uint32_t>(0) = 1; return 0; });
         rt.Override("IUser", "get_IsSignedIn", [](Call& c) -> uint32_t { *c.Ptr<uint8_t>(0) = 1; return 0; });
         rt.Override("IUser", "get_XboxUserId", [](Call& c) -> uint32_t { *c.Ptr<uint64_t>(0) = Runtime::Get().MakeHString(u"2535400000000001"); return 0; });
+        rt.Override("IUser", "get_DisplayInfo", [](Call& c) -> uint32_t {
+            static Obj* info = nullptr;
+            Runtime& r = Runtime::Get();
+            Iface* i = r.FindInterface("IUserDisplayInfo");
+            if (info == nullptr) info = r.NewObject("Windows.Xbox.System.UserDisplayInfo", {i});
+            ++info->refs;
+            *c.Ptr<uint64_t>(0) = r.Pointer(*info, *i);
+            return 0;
+        });
+        for (const char* name : {"Gamertag", "ApplicationDisplayName", "GameDisplayName"})
+            rt.Override("IUserDisplayInfo", name, [](Call& c) -> uint32_t { *c.Ptr<uint64_t>(0) = Runtime::Get().MakeHString(u"Steve"); return 0; });
+        rt.Override("IUserDisplayInfo", "GamerScore", [](Call& c) -> uint32_t { *c.Ptr<uint32_t>(0) = 0; return 0; });
+        rt.Override("IUserDisplayInfo", "Reputation", [](Call& c) -> uint32_t { *c.Ptr<uint32_t>(0) = 50; return 0; });
+        rt.Override("IUserDisplayInfo", "AgeGroup", [](Call& c) -> uint32_t { *c.Ptr<uint32_t>(0) = 2; return 0; });   // Adult
+        rt.Override("IUserDisplayInfo", "Privileges", [](Call& c) -> uint32_t { *c.Ptr<uint64_t>(0) = Runtime::Get().NewVectorView({}); return 0; });
         rt.Override("IUser", "get_XboxUserHash", [](Call& c) -> uint32_t { *c.Ptr<uint64_t>(0) = Runtime::Get().MakeHString(u"utsuro"); return 0; });
     }
-    // The pads attached: none until input is wired.
-    rt.Override("IGamepadStatics", "get_Gamepads", [](Call& c) -> uint32_t {
-        *c.Ptr<uint64_t>(0) = Runtime::Get().NewVectorView({});
-        return 0;
-    });
+    RegisterInput(rt);
     // Windows.ApplicationModel.Store.CurrentApp: the title is always licensed and never a trial.
     Iface& license = rt.DefineInterface("ILicenseInformation", "8EBCAB32-0B5A-4A8A-A0A7-DC4B4B3C0D56", {
         Get("get_ProductLicenses", Out::Ptr),

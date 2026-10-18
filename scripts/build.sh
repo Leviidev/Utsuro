@@ -39,7 +39,7 @@ for p in "${pids[@]:-}"; do [[ -n "$p" ]] && { wait "$p" || fail=1; }; done
 
 clang++ -target arm64-apple-macos27.0 -o "$OUT/utsuro-run" "${objs[@]}" \
     -Wl,-search_paths_first "$LIBS_DIR"/*.a "$LIBS_DIR"/*.a \
-    -Wl,-w -framework CoreFoundation -framework Foundation -framework Metal -framework QuartzCore -framework AppKit -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers -lc++ -lpthread
+    -Wl,-w -framework CoreFoundation -framework Foundation -framework Metal -framework QuartzCore -framework AppKit -framework CoreGraphics -framework ImageIO -framework GameController -framework UniformTypeIdentifiers -lc++ -lpthread
 
 cat > "$OUT/jit.entitlements" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
