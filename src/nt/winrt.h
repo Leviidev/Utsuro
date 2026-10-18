@@ -53,6 +53,9 @@ struct Obj {
     std::vector<uint64_t> blocks;      ///< The guest-visible pointer for each interface.
     std::map<std::string, uint64_t> u64;
     std::map<std::string, std::string> str;
+    /// Event handlers (guest COM delegates) by event name, each with its registration token.
+    std::map<std::string, std::vector<std::pair<uint64_t, uint64_t>>> delegates;
+    std::vector<uint64_t> queue;       ///< Pending work items (guest delegates) for a dispatcher.
     int refs {1};
 };
 
@@ -78,6 +81,8 @@ public:
     Iface& DefineInterface(const std::string& name, const char* iid, std::vector<Method> methods, bool guessed = false);
     /// Registers an activatable class: `statics` (may be null) is the factory's second interface.
     void DefineClass(const std::string& runtime_name, std::function<Obj*(Runtime&)> create, Iface* statics = nullptr);
+    /// A class with several statics interfaces.
+    void DefineClassMulti(const std::string& runtime_name, std::function<Obj*(Runtime&)> create, std::vector<Iface*> statics);
 
     Obj* NewObject(const std::string& class_name, std::vector<Iface*> ifaces);
     /// The guest pointer through which `obj` is seen as `iface`.
@@ -110,16 +115,23 @@ private:
     std::vector<std::pair<Iface*, uint32_t>> method_table_;   // global id -> (iface, slot)
     std::map<uint64_t, std::unique_ptr<Obj>> objects_;
     uint64_t next_id_ {1};
-    struct ClassDef { std::function<Obj*(Runtime&)> create; Iface* statics {nullptr}; Obj* factory {nullptr}; };
+    struct ClassDef { std::function<Obj*(Runtime&)> create; Iface* statics {nullptr}; std::vector<Iface*> more_statics; Obj* factory {nullptr}; };
     std::map<std::string, ClassDef> classes_;
     Iface* activation_factory_ {nullptr};
     uint64_t next_token_ {1};
     friend struct Call;
 public:
     uint64_t NextToken() { return next_token_++; }
+    /// Remembers `delegate` as a handler of `event` on `obj`; returns the registration token.
+    uint64_t AddDelegate(Obj& obj, const std::string& event, uint64_t delegate);
+    void RemoveDelegate(Obj& obj, const std::string& event, uint64_t token);
+    /// Calls delegate->Invoke(args...) in the guest, then `then`. For use inside a host method.
+    GuestStep InvokeDelegate(uint64_t delegate, std::initializer_list<uint64_t> args, std::function<GuestStep(NtThread&, uint64_t)> then = nullptr);
+    Kernel& kernel() { return *kernel_; }
 };
 
 /// Registers every class the runtime provides (winrt_classes.cpp).
 void RegisterClasses(Runtime& rt);
+void RegisterCoreClasses(Runtime& rt);
 
 } // namespace utsuro::nt::winrt

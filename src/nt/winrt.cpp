@@ -132,7 +132,40 @@ bool Runtime::Override(const std::string& iface, const std::string& method, Host
 }
 
 void Runtime::DefineClass(const std::string& runtime_name, std::function<Obj*(Runtime&)> create, Iface* statics) {
-    classes_[runtime_name] = ClassDef {std::move(create), statics, nullptr};
+    classes_[runtime_name] = ClassDef {std::move(create), statics, {}, nullptr};
+}
+
+void Runtime::DefineClassMulti(const std::string& runtime_name, std::function<Obj*(Runtime&)> create, std::vector<Iface*> statics) {
+    ClassDef def;
+    def.create = std::move(create);
+    if (!statics.empty()) def.statics = statics[0];
+    for (size_t i = 1; i < statics.size(); ++i) def.more_statics.push_back(statics[i]);
+    classes_[runtime_name] = std::move(def);
+}
+
+uint64_t Runtime::AddDelegate(Obj& obj, const std::string& event, uint64_t delegate) {
+    const uint64_t token = NextToken();
+    obj.delegates[event].emplace_back(token, delegate);
+    return token;
+}
+
+void Runtime::RemoveDelegate(Obj& obj, const std::string& event, uint64_t token) {
+    auto& v = obj.delegates[event];
+    v.erase(std::remove_if(v.begin(), v.end(), [&](auto& p) { return p.first == token; }), v.end());
+}
+
+GuestStep Runtime::InvokeDelegate(uint64_t delegate, std::initializer_list<uint64_t> args, std::function<GuestStep(NtThread&, uint64_t)> then) {
+    // A COM delegate: vtable slot 3 is Invoke(this, args...).
+    const uint64_t vtable = *reinterpret_cast<uint64_t*>(delegate);
+    const uint64_t invoke = reinterpret_cast<uint64_t*>(vtable)[3];
+    std::vector<uint64_t> a {delegate};
+    for (uint64_t v : args) a.push_back(v);
+    GuestStep s;
+    s.call = true;
+    s.fn = invoke;
+    for (size_t i = 0; i < a.size() && i < 4; ++i) s.args[i] = a[i];
+    s.cont = then;
+    return s;
 }
 
 Obj* Runtime::NewObject(const std::string& class_name, std::vector<Iface*> ifaces) {
@@ -175,10 +208,11 @@ uint32_t Runtime::GetActivationFactory(const std::string& name, const Guid& iid,
     if (def.factory == nullptr) {
         std::vector<Iface*> ifaces {activation_factory_};
         if (def.statics != nullptr) ifaces.push_back(def.statics);
+        for (Iface* s : def.more_statics) ifaces.push_back(s);
         def.factory = NewObject(name, ifaces);
     }
     uint64_t p = QueryInterface(*def.factory, iid);
-    if (p == 0 && def.statics != nullptr) {
+    if (p == 0 && def.statics != nullptr && def.more_statics.empty()) {
         UT_INFO("winrt: %s adopts %s for %s", def.statics->name.c_str(), iid.ToString().c_str(), name.c_str());
         def.statics->iid = iid;
         def.statics->guessed = false;
@@ -273,11 +307,25 @@ bool Runtime::Dispatch(NtThread& thread, uint32_t number, SyscallArgs& args, uin
     UT_DEBUG("winrt: %s.%s::%s", obj->class_name.c_str(), iface->name.c_str(), m.name.c_str());
     if (m.fn) { *result = m.fn(call); return true; }
     if (m.event_add) {
-        if (auto* tok = call.Ptr<uint64_t>(1)) *tok = NextToken();
+        // add_X(handler, token*): remember the handler under the event's name.
+        std::string event = m.name.substr(4);
+        const uint64_t handler = call.Arg(0);
+        const uint64_t token = AddDelegate(*obj, event, handler);
+        if (auto* tok = call.Ptr<uint64_t>(1)) *tok = token;
+        *result = kSOk;
+        if (handler > 0x10000) {
+            // The caller expects the callee to keep its own reference to the handler.
+            const uint64_t vtable = *reinterpret_cast<uint64_t*>(handler);
+            thread.CallGuest(GuestStep::Call(reinterpret_cast<uint64_t*>(vtable)[1], {handler},
+                                             [](NtThread&, uint64_t) { return GuestStep::Return(0); }));
+        }
+        return true;
+    }
+    if (m.event_remove) {
+        RemoveDelegate(*obj, m.name.substr(7), call.Arg(0));
         *result = kSOk;
         return true;
     }
-    if (m.event_remove) { *result = kSOk; return true; }
     if (m.out != Out::None) {
         void* out = call.Ptr<void>(m.ret_arg);
         if (out != nullptr) {

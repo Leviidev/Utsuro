@@ -24,6 +24,7 @@ Method Fn(const char* name, Out out, HostFn fn) { return Method {name, out, 0, f
 
 void RegisterClasses(Runtime& rt) {
     RegisterGenerated(rt);
+    RegisterCoreClasses(rt);
     // Windows.ApplicationModel.Store.CurrentApp: the title is always licensed and never a trial.
     Iface& license = rt.DefineInterface("ILicenseInformation", "8EBCAB32-0B5A-4A8A-A0A7-DC4B4B3C0D56", {
         Get("get_ProductLicenses", Out::Ptr),
