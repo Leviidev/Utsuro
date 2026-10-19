@@ -800,6 +800,11 @@ std::shared_ptr<Texture> CreateTexture(const TextureDesc& desc) {
         UT_WARN("gpu: unsupported texture format %u, using RGBA8", desc.format);
         t->pixel_format = MTLPixelFormatRGBA8Unorm;
     }
+    // A typeless 32/16-bit surface bound as a depth buffer is a depth texture; its SRVs read the depth.
+    if (desc.depth_stencil) {
+        if (t->pixel_format == MTLPixelFormatR32Float) t->pixel_format = MTLPixelFormatDepth32Float;
+        else if (t->pixel_format == MTLPixelFormatR16Unorm) t->pixel_format = MTLPixelFormatDepth16Unorm;
+    }
     MTLTextureDescriptor* d = [MTLTextureDescriptor new];
     d.pixelFormat = t->pixel_format;
     d.width = desc.width;

@@ -100,6 +100,7 @@ const DescSpec kDescs[] = {
     {"CreateRenderTargetView", 1, 20}, {"CreateDepthStencilView", 1, 24}, {"CreateBlendState", 0, 264},
     {"CreateDepthStencilState", 0, 52}, {"CreateRasterizerState", 0, 40}, {"CreateSamplerState", 0, 52},
     {"CreateSwapChainForCoreWindow", 2, 48}, {"CreatePlacementBuffer", 0, 24}, {"CreatePlacementTexture2D", 0, 44},
+    {"CreateQuery", 0, 8},
 };
 
 uint64_t DeviceOf(Call& c) {
@@ -222,7 +223,33 @@ void Register(Runtime& rt, uint32_t os_timestamp) {
     // Console OS builds from September 2015 on (6.2.13xxx) lay the D3D11.X vtables out differently from the 2014 ones (6.2.11396).
     const bool newer = os_timestamp >= 0x55e00000u;
     UT_INFO("d3d: interface layouts of OS build %s", newer ? "6.2.13332" : "6.2.11396");
-    for (const D3dIfaceDef& def : (newer ? kD3dIfaces13332 : kD3dIfaces)) {
+    // The 6.2.13332 context vtables have two more entries after FlushGpuCacheRange than WinDurango's headers list (found from the
+    // title's call sites: Begin..GetData and MakeCeSpace both land on the shifted offsets, and BlockUntilGPUIdle calls the
+    // InsertWaitUntilIdle / InsertFence pair two slots later). Their names are unknown.
+    static std::vector<D3dIfaceDef> patched;
+    if (newer && patched.empty()) {
+        patched = kD3dIfaces13332;
+        for (D3dIfaceDef& def : patched) {
+            auto at = std::find_if(def.methods.begin(), def.methods.end(), [](const D3dMethodDef& m) { return std::string(m.name) == "FlushGpuCacheRange"; });
+            if (at == def.methods.end()) continue;
+            ++at;
+            at = def.methods.insert(at, D3dMethodDef {"UnknownContextMethod13332B", 0, -1, ""});
+            def.methods.insert(at, D3dMethodDef {"UnknownContextMethod13332A", 0, -1, ""});
+        }
+    }
+    // ID3D11Query (and Predicate) are missing from the headers the tables come from: a device child with GetDataSize and GetDesc.
+    static std::vector<D3dIfaceDef> all;
+    if (all.empty()) {
+        all = newer ? patched : kD3dIfaces;
+        auto child = std::find_if(all.begin(), all.end(), [](const D3dIfaceDef& d) { return std::string(d.name) == "ID3D11DeviceChild"; });
+        if (child != all.end()) {
+            D3dIfaceDef q {"ID3D11Query", "D6C00747-87B7-425E-B84D-44D108560AFD", "ID3D11DeviceChild", child->methods};
+            q.methods.push_back({"GetDataSize", 0, -1, ""});
+            q.methods.push_back({"GetDesc", 1, -1, ""});
+            all.push_back(q);
+        }
+    }
+    for (const D3dIfaceDef& def : all) {
         std::vector<winrt::Method> methods;
         for (const D3dMethodDef& m : def.methods) {
             winrt::Method mm;
@@ -238,9 +265,8 @@ void Register(Runtime& rt, uint32_t os_timestamp) {
 
     // The Xbox device context embeds its vtable (m_Function) after the device-child fields, the
     // draw-state blocks and the 64-byte out-of-line flags. Offsets are for ABI >= 6.2.11294.
-    // From OS build 6.2.13332 the shader user-data block is 0x10 bytes larger (MakeCeSpace sits at table offset 0xa68 in the title).
     constexpr uint32_t kTinyDevice = 0x20, kUserData = kTinyDevice + 0x148;
-    const uint32_t kFlags = kUserData + (newer ? 0x238 : 0x228), kFunction = kFlags + 64;
+    const uint32_t kFlags = kUserData + 0x228, kFunction = kFlags + 64;
     g_flags_offset = kFlags;
     for (const char* n : {"ID3D11PerformanceContextX", "ID3D11DeviceContextX", "ID3D11UserDefinedAnnotationX"})
         if (g_ifaces.count(n)) g_ifaces[n]->inline_table = kFunction;

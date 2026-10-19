@@ -7,6 +7,8 @@
 #include "engine/log.h"
 
 #include <filesystem>
+#include <fstream>
+#include <map>
 
 namespace utsuro::nt::winrt {
 
@@ -95,6 +97,83 @@ void RegisterAppData(Runtime& rt) {
         }),
     });
     rt.DefineClass("Windows.ApplicationModel.Package", [](Runtime&) -> Obj* { return nullptr; }, &package_statics);
+
+    // Windows.Xbox.Networking.SecureDeviceAssociationTemplate.GetTemplateByName: the templates the title's manifest declares. The
+    // title registers for incoming associations on them at start-up; there is no secure-device network behind them here.
+    rt.Override("ISecureDeviceAssociationTemplateStatics", "GetTemplateByName", [](Call& c) -> uint32_t {
+        static std::map<std::u16string, Obj*> templates;
+        Runtime& r = Runtime::Get();
+        const std::u16string name = Runtime::ReadHString(c.Arg(0));
+        Obj*& o = templates[name];
+        Iface* iface = r.FindInterface("ISecureDeviceAssociationTemplate");
+        if (o == nullptr) {
+            o = r.NewObject("Windows.Xbox.Networking.SecureDeviceAssociationTemplate", {iface});
+            o->str["name"] = std::string(name.begin(), name.end());
+        }
+        ++o->refs;
+        *c.Ptr<uint64_t>(1) = r.Pointer(*o, *iface);
+        return 0;
+    });
+    // The socket descriptions behind a template, read from the title's own manifest.
+    auto manifest_text = [](Kernel& k) {
+        static std::string text;
+        if (text.empty()) {
+            std::string host;
+            bool exists = false;
+            if (k.ResolvePath("G:\\AppxManifest.xml", &host, &exists) && exists) {
+                std::ifstream f(host, std::ios::binary);
+                text.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+            }
+        }
+        return text;
+    };
+    auto attribute = [](const std::string& tag, const std::string& name) -> std::string {
+        const size_t at = tag.find(" " + name + "=\"");
+        if (at == std::string::npos) return {};
+        const size_t begin = at + name.size() + 3, end = tag.find('"', begin);
+        return end == std::string::npos ? std::string() : tag.substr(begin, end - begin);
+    };
+    auto find_tag = [](const std::string& text, const std::string& element, const std::string& name) -> std::string {
+        size_t pos = 0;
+        const std::string open = "<mx:" + element + " ";
+        while ((pos = text.find(open, pos)) != std::string::npos) {
+            const size_t end = text.find('>', pos);
+            const std::string tag = text.substr(pos, end - pos);
+            if (tag.find(" Name=\"" + name + "\"") != std::string::npos) return tag;
+            pos = end;
+        }
+        return {};
+    };
+    static Iface* socket_iface = &rt.DefineInterface("ISecureDeviceSocketDescription", "9835ED01-7B1E-41FC-B64D-7D20448892D6", {
+        Fn("get_Name", Ptr, [](Call& c) -> uint32_t { return StringGetter(c, "name"); }),
+        Fn("get_IpProtocol", I32, [](Call& c) -> uint32_t { *c.Ptr<uint32_t>(0) = static_cast<uint32_t>(c.obj.u64["protocol"]); return 0; }),
+        Fn("get_BoundPortRangeLower", I32, [](Call& c) -> uint32_t { *c.Ptr<uint32_t>(0) = static_cast<uint32_t>(c.obj.u64["lower"]); return 0; }),
+        Fn("get_BoundPortRangeUpper", I32, [](Call& c) -> uint32_t { *c.Ptr<uint32_t>(0) = static_cast<uint32_t>(c.obj.u64["upper"]); return 0; }),
+        Get("get_AllowedUsages", I32),
+    });
+    auto socket = [manifest_text, attribute, find_tag](Call& c, bool initiator) -> uint32_t {
+        Runtime& r = Runtime::Get();
+        const std::string text = manifest_text(c.kernel);
+        const std::string tmpl = find_tag(text, "SecureDeviceAssociationTemplate", c.obj.str["name"]);
+        const std::string socket_name = attribute(tmpl, initiator ? "InitiatorSocketDescription" : "AcceptorSocketDescription");
+        const std::string desc = find_tag(text, "SocketDescription", socket_name);
+        Obj* o = r.NewObject("Windows.Xbox.Networking.SecureDeviceSocketDescription", {socket_iface});
+        o->str["name"] = socket_name;
+        o->u64["protocol"] = attribute(desc, "SecureIpProtocol") == "Tcp" ? 0 : 1;
+        const std::string ports = attribute(desc, "BoundPort");
+        const size_t dash = ports.find('-');
+        o->u64["lower"] = static_cast<uint64_t>(std::atoi(ports.c_str()));
+        o->u64["upper"] = static_cast<uint64_t>(dash == std::string::npos ? std::atoi(ports.c_str()) : std::atoi(ports.c_str() + dash + 1));
+        *c.Ptr<uint64_t>(0) = r.Pointer(*o, *socket_iface);
+        return 0;
+    };
+    rt.Override("ISecureDeviceAssociationTemplate", "get_InitiatorSocketDescription", [socket](Call& c) -> uint32_t { return socket(c, true); });
+    rt.Override("ISecureDeviceAssociationTemplate", "get_AcceptorSocketDescription", [socket](Call& c) -> uint32_t { return socket(c, false); });
+    rt.Override("ISecureDeviceAssociationTemplate", "get_Name", [](Call& c) -> uint32_t {
+        const std::string& n = c.obj.str["name"];
+        *c.Ptr<uint64_t>(0) = Runtime::Get().MakeHString(std::u16string(n.begin(), n.end()));
+        return 0;
+    });
 }
 
 } // namespace utsuro::nt::winrt

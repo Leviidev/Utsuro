@@ -2,7 +2,9 @@
 // the guest function is overwritten with `mov r10, rcx; mov eax, N; syscall; ret`, which
 // lands in Kernel::Dispatch like any other syscall; the host function's result is rax.
 #include "nt/d3d.h"
+#include "nt/hle_classes.h"
 #include "nt/kernel.h"
+#include "nt/logan.h"
 #include "nt/winrt.h"
 #include "nt/xaudio2.h"
 
@@ -13,7 +15,9 @@
 #include <algorithm>
 #include <cstring>
 #include <map>
+#include <chrono>
 #include <mutex>
+#include <thread>
 
 namespace utsuro::nt {
 
@@ -75,12 +79,12 @@ uint64_t ApuAlloc(Kernel& k, NtThread&, SyscallArgs& a) {
     uint64_t at = 0;
     if (out == nullptr || !AllocAligned(k, a[2], a[3], 0, &at)) return 0x8007000Eu;
     *out = at;
-    if (auto* apu = a.Ptr<uint32_t>(1)) *apu = static_cast<uint32_t>(at);
+    if (auto* apu = a.Ptr<uint32_t>(1)) *apu = logan::MapMemory(at, static_cast<uint32_t>(a[2]));
     return 0;
 }
 
 uint64_t ApuMapVirtualAddress(Kernel&, NtThread&, SyscallArgs& a) {
-    if (auto* apu = a.Ptr<uint32_t>(0)) *apu = static_cast<uint32_t>(a[1]);
+    if (auto* apu = a.Ptr<uint32_t>(0)) *apu = logan::ApuFor(a[1], static_cast<uint32_t>(a[2]));
     return 0;
 }
 
@@ -90,6 +94,7 @@ uint64_t D3DFreeGraphicsMemory(Kernel& k, NtThread&, SyscallArgs& a) {
     std::scoped_lock lock {g_graphics_mutex};
     auto it = g_graphics.find(a[0]);
     if (it == g_graphics.end()) return 0x80070057u;
+    logan::UnmapMemory(it->first);
     uint64_t base = it->second.base, len = 0;
     k.Vm().Free(&base, &len, MEM_RELEASE);
     g_graphics.erase(it);
@@ -97,6 +102,7 @@ uint64_t D3DFreeGraphicsMemory(Kernel& k, NtThread&, SyscallArgs& a) {
 }
 
 uint64_t ReturnOk(Kernel&, NtThread&, SyscallArgs&) { return 0; }
+
 
 std::string HstringToUtf8(uint64_t h) {
     if (h == 0) return {};
@@ -137,6 +143,34 @@ uint64_t RoGetActivationFactory(Kernel& k, NtThread& thread, SyscallArgs& a) {
     return ~0ull;  // decline: run the original
 }
 
+// d3d11_x!DXGIXSetVLineNotification(counter, line, hEvent) and DXGIXSetFrameNotification: the title asks to be told, through an event,
+// when the display scans a line or a frame completes, and paces itself on it. Here the display is a 60 Hz clock.
+uint64_t SignalOnVblank(Kernel& k, NtThread&, SyscallArgs& a) {
+    UT_INFO("hle: display notification registered (%#llx, %#llx, event %#llx, %#llx)", (unsigned long long)a[0], (unsigned long long)a[1],
+            (unsigned long long)a[2], (unsigned long long)a[3]);
+    auto event = k.Get<EventObject>(a[2], ObjType::Event);
+    if (!event) return 0;
+    static std::mutex mutex;
+    static std::vector<std::shared_ptr<EventObject>> events;
+    std::scoped_lock lock {mutex};
+    events.push_back(event);
+    static bool started = false;
+    if (!started) {
+        started = true;
+        std::thread([&k] {
+            for (;;) {
+                std::this_thread::sleep_for(std::chrono::microseconds(16667));
+                std::vector<std::shared_ptr<EventObject>> list;
+                { std::scoped_lock l {mutex}; list = events; }
+                std::scoped_lock wait {k.WaitMutex()};
+                for (auto& e : list) e->signaled = true;
+                k.NotifyAll();
+            }
+        }).detach();
+    }
+    return 0;
+}
+
 const Hook kHooks[] = {
     {"combase.dll", "RoGetActivationFactory", RoGetActivationFactory, 5},
     {"bcrypt.dll", "BCryptGenRandom", BCryptGenRandom, 0},
@@ -145,8 +179,9 @@ const Hook kHooks[] = {
     {"d3d11_x.dll", "D3DFreeGraphicsMemory", D3DFreeGraphicsMemory, 0},
     {"d3d11_x.dll", "D3DConfigureVirtualMemory", ReturnOk, 0},
     {"d3d11_x.dll", "D3DMapEsramMemory", ReturnOk, 0},
-    {"d3d11_x.dll", "DXGIXSetVLineNotification", ReturnOk, 0},
-    {"d3d11_x.dll", "DXGIXSetFrameNotification", ReturnOk, 0},
+    {"d3d11_x.dll", "DXGIXSetVLineNotification", SignalOnVblank, 0},
+    {"d3d11_x.dll", "DXGIXSetFrameNotification", SignalOnVblank, 0},
+    {"mmdevapi.dll", "DllGetClassObject", mmdevice::DllGetClassObject, 0},
     {"acphal.dll", "ApuAlloc", ApuAlloc, 0},
     {"acphal.dll", "ApuFree", D3DFreeGraphicsMemory, 0},
     {"acphal.dll", "ApuCreateHeap", ReturnOk, 0},

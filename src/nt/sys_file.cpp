@@ -1,5 +1,6 @@
 // sys_file.cpp -- the file system: NtCreateFile and friends, over the host's.
 #include "nt/kernel.h"
+#include "nt/logan.h"
 
 #include "engine/log.h"
 
@@ -108,6 +109,17 @@ NTSTATUS DoCreate(Kernel& k, NtThread&, HANDLE* out, uint32_t access, const OBJE
             SetIosb(iosb, STATUS_SUCCESS, FILE_OPENED);
             return STATUS_SUCCESS;
         }
+    }
+    if (logan::IsDevicePath(nt_path)) {
+        auto dev = std::make_shared<FileObject>();
+        dev->is_device = true;
+        dev->is_logan = true;
+        dev->nt_path = nt_path;
+        dev->host_path = "/dev/null";
+        dev->fd = open("/dev/null", O_RDWR);
+        *out = k.AddHandle(dev);
+        SetIosb(iosb, STATUS_SUCCESS, FILE_OPENED);
+        return STATUS_SUCCESS;
     }
     std::string host;
     bool exists = false;
@@ -705,6 +717,12 @@ NTSTATUS NtDeviceIoControlFile(Kernel& k, NtThread&, SyscallArgs& a) {
     const uint32_t code = static_cast<uint32_t>(a[5]);
     auto* out = a.Ptr<uint8_t>(8);
     const uint32_t out_len = static_cast<uint32_t>(a[9]);
+    if (f->is_logan) {
+        uint64_t returned = 0;
+        const NTSTATUS status = logan::Ioctl(k, code, a.Ptr<uint8_t>(6), static_cast<uint32_t>(a[7]), out, out_len, &returned);
+        SetIosb(iosb, status, returned);
+        return status;
+    }
     if (f->is_device) {
         UT_DEBUG("DeviceIoControl %s code %#x in %u out %u", f->nt_path.c_str(), code, (uint32_t)a[7], out_len);
         if (const auto* in = a.Ptr<uint8_t>(6)) {

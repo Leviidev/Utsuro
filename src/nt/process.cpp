@@ -312,7 +312,27 @@ void Kernel::BuildKusd() {
     PutU32(kusd_, 0x2e8, 0x200000);              // NumberOfPhysicalPages (8 GB / 4K)
     k[0x2ec] = 0;                                // KdDebuggerEnabled
     PutU32(kusd_, 0x2f0, nprocs_);               // ActiveProcessorCount
-    PutU64(kusd_, 0x300, 10000000);              // QpcFrequency (10 MHz)
+    // QpcFrequency. The console OS from 6.2.13xxx on reads the counter itself (rdtscp, which FEXCore answers with the host's virtual
+    // counter) and takes only the frequency from here, so then it has to be the host counter's; before that the counter is a system
+    // call that this runtime keeps at 10 MHz.
+    uint64_t qpc_frequency = 10000000;
+    {
+        const uint64_t qpc = FindExport(ntdll_base_, "RtlQueryPerformanceCounter");
+        if (qpc != 0) {
+            const auto* code = reinterpret_cast<const uint8_t*>(qpc);
+            for (int i = 0; i < 12; ++i) {
+                if (code[i] == 0x0F && code[i + 1] == 0x01 && code[i + 2] == 0xF9) {   // rdtscp
+#if defined(__aarch64__)
+                    uint64_t f;
+                    asm volatile("mrs %0, cntfrq_el0" : "=r"(f));
+                    qpc_frequency = f;
+#endif
+                    break;
+                }
+            }
+        }
+    }
+    PutU64(kusd_, 0x300, qpc_frequency);         // QpcFrequency
     k[0x274 + 10] = 1;                           // PF_XMMI64_INSTRUCTIONS_AVAILABLE etc. (index 10)
     k[0x274 + 6] = 1;                            // PF_XMMI_INSTRUCTIONS_AVAILABLE
     k[0x274 + 7] = 1;                            // PF_3DNOW (benign)
@@ -610,6 +630,13 @@ void* HostThreadMain(void* raw) {
     const RunResult r = t.guest->Run();
     UT_INFO("thread %llu ended: %s (status %d, rip %#llx)", (unsigned long long)t.tid_, r.message.c_str(), r.status,
             (unsigned long long)r.rip);
+    if (std::getenv("UTSURO_HIST") != nullptr) {
+        const size_t n = std::min(t.history_count, t.history.size());
+        for (size_t i = 0; i < n; ++i) {
+            const auto& h = t.history[(t.history_count - n + i) % t.history.size()];
+            UT_INFO("thread %llu history: %s <- %s", (unsigned long long)t.tid_, k.SyscallName(h.first), k.Describe(h.second).c_str());
+        }
+    }
     if (r.outcome != RunOutcome::Exited) {
         // Debugging aid: UTSURO_HEXDUMP=<reg>[+off]:<len>[,...] dumps guest memory around a register of the fault.
         if (const char* spec = std::getenv("UTSURO_HEXDUMP")) {
@@ -752,6 +779,30 @@ void Kernel::ExitProcess(int32_t status) {
 int Kernel::Run() {
     // The main thread has nothing to do but wait; the process ends in ExitProcess.
     std::unique_lock lock {exit_mutex_};
+    // Debugging aid: UTSURO_STACKS=<seconds> prints, at that interval, what every guest thread is blocked in.
+    if (const char* every = std::getenv("UTSURO_STACKS")) {
+        const auto period = std::chrono::seconds(std::max(1, std::atoi(every)));
+        while (!exit_cv_.wait_for(lock, period, [&] { return process_done_; })) {
+            std::vector<std::shared_ptr<NtThread>> list;
+            {
+                std::scoped_lock tl {thread_mutex_};
+                for (auto& [id, t] : threads_) list.push_back(t);
+            }
+            UT_INFO("---- threads ----");
+            for (auto& t : list) {
+                if (t->current_args != nullptr)
+                {
+                    UT_INFO("thread %llu %s: in %s(%#llx) from %s (syscall site %s)", (unsigned long long)t->tid_, t->name.c_str(), SyscallName(static_cast<uint32_t>(t->current_syscall)),
+                            (unsigned long long)(t->current_args ? t->current_args->reg[0] : 0), Describe(t->current_ret).c_str(), Describe(t->current_rip).c_str());
+                    const auto frames = Backtrace(t->stack_rip, t->stack_regs, 14);
+                    for (size_t i = 0; i < frames.size(); ++i) UT_INFO("    #%zu %s", i, Describe(frames[i]).c_str());
+                }
+                else
+                    UT_INFO("thread %llu %s: running (last syscall %s at %s)", (unsigned long long)t->tid_, t->name.c_str(), SyscallName(static_cast<uint32_t>(t->current_syscall)),
+                            Describe(t->current_rip).c_str());
+            }
+        }
+    }
     exit_cv_.wait(lock, [&] { return process_done_; });
     return exit_code.load();
 }

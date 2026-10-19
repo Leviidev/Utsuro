@@ -1,3 +1,4 @@
+#include <execinfo.h>
 #include "engine.h"
 
 #include "crash_handler.h"
@@ -608,6 +609,12 @@ bool EndFaultedGuestThread(int signal, siginfo_t* info, void* raw_context) {
             UT_WARN("fault (signal %d) inside the emulator at %p while running guest "
                         "code; ending this guest process",
                         signal, info == nullptr ? nullptr : info->si_addr);
+            if (std::getenv("UTSURO_HOSTBT") != nullptr) {
+                // Debugging aid (not signal-safe): where in the host this happened.
+                void* frames[40];
+                const int n = backtrace(frames, 40);
+                backtrace_symbols_fd(frames, n, 2);
+            }
             // The dispatcher has spilled the guest registers to the frame by the time the
             // decoder runs, so they are current here.
             if (g_fault_reporter) {

@@ -1,3 +1,4 @@
+#include <atomic>
 #include "nt/winrt.h"
 
 #include "nt/d3d.h"
@@ -396,6 +397,21 @@ method:
     Call call {*kernel_, thread, args, *obj, *iface, slot - static_cast<uint32_t>(iface->base_slots)};
     UT_DEBUG("winrt: %s.%s::%s", obj->class_name.c_str(), iface->name.c_str(), m.name.c_str());
     if (observer) observer(*obj, *iface, m);
+    {
+        // Debugging aid: UTSURO_HOT=<method> prints where in the title that method is being called from, once, after 200000 calls.
+        static const char* hot = std::getenv("UTSURO_HOT");
+        static std::atomic<uint64_t> hot_calls {0};
+        if (hot != nullptr && m.name == hot && hot_calls.fetch_add(1) == 200000 && thread.control != nullptr) {
+            GuestCpuState st;
+            if (thread.control->CaptureCpuState(&st)) {
+                uint64_t regs[16];
+                for (int i = 0; i < 16; ++i) regs[i] = st.gregs[i];
+                UT_INFO("hot: %s called 200000 times; from thread %llu:", hot, (unsigned long long)thread.tid_);
+                const auto frames = kernel_->Backtrace(st.rip, regs, 12);
+                for (size_t i = 0; i < frames.size(); ++i) UT_INFO("    #%zu %s", i, kernel_->Describe(frames[i]).c_str());
+            }
+        }
+    }
     if (m.fn) { const uint32_t hr = m.fn(call); *result = call.wide_set ? call.wide_result : hr; return true; }
     if (iface->fallback) { *result = iface->fallback(call); return true; }
     if (m.ctor) {

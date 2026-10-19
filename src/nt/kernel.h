@@ -2,6 +2,7 @@
 // the Xbox Era ntdll makes into it.
 #pragma once
 
+#include <array>
 #include "engine/engine.h"
 #include "engine/guest_memory.h"
 #include "nt/nt_types.h"
@@ -127,6 +128,7 @@ struct FileObject : Object {
     std::string nt_path;
     bool is_dir {false};
     bool is_device {false};  ///< An NT device with no host file behind it, e.g. \Device\CNG.
+    bool is_logan {false};   ///< The console's audio processor device (nt/logan.cpp).
     bool synchronous {true};
     uint32_t access {0};
     uint32_t options {0};
@@ -242,6 +244,11 @@ public:
     uint64_t current_syscall {0};
     uint64_t current_rip {0};
     uint64_t current_ret {0};
+    /// The last system calls the thread made (number, return address), newest last; UTSURO_HIST prints them when the thread ends.
+    std::array<std::pair<uint32_t, uint64_t>, 24> history {};
+    size_t history_count {0};
+    uint64_t stack_regs[16] {};   ///< General registers at the last system call, kept only when UTSURO_STACKS is set.
+    uint64_t stack_rip {0};
     /// Host code that needs the guest to run a function (a COM method, a callback) asks here; the
     /// call is made when the host method returns, and the continuation sees its result.
     void CallGuest(const GuestStep& step) { pending_step = step; has_pending_step = true; }

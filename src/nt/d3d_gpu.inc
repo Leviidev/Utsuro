@@ -344,6 +344,27 @@ bool InflateGuest(const uint8_t* src, uint32_t n, bool zlib_header, std::vector<
 constexpr uint32_t kBatchCurrent = 0x20 + 0x20, kBatchLimit = 0x20 + 0x28, kCeCurrent = 0x20 + 0x30, kCeBiasedLimit = 0x20 + 0x38, kCeLimit = 0x20 + 0x40;
 
 void RegisterGpuOverrides() {
+    // ---- queries: GPU timing and occlusion answer at once, with plausible values ----
+    OverrideAll("GetData", [](Call& c) -> uint32_t {
+        // GetData(pAsync, pData, DataSize, Flags)
+        uint8_t* data = c.Ptr<uint8_t>(1);
+        const uint32_t size = static_cast<uint32_t>(c.Arg(2));
+        Obj* q = Runtime::Get().FromPointer(c.Arg(0));
+        if (data == nullptr || size == 0) return 0;
+        std::memset(data, 0, size);
+        uint32_t kind = 0;
+        if (q != nullptr && q->str["desc"].size() >= 4) std::memcpy(&kind, q->str["desc"].data(), 4);
+        using Clock = std::chrono::steady_clock;
+        const uint64_t now = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count());
+        switch (kind) {
+        case 0: if (size >= 4) { const uint32_t done = 1; std::memcpy(data, &done, 4); } break;          // EVENT: has happened
+        case 1: if (size >= 8) { const uint64_t samples = 1; std::memcpy(data, &samples, 8); } break;    // OCCLUSION: something was visible
+        case 2: if (size >= 8) std::memcpy(data, &now, 8); break;                                       // TIMESTAMP (nanoseconds)
+        case 3: if (size >= 12) { const uint64_t frequency = 1000000000ull; std::memcpy(data, &frequency, 8); } break;   // TIMESTAMP_DISJOINT: 1 GHz, not disjoint
+        default: break;                                                                                  // everything else reads as zero
+        }
+        return 0;
+    });
     OverrideAll("MakeCeSpace", [](Call& c) -> uint32_t {
         // The packets already appended are for the real GPU's constant engine; hand out a fresh buffer.
         constexpr uint32_t kDwords = 16384, kBias = 70;

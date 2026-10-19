@@ -115,9 +115,18 @@ uint64_t NtThread::Handle(uint64_t number, uint64_t a1, uint64_t a2, uint64_t a3
     args.rsp = guest ? guest->Rsp() : 0;
     current_args = &args;
     current_syscall = number;
+    history[history_count++ % history.size()] = {static_cast<uint32_t>(number), args.rsp != 0 ? *reinterpret_cast<uint64_t*>(args.rsp) : 0};
     current_rip = guest ? guest->Rip() : 0;
     // The syscall instruction ends its block, so the thread continues wherever rip says:
     // step past it now. Handlers that put the thread somewhere else overwrite this.
+    static const bool keep_stacks = std::getenv("UTSURO_STACKS") != nullptr;
+    if (keep_stacks && control != nullptr) {
+        GuestCpuState st;
+        if (control->CaptureCpuState(&st)) {
+            for (int i = 0; i < 16; ++i) stack_regs[i] = st.gregs[i];
+            stack_rip = st.rip;
+        }
+    }
     if (control != nullptr) control->AdvanceGuestRip(2);
     has_raw_result = false;
     has_pending_step = false;
@@ -413,12 +422,18 @@ NTSTATUS Kernel::Dispatch(NtThread& thread, uint32_t number, SyscallArgs& args) 
                 ++f;
                 while (*f && std::strchr("-+ #0123456789.*hlIwLqjzt", *f)) spec += *f++;
                 char buf[512];
+                // "%.*s" / "%*d": the precision or width comes from the argument list first.
+                long long star_precision = -1;
+                if (spec.find(".*") != std::string::npos) { star_precision = va ? static_cast<int32_t>(va[arg]) : 0; ++arg; }
+                else if (spec.find('*') != std::string::npos) ++arg;
                 const uint64_t v = va ? va[arg] : 0;
                 switch (*f) {
                 case 's': ++arg; if (spec.find('w') != std::string::npos || spec.find('l') != std::string::npos) {
                               out += readable(v, 2) ? Utf16ToUtf8(std::u16string(reinterpret_cast<const char16_t*>(v))) : "(bad)";
                           } else {
-                              out += readable(v, 1) ? reinterpret_cast<const char*>(v) : "(bad)";
+                              if (!readable(v, 1)) out += "(bad)";
+                              else if (star_precision >= 0) out.append(reinterpret_cast<const char*>(v), static_cast<size_t>(std::min<long long>(star_precision, 512)));
+                              else out += reinterpret_cast<const char*>(v);
                           } break;
                 case 'S': ++arg; out += readable(v, 2) ? Utf16ToUtf8(std::u16string(reinterpret_cast<const char16_t*>(v))) : "(bad)"; break;
                 case 'Z': { ++arg; out += readable(v, 16) ? Utf16ToUtf8(ReadUnicodeString(reinterpret_cast<const UNICODE_STRING*>(v))) : "(bad)"; break; }
@@ -431,7 +446,8 @@ NTSTATUS Kernel::Dispatch(NtThread& thread, uint32_t number, SyscallArgs& args) 
                 }
             }
             while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
-            UT_INFO("[%llu] ntdll: %s", (unsigned long long)thread.tid_, out.c_str());
+            if (out.find("(bad)") != std::string::npos && fmt != nullptr) UT_INFO("[%llu] ntdll (format \"%s\", args at %#llx): %s", (unsigned long long)thread.tid_, fmt, (unsigned long long)va_ptr, out.c_str());
+            else UT_INFO("[%llu] ntdll: %s", (unsigned long long)thread.tid_, out.c_str());
             return STATUS_SUCCESS;
         }
         UT_INFO("[%llu] TP%u %s rsp=%#llx rcx=%#llx rdx=%#llx r8=%#llx r9=%#llx <- %s", (unsigned long long)thread.tid_, id,

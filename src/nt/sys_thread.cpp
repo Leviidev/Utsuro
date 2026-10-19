@@ -210,8 +210,31 @@ NTSTATUS NtCreateThreadEx(Kernel& k, NtThread& t, SyscallArgs& a) {
             }
         }
     }
+    // For the log: the class of the object the title hands its thread (UE3's FRunnableThread keeps its FRunnable at +0x10), by MSVC RTTI.
+    auto rtti = [&](uint64_t object) -> std::string {
+        if (object < 0x10000 || !k.Vm().Contains(object, 8)) return {};
+        const uint64_t vtable = *reinterpret_cast<const uint64_t*>(object);
+        if (vtable < 0x10000 || !k.Vm().Contains(vtable - 8, 8)) return {};
+        const uint64_t col = *reinterpret_cast<const uint64_t*>(vtable - 8);
+        if (col < 0x10000 || !k.Vm().Contains(col, 24)) return {};
+        const uint32_t self_rva = *reinterpret_cast<const uint32_t*>(col + 20), type_rva = *reinterpret_cast<const uint32_t*>(col + 12);
+        if (self_rva == 0 || type_rva == 0) return {};
+        const uint64_t base = col - self_rva, name = base + type_rva + 16;
+        if (!k.Vm().Contains(name, 16)) return {};
+        return std::string(reinterpret_cast<const char*>(name), strnlen(reinterpret_cast<const char*>(name), 80));
+    };
+    std::string kind;
+    if (arg >= 0x10000 && k.Vm().Contains(arg, 0x18)) {
+        const uint64_t runnable = *reinterpret_cast<const uint64_t*>(arg + 0x10);
+        if (runnable >= 0x10000 && k.Vm().Contains(runnable, 8)) {
+            const uint64_t vtable = *reinterpret_cast<const uint64_t*>(runnable);
+            if (vtable >= 0x10000 && k.Vm().Contains(vtable, 16))
+                kind = " init " + k.Describe(reinterpret_cast<const uint64_t*>(vtable)[0]) + " run " + k.Describe(reinterpret_cast<const uint64_t*>(vtable)[1]);
+        }
+        if (kind.empty()) kind = rtti(*reinterpret_cast<const uint64_t*>(arg + 0x10));
+    }
     *out = k.AddHandle(thread);
-    UT_INFO("thread %llu created by %llu: start %s arg %#llx%s", (unsigned long long)thread->tid_, (unsigned long long)t.tid_, k.Describe(start).c_str(), (unsigned long long)arg, (flags & 1) ? " (suspended)" : "");
+    UT_INFO("thread %llu created by %llu: start %s arg %#llx%s%s%s", (unsigned long long)thread->tid_, (unsigned long long)t.tid_, k.Describe(start).c_str(), (unsigned long long)arg, (flags & 1) ? " (suspended)" : "", "", kind.c_str());
     k.StartThread(thread, FindExport(k.NtdllBase(), "RtlUserThreadStart"), start, arg, (flags & 1) != 0);
     return STATUS_SUCCESS;
 }
