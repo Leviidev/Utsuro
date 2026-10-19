@@ -67,12 +67,13 @@ uint64_t Runtime::AllocGuest(size_t bytes, size_t align) {
 void Runtime::Init(Kernel& kernel) {
     if (ready_) return;
     kernel_ = &kernel;
-    uint64_t base = 0, size = 4 << 20;
+    uint64_t base = 0, size = 64 << 20;
     if (kernel.Vm().Allocate(&base, &size, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE, RegionKind::Private, "host objects") != STATUS_SUCCESS) {
         UT_ERROR("winrt: cannot allocate the host heap");
         return;
     }
     heap_ = base;
+    heap_base_ = base;
     heap_end_ = base + size;
     ready_ = true;
     activation_factory_ = &DefineInterface("IActivationFactory", "00000035-0000-0000-C000-000000000046", {});
@@ -243,7 +244,7 @@ float Call::Float(int i) const {
 }
 
 Obj* Runtime::FromPointer(uint64_t pointer) {
-    if (pointer <= 0x10000) return nullptr;
+    if (pointer < heap_base_ || pointer + 16 > heap_end_) return nullptr;   // not one of ours (a title can hand us anything)
     const uint64_t id = reinterpret_cast<const uint64_t*>(pointer)[1];
     std::scoped_lock lock {mutex_};
     auto it = objects_.find(id);
@@ -395,7 +396,7 @@ method:
     Call call {*kernel_, thread, args, *obj, *iface, slot - static_cast<uint32_t>(iface->base_slots)};
     UT_DEBUG("winrt: %s.%s::%s", obj->class_name.c_str(), iface->name.c_str(), m.name.c_str());
     if (observer) observer(*obj, *iface, m);
-    if (m.fn) { *result = m.fn(call); return true; }
+    if (m.fn) { const uint32_t hr = m.fn(call); *result = call.wide_set ? call.wide_result : hr; return true; }
     if (iface->fallback) { *result = iface->fallback(call); return true; }
     if (m.ctor) {
         auto it = classes_.find(obj->class_name);

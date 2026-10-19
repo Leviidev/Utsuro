@@ -434,8 +434,8 @@ NTSTATUS Kernel::Dispatch(NtThread& thread, uint32_t number, SyscallArgs& args) 
             UT_INFO("[%llu] ntdll: %s", (unsigned long long)thread.tid_, out.c_str());
             return STATUS_SUCCESS;
         }
-        UT_INFO("[%llu] TP%u %s rcx=%#llx rdx=%#llx r8=%#llx r9=%#llx <- %s", (unsigned long long)thread.tid_, id,
-                id < tracepoints.size() ? tracepoints[id].name.c_str() : "?", (unsigned long long)args.reg[0],
+        UT_INFO("[%llu] TP%u %s rsp=%#llx rcx=%#llx rdx=%#llx r8=%#llx r9=%#llx <- %s", (unsigned long long)thread.tid_, id,
+                id < tracepoints.size() ? tracepoints[id].name.c_str() : "?", (unsigned long long)args.rsp + 32, (unsigned long long)args.reg[0],
                 (unsigned long long)args.reg[1], (unsigned long long)args.reg[2], (unsigned long long)args.reg[3],
                 Describe(ret).c_str());
         DumpRequestedMemory("UTSURO_TPDUMP");

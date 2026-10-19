@@ -611,6 +611,48 @@ void* HostThreadMain(void* raw) {
     UT_INFO("thread %llu ended: %s (status %d, rip %#llx)", (unsigned long long)t.tid_, r.message.c_str(), r.status,
             (unsigned long long)r.rip);
     if (r.outcome != RunOutcome::Exited) {
+        // Debugging aid: UTSURO_HEXDUMP=<reg>[+off]:<len>[,...] dumps guest memory around a register of the fault.
+        if (const char* spec = std::getenv("UTSURO_HEXDUMP")) {
+            uint64_t g[16], rip;
+            if (LastFaultRegisters(g, &rip)) {
+                static const char* const names[16] = {"rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"};
+                std::string list = spec;
+                size_t pos = 0;
+                while (pos < list.size()) {
+                    size_t end = list.find(',', pos);
+                    if (end == std::string::npos) end = list.size();
+                    const std::string item = list.substr(pos, end - pos);
+                    pos = end + 1;
+                    const size_t colon = item.find(':');
+                    if (colon == std::string::npos) continue;
+                    std::string reg = item.substr(0, colon);
+                    long long off = 0;
+                    const size_t plus = reg.find_first_of("+-");
+                    if (plus != std::string::npos) { off = std::strtoll(reg.c_str() + plus, nullptr, 0); reg = reg.substr(0, plus); }
+                    const size_t len = std::strtoull(item.c_str() + colon + 1, nullptr, 0);
+                    if (reg == "exe") {   // the title image's base, for globals
+                        const uint64_t at = k.ImageBase() + off;
+                        if (!k.Vm().Contains(at, len)) { UT_INFO("hexdump exe%+lld: not mapped", off); continue; }
+                        std::string line;
+                        char b[8];
+                        for (size_t q = 0; q < len && q < 64; ++q) { std::snprintf(b, sizeof b, "%02x", reinterpret_cast<const uint8_t*>(at)[q]); line += b; if (q % 8 == 7) line += ' '; }
+                        UT_INFO("hexdump exe%+lld: %s", off, line.c_str());
+                        continue;
+                    }
+                    for (int i = 0; i < 16; ++i) {
+                        if (reg != names[i]) continue;
+                        const uint64_t at = g[i] + off;
+                        if (!k.Vm().Contains(at, len)) { UT_INFO("hexdump %s%+lld: not mapped", reg.c_str(), off); break; }
+                        for (size_t o = 0; o < len; o += 32) {
+                            std::string line;
+                            char b[8];
+                            for (size_t q = 0; q < 32 && o + q < len; ++q) { std::snprintf(b, sizeof b, "%02x", reinterpret_cast<const uint8_t*>(at)[o + q]); line += b; if (q % 8 == 7) line += ' '; }
+                            UT_INFO("hexdump %s%+lld +%#zx: %s", reg.c_str(), off, o, line.c_str());
+                        }
+                    }
+                }
+            }
+        }
         // Debugging aid: UTSURO_SCAN=<text> prints where that text (ASCII or UTF-16) sits in the guest's heap.
         if (const char* needle = std::getenv("UTSURO_SCAN")) {
             const std::string a = needle;

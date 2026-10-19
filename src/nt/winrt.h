@@ -80,6 +80,8 @@ struct Call {
     Obj& obj;
     Iface& iface;
     uint32_t slot;                     ///< Method index within the interface (0-based after IInspectable).
+    uint64_t wide_result {0};          ///< A method returning a pointer sets this and wide_set instead of an HRESULT.
+    bool wide_set {false};
     uint64_t Arg(int i) const { return args[i + 1]; }
     template <typename T>
     T* Ptr(int i) const { return reinterpret_cast<T*>(Arg(i)); }
@@ -138,7 +140,7 @@ private:
     Kernel* kernel_ {nullptr};
     bool ready_ {false};
     std::mutex mutex_;
-    uint64_t heap_ {0}, heap_end_ {0};
+    uint64_t heap_ {0}, heap_end_ {0}, heap_base_ {0};
     std::vector<std::unique_ptr<Iface>> ifaces_;
     std::vector<std::pair<Iface*, uint32_t>> method_table_;   // global id -> (iface, slot)
     std::map<uint64_t, std::unique_ptr<Obj>> objects_;

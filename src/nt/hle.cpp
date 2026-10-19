@@ -10,7 +10,10 @@
 
 #include <stdlib.h>
 
+#include <algorithm>
 #include <cstring>
+#include <map>
+#include <mutex>
 
 namespace utsuro::nt {
 
@@ -35,6 +38,65 @@ uint64_t BCryptGenRandom(Kernel&, NtThread&, SyscallArgs& a) {
     arc4random_buf(buf, len);
     return 0;
 }
+
+// d3d11_x!D3DAllocateGraphicsMemory(size, alignment, desiredGpuAddress, flags, ppAddress) and friends: the console reaches
+// graphics-visible memory through the kernel; here it is ordinary guest memory, aligned as asked.
+struct GraphicsBlock { uint64_t base; uint64_t size; };
+std::mutex g_graphics_mutex;
+std::map<uint64_t, GraphicsBlock> g_graphics;   // address handed out -> allocation
+
+bool AllocAligned(Kernel& k, uint64_t size, uint64_t align, uint64_t desired, uint64_t* out) {
+    align = std::max<uint64_t>(align, 0x10000);
+    for (uint64_t extra : {uint64_t {0}, align}) {
+        uint64_t base = desired, len = size + extra;
+        if (k.Vm().Allocate(&base, &len, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) != STATUS_SUCCESS) continue;
+        const uint64_t at = (base + align - 1) & ~(align - 1);
+        if (at + size > base + len) { k.Vm().Free(&base, &len, MEM_RELEASE); continue; }
+        std::scoped_lock lock {g_graphics_mutex};
+        g_graphics[at] = {base, len};
+        *out = at;
+        return true;
+    }
+    return false;
+}
+
+uint64_t D3DAllocateGraphicsMemory(Kernel& k, NtThread&, SyscallArgs& a) {
+    auto* out = a.Ptr<uint64_t>(4);
+    if (out == nullptr || a[1] > 0x20000) return 0x80070057u;   // E_INVALIDARG
+    if (AllocAligned(k, a[0], a[1], a[2], out)) return 0;
+    *out = 0;
+    return 0x8007000Eu;   // E_OUTOFMEMORY
+}
+
+// acphal!ApuAlloc(ppVirtualAddress, pApuAddress, size, alignment, flags): memory the audio processor can see; the APU address
+// handed back is just the low half of the host address, which is what the title gives back to the other Apu calls.
+uint64_t ApuAlloc(Kernel& k, NtThread&, SyscallArgs& a) {
+    auto* out = a.Ptr<uint64_t>(0);
+    uint64_t at = 0;
+    if (out == nullptr || !AllocAligned(k, a[2], a[3], 0, &at)) return 0x8007000Eu;
+    *out = at;
+    if (auto* apu = a.Ptr<uint32_t>(1)) *apu = static_cast<uint32_t>(at);
+    return 0;
+}
+
+uint64_t ApuMapVirtualAddress(Kernel&, NtThread&, SyscallArgs& a) {
+    if (auto* apu = a.Ptr<uint32_t>(0)) *apu = static_cast<uint32_t>(a[1]);
+    return 0;
+}
+
+uint64_t ApuIsVirtualAddressValid(Kernel&, NtThread&, SyscallArgs&) { return 1; }
+
+uint64_t D3DFreeGraphicsMemory(Kernel& k, NtThread&, SyscallArgs& a) {
+    std::scoped_lock lock {g_graphics_mutex};
+    auto it = g_graphics.find(a[0]);
+    if (it == g_graphics.end()) return 0x80070057u;
+    uint64_t base = it->second.base, len = 0;
+    k.Vm().Free(&base, &len, MEM_RELEASE);
+    g_graphics.erase(it);
+    return 0;
+}
+
+uint64_t ReturnOk(Kernel&, NtThread&, SyscallArgs&) { return 0; }
 
 std::string HstringToUtf8(uint64_t h) {
     if (h == 0) return {};
@@ -79,6 +141,17 @@ const Hook kHooks[] = {
     {"combase.dll", "RoGetActivationFactory", RoGetActivationFactory, 5},
     {"bcrypt.dll", "BCryptGenRandom", BCryptGenRandom, 0},
     {"d3d11_x.dll", "D3D11CreateDevice", d3d::CreateDevice, 0},
+    {"d3d11_x.dll", "D3DAllocateGraphicsMemory", D3DAllocateGraphicsMemory, 0},
+    {"d3d11_x.dll", "D3DFreeGraphicsMemory", D3DFreeGraphicsMemory, 0},
+    {"d3d11_x.dll", "D3DConfigureVirtualMemory", ReturnOk, 0},
+    {"d3d11_x.dll", "D3DMapEsramMemory", ReturnOk, 0},
+    {"d3d11_x.dll", "DXGIXSetVLineNotification", ReturnOk, 0},
+    {"d3d11_x.dll", "DXGIXSetFrameNotification", ReturnOk, 0},
+    {"acphal.dll", "ApuAlloc", ApuAlloc, 0},
+    {"acphal.dll", "ApuFree", D3DFreeGraphicsMemory, 0},
+    {"acphal.dll", "ApuCreateHeap", ReturnOk, 0},
+    {"acphal.dll", "ApuMapVirtualAddress", ApuMapVirtualAddress, 0},
+    {"acphal.dll", "ApuIsVirtualAddressValid", ApuIsVirtualAddressValid, 0},
     {"xaudio2_9.dll", "CreateXAudio2Object", xaudio2::CreateXAudio2Object, 0},
 };
 

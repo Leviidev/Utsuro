@@ -156,6 +156,8 @@ NTSTATUS NtRaiseException(Kernel& k, NtThread& t, SyscallArgs& a) {
     }
     UT_ERROR("[%llu] unhandled exception %#x at %#llx (flags %#x), rsp %#llx", (unsigned long long)t.tid_, rec->ExceptionCode,
              (unsigned long long)rec->ExceptionAddress, rec->ExceptionFlags, (unsigned long long)ctx->Rsp);
+    UT_ERROR("  teb %#llx: stack base %#llx limit %#llx dealloc %#llx", (unsigned long long)t.teb, (unsigned long long)*reinterpret_cast<uint64_t*>(t.teb + 8),
+             (unsigned long long)*reinterpret_cast<uint64_t*>(t.teb + 0x10), (unsigned long long)*reinterpret_cast<uint64_t*>(t.teb + 0x1478));
     for (uint32_t i = 0; i < rec->NumberParameters && i < 4; ++i)
         UT_ERROR("  parameter[%u] = %#llx", i, (unsigned long long)rec->ExceptionInformation[i]);
     if (rec->NumberParameters >= 2 && rec->ExceptionCode == 0xE06D7363 && rec->ExceptionInformation[1] > 0x10000) {
@@ -174,7 +176,7 @@ NTSTATUS NtRaiseException(Kernel& k, NtThread& t, SyscallArgs& a) {
 
 // NtCreateThreadEx(PHANDLE, Access, POBJECT_ATTRIBUTES, Process, StartRoutine, Argument,
 //                  CreateFlags, ZeroBits, StackSize, MaxStackSize, PS_ATTRIBUTE_LIST*)
-NTSTATUS NtCreateThreadEx(Kernel& k, NtThread&, SyscallArgs& a) {
+NTSTATUS NtCreateThreadEx(Kernel& k, NtThread& t, SyscallArgs& a) {
     auto* out = a.Ptr<HANDLE>(0);
     const uint64_t start = a[4];
     const uint64_t arg = a[5];
@@ -209,6 +211,7 @@ NTSTATUS NtCreateThreadEx(Kernel& k, NtThread&, SyscallArgs& a) {
         }
     }
     *out = k.AddHandle(thread);
+    UT_INFO("thread %llu created by %llu: start %s arg %#llx%s", (unsigned long long)thread->tid_, (unsigned long long)t.tid_, k.Describe(start).c_str(), (unsigned long long)arg, (flags & 1) ? " (suspended)" : "");
     k.StartThread(thread, FindExport(k.NtdllBase(), "RtlUserThreadStart"), start, arg, (flags & 1) != 0);
     return STATUS_SUCCESS;
 }

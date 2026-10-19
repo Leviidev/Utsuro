@@ -40,6 +40,7 @@ constexpr uint32_t kSOk = 0;
 constexpr uint32_t kENoInterface = 0x80004002u;
 constexpr uint32_t kFeatureLevel11_1 = 0xB100;
 
+uint32_t g_flags_offset = 0x20 + 0x148 + 0x228;   ///< m_OutOfLineFlags within the context object
 std::map<std::string, const D3dIfaceDef*> g_defs;
 std::map<std::string, Iface*> g_ifaces;
 
@@ -69,7 +70,10 @@ std::vector<Iface*> InterfacesFor(const std::string& type) {
 Obj* New(const std::string& type) {
     auto ifaces = InterfacesFor(type);
     if (ifaces.empty()) return nullptr;
-    return Runtime::Get().NewObject("D3D:" + type, ifaces);
+    Obj* o = Runtime::Get().NewObject("D3D:" + type, ifaces);
+    // Contexts (immediate or deferred) tell the title's inline Set* functions to go out of line, to the function table.
+    if (ifaces[0]->inline_table != 0) reinterpret_cast<uint8_t*>(o->blocks[0])[g_flags_offset] = 1;
+    return o;
 }
 
 /// New object of `type`; `*pointer` receives it as the interface called `type` (or the first one).
@@ -186,6 +190,7 @@ uint32_t Fallback(Call& c) {
             Obj* o = Create(m.out_type, out);
             if (o != nullptr) {
                 o->u64["device"] = DeviceOf(c);
+                if (o->ifaces[0]->inline_table != 0) *reinterpret_cast<uint64_t*>(o->blocks[0] + 0x10) = DeviceOf(c);   // m_pDevice
                 if (spec != nullptr) {
                     if (c.Arg(spec->param) != 0) o->str["desc"].assign(c.Ptr<char>(spec->param), spec->size);
                     if (m.name.find("View") != std::string::npos) o->u64["resource"] = c.Arg(0);
@@ -233,7 +238,10 @@ void Register(Runtime& rt, uint32_t os_timestamp) {
 
     // The Xbox device context embeds its vtable (m_Function) after the device-child fields, the
     // draw-state blocks and the 64-byte out-of-line flags. Offsets are for ABI >= 6.2.11294.
-    constexpr uint32_t kTinyDevice = 0x20, kUserData = kTinyDevice + 0x148, kFlags = kUserData + 0x228, kFunction = kFlags + 64;
+    // From OS build 6.2.13332 the shader user-data block is 0x10 bytes larger (MakeCeSpace sits at table offset 0xa68 in the title).
+    constexpr uint32_t kTinyDevice = 0x20, kUserData = kTinyDevice + 0x148;
+    const uint32_t kFlags = kUserData + (newer ? 0x238 : 0x228), kFunction = kFlags + 64;
+    g_flags_offset = kFlags;
     for (const char* n : {"ID3D11PerformanceContextX", "ID3D11DeviceContextX", "ID3D11UserDefinedAnnotationX"})
         if (g_ifaces.count(n)) g_ifaces[n]->inline_table = kFunction;
 
@@ -559,7 +567,7 @@ uint64_t CreateDevice(Kernel& kernel, NtThread&, SyscallArgs& a) {
     {
         auto* c = reinterpret_cast<uint8_t*>(device->u64["context"]);
         *reinterpret_cast<uint64_t*>(c + 0x10) = rt.Pointer(*device, *g_ifaces["ID3D11Device"]);   // m_pDevice
-        c[0x20 + 0x148 + 0x228] = 1;                                                              // m_OutOfLineFlags
+        c[g_flags_offset] = 1;                                                                     // m_OutOfLineFlags
     }
     context->u64["device"] = rt.Pointer(*device, *g_ifaces["ID3D11Device"]);
     UT_INFO("d3d: D3D11CreateDevice flags=%#x levels=%llu sdk=%#x", static_cast<uint32_t>(a[3]), (unsigned long long)a[5], static_cast<uint32_t>(a[6]));

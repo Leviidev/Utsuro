@@ -339,7 +339,42 @@ bool InflateGuest(const uint8_t* src, uint32_t n, bool zlib_header, std::vector<
     return rc == Z_STREAM_END;
 }
 
+/// The constant-engine buffer the title's inline code appends packets to, and the resource batch it is recording
+/// (m_pCeCurrent / m_pCeBiasedLimit / m_pCeLimit and m_pBatchCurrent / m_pBatchLimit of the context's tiny device).
+constexpr uint32_t kBatchCurrent = 0x20 + 0x20, kBatchLimit = 0x20 + 0x28, kCeCurrent = 0x20 + 0x30, kCeBiasedLimit = 0x20 + 0x38, kCeLimit = 0x20 + 0x40;
+
 void RegisterGpuOverrides() {
+    OverrideAll("MakeCeSpace", [](Call& c) -> uint32_t {
+        // The packets already appended are for the real GPU's constant engine; hand out a fresh buffer.
+        constexpr uint32_t kDwords = 16384, kBias = 70;
+        uint8_t* ctx = reinterpret_cast<uint8_t*>(c.obj.blocks[0]);
+        UT_INFO("d3d: MakeCeSpace on %s ctx %p (this %#llx)", c.obj.class_name.c_str(), (void*)ctx, (unsigned long long)c.args[0]);
+        uint64_t& buf = c.obj.u64["ce_buffer"];
+        if (buf == 0) buf = Runtime::Get().AllocGuest(kDwords * 4, 64);
+        auto* start = reinterpret_cast<uint32_t*>(buf);
+        *reinterpret_cast<uint32_t**>(ctx + kCeCurrent) = start;
+        *reinterpret_cast<uint32_t**>(ctx + kCeBiasedLimit) = start + kDwords - kBias;
+        *reinterpret_cast<uint32_t**>(ctx + kCeLimit) = start + kDwords;
+        c.wide_result = reinterpret_cast<uint64_t>(start);
+        c.wide_set = true;
+        return 0;
+    });
+    OverrideAll("BeginResourceBatch", [](Call& c) -> uint32_t {
+        UT_INFO("d3d: BeginResourceBatch on %s ctx %p buf %#llx size %u", c.obj.class_name.c_str(), (void*)c.obj.blocks[0], (unsigned long long)c.Arg(0), (uint32_t)c.Arg(1));
+        uint8_t* ctx = reinterpret_cast<uint8_t*>(c.obj.blocks[0]);
+        auto* start = reinterpret_cast<uint32_t*>(c.Arg(0));
+        c.obj.u64["batch_start"] = c.Arg(0);
+        *reinterpret_cast<uint32_t**>(ctx + kBatchCurrent) = start;
+        *reinterpret_cast<uint32_t**>(ctx + kBatchLimit) = start + static_cast<uint32_t>(c.Arg(1)) / 4;
+        return 0;
+    });
+    OverrideAll("EndResourceBatch", [](Call& c) -> uint32_t {
+        uint8_t* ctx = reinterpret_cast<uint8_t*>(c.obj.blocks[0]);
+        const uint64_t cur = reinterpret_cast<uint64_t>(*reinterpret_cast<uint32_t**>(ctx + kBatchCurrent));
+        const uint64_t used = cur > c.obj.u64["batch_start"] ? cur - c.obj.u64["batch_start"] : 0;
+        if (auto* out = c.Ptr<uint32_t>(0)) *out = static_cast<uint32_t>(used);
+        return 0;
+    });
     // ---- the DMA engine's hardware LZ decoder (a DEFLATE stream) ----
     // The title cooks its packages in chunks for it. The call completes at once here, so a fence never stays pending.
     OverrideAll("LZDecompressMemory", [](Call& c) -> uint32_t {
@@ -365,6 +400,7 @@ void RegisterGpuOverrides() {
     // ---- creation hook: Fallback calls OnCreate after it made the object ----
     // ---- Map / Unmap ----
     OverrideAll("Map", [](Call& c) -> uint32_t {
+        { static int n = 0; if (n++ < 6) UT_INFO("d3d: Map this=%#llx res=%#llx sub=%#llx type=%#llx flags=%#llx out=%#llx", (unsigned long long)c.args[0], (unsigned long long)c.Arg(0), (unsigned long long)c.Arg(1), (unsigned long long)c.Arg(2), (unsigned long long)c.Arg(3), (unsigned long long)c.Arg(4)); }
         Res* r = ResAt(c.Arg(0));
         auto* out = c.Ptr<uint64_t>(4);
         if (r == nullptr || out == nullptr) { if (out) std::memset(out, 0, 16); return 0x80004005u; }

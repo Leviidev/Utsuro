@@ -798,6 +798,13 @@ private:
 
 } // namespace
 
+bool LastFaultRegisters(uint64_t gregs[16], uint64_t* rip) {
+    if (!g_fault_regs.valid) return false;
+    for (int i = 0; i < 16; ++i) gregs[i] = g_fault_regs.gregs[i];
+    *rip = g_fault_regs.rip;
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // The context
 // ---------------------------------------------------------------------------

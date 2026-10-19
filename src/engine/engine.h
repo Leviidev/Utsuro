@@ -244,4 +244,7 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+/// Debugging: the general registers (rax..r15) the calling host thread's last guest fault stopped at.
+bool LastFaultRegisters(uint64_t gregs[16], uint64_t* rip);
+
 } // namespace utsuro
