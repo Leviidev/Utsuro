@@ -1178,7 +1178,20 @@ bool SavePng(Texture& texture, const std::string& path) {
         if (t == nil) return false;
         const NSUInteger w = t.width, h = t.height;
         std::vector<uint8_t> px(w * h * 4);
-        [t getBytes:px.data() bytesPerRow:w * 4 fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0];
+        if (t.storageMode == MTLStorageModePrivate) {
+            // Private textures (iOS) have no CPU view: blit into a shared buffer first.
+            id<MTLBuffer> staging = [g->device newBufferWithLength:w * h * 4 options:MTLResourceStorageModeShared];
+            id<MTLCommandBuffer> cb = [g->queue commandBuffer];
+            id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+            [blit copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1)
+                         toBuffer:staging destinationOffset:0 destinationBytesPerRow:w * 4 destinationBytesPerImage:w * h * 4];
+            [blit endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
+            std::memcpy(px.data(), staging.contents, px.size());
+        } else {
+            [t getBytes:px.data() bytesPerRow:w * 4 fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0];
+        }
         const bool bgra = t.pixelFormat == MTLPixelFormatBGRA8Unorm || t.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB;
         if (!bgra) for (size_t i = 0; i < px.size(); i += 4) std::swap(px[i], px[i + 2]);   // CoreGraphics below wants BGRA
         CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();

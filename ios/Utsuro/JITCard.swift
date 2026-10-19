@@ -39,9 +39,9 @@ struct JITCard: View {
             HStack(spacing: 12) {
                 Image(systemName: "bolt.fill")
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(Theme.accentBright)
                     .frame(width: 32, height: 32)
-                    .background(Color.accentColor.opacity(0.16), in: Circle())
+                    .background(Theme.accentSoft, in: Circle())
                 Button { jit.showSetup = true } label: {
                     VStack(alignment: .leading, spacing: 1) {
                         Text("JIT is off").font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
@@ -64,7 +64,7 @@ struct JITCard: View {
                             .foregroundStyle(.white)
                             .padding(.horizontal, 14)
                             .frame(height: 30)
-                            .background(Color.accentColor, in: Capsule())
+                            .background(Theme.accent, in: Capsule())
                     }
                     .buttonStyle(CardButtonStyle())
                 }
@@ -74,7 +74,7 @@ struct JITCard: View {
             }
         }
         .padding(12)
-        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cardCorner, style: .continuous))
     }
 
     private var explanation: String {
@@ -120,8 +120,8 @@ struct JITCard: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 12) {
                 ZStack {
-                    Circle().fill(Color.accentColor.opacity(0.16)).frame(width: 44, height: 44)
-                    Image(systemName: "bolt.fill").font(.title3).foregroundStyle(Color.accentColor)
+                    Circle().fill(Theme.accentSoft).frame(width: 44, height: 44)
+                    Image(systemName: "bolt.fill").font(.title3).foregroundStyle(Theme.accentBright)
                 }
                 VStack(alignment: .leading, spacing: 4) {
                     Text(offered == .builtIn ? "StikJIT" : offered.title).font(.title3.weight(.semibold))

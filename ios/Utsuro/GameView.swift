@@ -8,14 +8,17 @@ enum GameRunner {
     nonisolated(unsafe) private static var started = false
     static var isRunning: Bool { started }
 
-    static func start(dump: URL, layer: CAMetalLayer, finished: @escaping (Int32) -> Void) {
+    static func start(game: InstalledGame, hives: URL?, layer: CAMetalLayer, finished: @escaping (Int32) -> Void) {
         guard !started else { return }
         started = true
+        let dump = game.dump
         layer.drawableSize = CGSize(width: 1920, height: 1080)
         let layerPointer = Unmanaged.passUnretained(layer).toOpaque()
         let documents = GameLibrary.documents
-        try? FileManager.default.createDirectory(at: GameLibrary.saves, withIntermediateDirectories: true)
-        setenv("UTSURO_SAVES", GameLibrary.saves.path, 1)
+        let saves = GameLibrary.saves(for: game)
+        try? FileManager.default.createDirectory(at: saves, withIntermediateDirectories: true)
+        setenv("UTSURO_SAVES", saves.path, 1)
+        if let hives { setenv("UTSURO_HIVES", hives.path, 1) }
         if getenv("UTSURO_LOG") == nil { setenv("UTSURO_LOG", "info", 1) }
         let data = (Bundle.main.resourcePath ?? "") + "/data"
         let crashLog = documents.appendingPathComponent("utsuro-crash.log").path
@@ -66,41 +69,70 @@ struct MetalHost: UIViewRepresentable {
 
 /// The game full screen: the picture at 16:9 in the middle, the controller over it.
 struct GameScreen: View {
-    let dump: URL
+    let game: InstalledGame
     let onExit: () -> Void
     @StateObject private var pad = VirtualPad()
-    @State private var layout = PadLayout.load("minecraft")
+    @State private var layout: PadLayout
     @State private var confirmQuit = false
+    @State private var flash = false
     /// A physical controller is the player's input when there is one; the touch controls only exist for when there is not.
     @State private var hasController = !GCController.controllers().isEmpty
-    @AppStorage("utsuro.padOpacity") private var padOpacity = 0.6
+    private let settings: GameSettings
+
+    init(game: InstalledGame, onExit: @escaping () -> Void) {
+        self.game = game
+        self.onExit = onExit
+        settings = GameSettings(gameID: game.id)
+        _layout = State(initialValue: PadLayout.load("minecraft"))
+    }
+
+    private var showPad: Bool {
+        switch settings.touchControls {
+        case .auto: return !hasController
+        case .always: return true
+        case .off: return false
+        }
+    }
+
+    private func takeScreenshot() {
+        let folder = GameLibrary.screenshotsFolder(for: game)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let name = "Screenshot \(Self.stamp.string(from: Date())).png"
+        utsuro_ios_screenshot(folder.appendingPathComponent(name).path)
+        UtsuroLog.log("ui", "screenshot \(name)")
+        withAnimation(.easeOut(duration: 0.12)) { flash = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { withAnimation(.easeIn(duration: 0.25)) { flash = false } }
+    }
+
+    private static let stamp: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH.mm.ss"
+        return f
+    }()
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
             MetalHost { layer in
-                GameRunner.start(dump: dump, layer: layer) { _ in onExit() }
+                let hives = MainActor.assumeIsolated { GameLibrary.shared.hiveFallback(for: game) }
+                GameRunner.start(game: game, hives: hives, layer: layer) { _ in onExit() }
             }
             .aspectRatio(16.0 / 9.0, contentMode: .fit)
-            if !hasController {
-                VirtualPadView(pad: pad, opacity: padOpacity, haptics: true, layout: layout)
+            if showPad {
+                VirtualPadView(pad: pad, opacity: settings.padOpacity, haptics: settings.haptics, layout: layout)
                     .ignoresSafeArea()
             }
             VStack {
-                HStack {
+                HStack(spacing: 14) {
                     Spacer()
-                    Button { confirmQuit = true } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(.white.opacity(0.6))
-                            .frame(width: 28, height: 28)
-                            .background(Color.white.opacity(0.12), in: Circle())
-                    }
+                    barButton("camera.fill") { takeScreenshot() }
+                    barButton("xmark") { confirmQuit = true }
                     Spacer()
                 }
                 .padding(.top, 4)
                 Spacer()
             }
+            Color.white.opacity(flash ? 0.35 : 0).ignoresSafeArea().allowsHitTesting(false)
         }
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
@@ -121,7 +153,7 @@ struct GameScreen: View {
             UtsuroLog.log("memory", "iOS sent a memory warning")
             husk_ios_jit_log_footprint("memory-warning")
         }
-        .alert("Quit Minecraft?", isPresented: $confirmQuit) {
+        .alert("Quit \(game.title)?", isPresented: $confirmQuit) {
             Button("Quit", role: .destructive) {
                 // The guest has no clean shutdown from outside; saves are written as the game makes them.
                 UtsuroLog.log("game", "quit from the on-screen button")
@@ -130,7 +162,17 @@ struct GameScreen: View {
             }
             Button("Keep playing", role: .cancel) {}
         } message: {
-            Text("Your world is saved as the game saves it.")
+            Text("Your progress is saved as the game saves it.")
+        }
+    }
+
+    private func barButton(_ symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(.white.opacity(0.6))
+                .frame(width: 28, height: 28)
+                .background(Color.white.opacity(0.12), in: Circle())
         }
     }
 }

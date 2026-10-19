@@ -20,6 +20,7 @@ size_t husk_ios_available_memory(void);
 /* src/host/ios_entry.mm */
 bool utsuro_ios_prewarm_jit(bool self_only);
 void utsuro_ios_set_pad(uint32_t buttons, float lx, float ly, float rx, float ry, float lt, float rt);
+void utsuro_ios_screenshot(const char *path);
 int utsuro_ios_run(const char *dump, const char *data_dir, const char *crash_log, void *layer);
 
 #endif
