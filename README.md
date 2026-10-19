@@ -6,9 +6,42 @@ An Xbox One (Durango) translation layer for macOS, later iOS. It does not emulat
 hardware: it runs the console's own Windows-derived userland (ntdll, kernelx, combase, vccorlib, the CRT)
 as x86-64 under FEXCore and supplies what the hardware and the system partitions would have supplied.
 
-**Status:** Minecraft: Xbox One Edition (1.2.0.0) boots, renders its menus and the world through Metal,
-takes controller / keyboard / mouse input, plays sound, and can be played. Worlds and options are saved
-and loaded again (see Saves).
+**Status:** three Xbox One titles run on the Mac build today: Minecraft: Xbox One Edition (1.2.0.0), Rocket League
+(1.0.4.2) and Sonic Mania (1.0.4.2). They boot, render through Metal, take controller / keyboard / mouse input,
+play sound (Rocket League has none yet) and can be played. Worlds and options are saved and loaded again (see Saves).
+iOS builds exist but have not been tested on a phone yet.
+
+## Showcase
+
+| Minecraft: Xbox One Edition | Rocket League | Sonic Mania |
+| --- | --- | --- |
+| <img src="docs/screenshots/minecraft.png" width="320" alt="Minecraft in a world"> | <img src="docs/screenshots/rocket-league.png" width="320" alt="Rocket League exhibition match"> | <img src="docs/screenshots/sonic-mania.png" width="320" alt="Sonic Mania, Green Hill Zone"> |
+| Console OS 6.2 (2014). Menus, worlds, saves, sound, ~36-60 fps. | Console OS 6.2 (2015), Unreal Engine 3. 3D matches render and drive; ~15-20 fps, no audio yet. | Console OS 6.2 (2018). Intro, menus, attract demos and levels; ~57 fps with sound. |
+
+Screenshots are straight from the Mac harness (`UTSURO_DUMPFRAMES`), not mock-ups.
+
+## Games
+
+| Game | State |
+| --- | --- |
+| Minecraft: Xbox One Edition 1.2.0.0 | playable |
+| Sonic Mania 1.0.4.2 | playable |
+| Rocket League 1.0.4.2 | matches render and respond to the pad; lighting is dark, slow, silent |
+
+Games need their own decrypted dump (`Mount/` + `EmbeddedXvd/`); none are included. A game built for a console OS
+version that has not been seen before needs its `data/kusd/` tables generated first (`tools/kusd_scan.py`).
+
+### Candidates to try next
+
+Roughly easiest first, judged by how much of the console API they are likely to need:
+
+1. **Arcade Classics Anniversary Collection, Dig Dug, Galaga, Pac-Man** - tiny 2D titles, a good check of the new 2018 OS path.
+2. **Undertale**, **Peggle 2**, **Lumines Remastered**, **Puyo Puyo Tetris** - 2D, small, simple D3D11 use.
+3. **Mega Man 11**, **Overcooked**, **Rayman Legends**, **Terraria**, **Crash Bandicoot N. Sane Trilogy** - bigger, but plain
+   forward-rendered 3D or 2D with ordinary shaders; the Rocket League work (texture streaming, post-processing) carries over.
+4. **Minecraft Story Mode**, **ABZU**, **Okami HD** - larger engines; expect missing WinRT classes and some compute shaders.
+5. **Forza Motorsport 6 / 7, Forza Horizon, Sonic Forces, Titanfall, Wolfenstein II, Ghost Recon Wildlands** - long shots:
+   they need compute and geometry shader translation, large streaming and tens of gigabytes of data.
 
 ## What is where
 
