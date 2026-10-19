@@ -328,6 +328,7 @@ void ElementOf(uint32_t fmt, uint32_t* bytes, uint32_t* block) {
 struct TileLevel { uint64_t base {0}, row_stride {0}, tile_bytes {0}; uint32_t width {0}, height {0}; };
 struct TileModel {
     bool ok {false};
+    bool linear {false};           ///< rows (of elements) one pitch apart, rather than micro tiles
     uint32_t bytes {0};            ///< per element
     uint32_t levels_per_slice {0};
     std::vector<TileLevel> levels; ///< [slice * levels_per_slice + mip]
@@ -357,6 +358,15 @@ TileModel BuildTileModel(const gpu::TextureDesc& info, uint32_t tile_mode, uint3
     const uint64_t offset_fn = vtable[6];
     auto at = [&](uint32_t mip, uint32_t x, uint32_t y, uint32_t slice) { return xg::Call(*g_kernel, offset_fn, {comp, 0, mip, x, y, slice, 0}); };
     m.levels_per_slice = info.mips;
+    // Is it a plain row-by-row layout (the console's linear modes, tile mode 0, 1 and, it turns out, 8)?
+    bool linear_layout = tile_mode == 0 || tile_mode == 1;
+    if (!linear_layout && info.width * info.height > 1) {
+        const uint32_t w = std::max(1u, (info.width + block - 1) / block), h = std::max(1u, (info.height + block - 1) / block);
+        const uint64_t p00 = at(0, 0, 0, 0), p10 = w > 1 ? at(0, 1, 0, 0) : p00 + m.bytes, p01 = h > 1 ? at(0, 0, 1, 0) : p00;
+        const uint64_t stride = p01 - p00;
+        linear_layout = p00 != ~0ull && p10 == p00 + m.bytes && (h == 1 || stride >= static_cast<uint64_t>(w) * m.bytes) &&
+                        at(0, w - 1, h - 1, 0) == p00 + (h - 1) * stride + static_cast<uint64_t>(w - 1) * m.bytes;
+    }
     bool ok = true;
     for (uint32_t slice = 0; slice < info.array_size && ok; ++slice) {
         for (uint32_t mip = 0; mip < info.mips && ok; ++mip) {
@@ -365,6 +375,13 @@ TileModel BuildTileModel(const gpu::TextureDesc& info, uint32_t tile_mode, uint3
             lv.height = std::max(1u, ((info.height >> mip) + block - 1) / block);
             lv.base = at(mip, 0, 0, slice);
             if (lv.base == ~0ull) { ok = false; break; }
+            if (linear_layout) {   // linear: rows one pitch apart
+                m.linear = true;
+                lv.tile_bytes = 0;
+                lv.row_stride = lv.height > 1 ? at(mip, 0, 1, slice) - lv.base : static_cast<uint64_t>(lv.width) * m.bytes;
+                m.levels.push_back(lv);
+                continue;
+            }
             lv.tile_bytes = lv.width > 8 ? at(mip, 8, 0, slice) - lv.base : 64ull * m.bytes;
             lv.row_stride = lv.height > 8 ? at(mip, 0, 8, slice) - lv.base : 0;
             // The model must reproduce what the library says at a few more texels.
@@ -413,6 +430,21 @@ bool PlacementChanged(Res& r) {
     return true;
 }
 
+/// The layout of a placement texture's subresources (null while xg_x.dll cannot say).
+const TileModel* ModelFor(Res& r) {
+    if (!r.texture) return nullptr;
+    const auto& info = gpu::TextureInfo(*r.texture);
+    char key[96];
+    std::snprintf(key, sizeof key, "%u %u %u %u %u %u %u %u", info.width, info.height, info.mips, info.array_size, info.format, info.cube ? 1 : 0, r.tile_mode, r.pitch);
+    std::scoped_lock lock {g_tile_mutex};
+    auto it = g_tile_models.find(key);
+    if (it == g_tile_models.end()) {
+        it = g_tile_models.emplace(key, BuildTileModel(info, r.tile_mode, r.pitch)).first;
+        if (!it->second.ok) UT_INFO("d3d: no layout for a texture (%s): %ux%u fmt %u mips %u array %u tile mode %u pitch %u", it->second.levels.empty() ? "xg_x.dll did not answer" : "not a layout the host knows", info.width, info.height, info.format, info.mips, info.array_size, r.tile_mode, r.pitch);
+    }
+    return it->second.ok ? &it->second : nullptr;
+}
+
 /// Copies a placement texture's texels into the host texture.
 void UploadPlacement(Res& r) {
     r.placement_dirty = false;
@@ -432,34 +464,12 @@ void UploadPlacement(Res& r) {
         static std::atomic<int> shown {0};
         if (shown++ < 10) UT_INFO("d3d: placement texture at %#llx (%ux%u fmt %u mips %u tile %u): %s", (unsigned long long)r.placement, info.width, info.height, info.format, info.mips, r.tile_mode, why);
     };
-    if (r.tile_mode == 0 || r.tile_mode == 1) {   // linear
-        uint32_t row, rows;
-        FormatShape(info.format, info.width, info.height, &row, &rows);
-        const uint32_t row_pitch = r.pitch != 0 ? r.pitch : row;
-        std::vector<uint8_t> texels(static_cast<size_t>(row_pitch) * rows);
-        if (!SafeCopy(r.placement, texels.data(), texels.size())) return fail("not readable");
-        r.placement_bytes = texels.size();
-        gpu::UploadTexture(*r.texture, 0, 0, nullptr, texels.data(), row_pitch, row_pitch * rows);
-        {   // what PlacementChanged hashes: the same bytes, in its chunk size
-            uint64_t h = 0x84222325CBF29CE4ull;
-            for (size_t at = 0; at < texels.size(); at += 64 << 10) h = HashWords(texels.data() + at, std::min<size_t>(64 << 10, texels.size() - at) & ~7ull, h);
-            r.content_hash = h;
-        }
-        return;
-    }
-    char key[96];
-    std::snprintf(key, sizeof key, "%u %u %u %u %u %u %u %u", info.width, info.height, info.mips, info.array_size, info.format, info.cube ? 1 : 0, r.tile_mode, r.pitch);
-    TileModel* model;
-    {
-        std::scoped_lock lock {g_tile_mutex};
-        auto it = g_tile_models.find(key);
-        if (it == g_tile_models.end()) it = g_tile_models.emplace(key, BuildTileModel(info, r.tile_mode, r.pitch)).first;
-        model = &it->second;
-    }
-    if (!model->ok) return fail("its layout is not a thin 1D tiling (or xg_x.dll did not answer)");
+    const TileModel* model = ModelFor(r);
+    if (model == nullptr) return fail("its layout is not a thin 1D tiling or a linear one (or xg_x.dll did not answer)");
     uint64_t need = 0;
     for (const TileLevel& lv : model->levels)
-        need = std::max<uint64_t>(need, lv.base + std::max<uint64_t>((lv.height + 7) / 8, 1) * std::max<uint64_t>(lv.row_stride, ((lv.width + 7) / 8) * lv.tile_bytes));
+        need = std::max<uint64_t>(need, model->linear ? lv.base + static_cast<uint64_t>(lv.height) * lv.row_stride
+                                                      : lv.base + std::max<uint64_t>((lv.height + 7) / 8, 1) * std::max<uint64_t>(lv.row_stride, ((lv.width + 7) / 8) * lv.tile_bytes));
     std::vector<uint8_t> raw(static_cast<size_t>(need));
     if (!SafeCopy(r.placement, raw.data(), raw.size())) return fail("not readable");
     r.placement_bytes = raw.size();
@@ -475,6 +485,11 @@ void UploadPlacement(Res& r) {
             const uint32_t row_pitch = lv.width * bytes;
             linear.resize(static_cast<size_t>(row_pitch) * lv.height);
             for (uint32_t y = 0; y < lv.height; ++y) {
+                if (model->linear) {
+                    const uint64_t src = lv.base + static_cast<uint64_t>(y) * lv.row_stride;
+                    if (src + row_pitch <= raw.size()) std::memcpy(linear.data() + static_cast<size_t>(y) * row_pitch, raw.data() + src, row_pitch);
+                    continue;
+                }
                 for (uint32_t x = 0; x < lv.width; ++x) {
                     const uint64_t src = lv.base + (y >> 3) * lv.row_stride + (x >> 3) * lv.tile_bytes + static_cast<uint64_t>(Morton8(x & 7, y & 7)) * bytes;
                     if (src + bytes > raw.size()) continue;
@@ -482,6 +497,16 @@ void UploadPlacement(Res& r) {
                 }
             }
             gpu::UploadTexture(*r.texture, mip, slice, nullptr, linear.data(), row_pitch, row_pitch * lv.height);
+            if (const char* dump = std::getenv("UTSURO_DUMPR8"); dump != nullptr && info.format == 61 && mip == 0 && info.width >= 512) {
+                static std::atomic<int> n {0};
+                if (n < 12) { char path[512]; std::snprintf(path, sizeof path, "%s/r8_%02d_%ux%u.png", dump, n++, info.width, info.height); gpu::SavePng(*r.texture, path); }
+            }
+            if (static const bool log = std::getenv("UTSURO_UPLOADLOG") != nullptr; log && info.format == 61 && mip == 0) {
+                size_t nonzero = 0;
+                for (uint8_t b : linear) nonzero += b != 0;
+                static std::atomic<int> shown {0};
+                if (shown++ < 40) UT_INFO("d3d: uploaded R8 texture %ux%u (mips %u, tile %u) with %zu non-zero bytes of %zu", info.width, info.height, info.mips, r.tile_mode, nonzero, linear.size());
+            }
         }
     }
 }
@@ -855,7 +880,53 @@ void RegisterGpuOverrides() {
         if (r == nullptr || out == nullptr) { if (out) std::memset(out, 0, 16); return 0x80004005u; }
         const uint32_t type = static_cast<uint32_t>(c.Arg(2));
         if (r->buffer) return MapBuffer(c, *r, type, out);
+        if (r->texture && r->placement == 0 && type == 5 && g_kernel != nullptr && !(r->bind & 0x60)) {
+            // WRITE_NO_OVERWRITE on a plain texture: the console keeps the memory mapped, and the title writes into it again later
+            // without another Map. Give the texture memory of its own that stays (linear, laid out the way xg_x.dll says) and
+            // treat it like a placement texture from here on: its changes are noticed when it is next drawn with.
+            r->tile_mode = 0;
+            if (const TileModel* model = ModelFor(*r)) {
+                uint64_t size = 0;
+                for (const TileLevel& lv : model->levels) size = std::max<uint64_t>(size, lv.base + static_cast<uint64_t>(lv.height) * lv.row_stride);
+                uint64_t base = 0, length = (size + 0xFFFF) & ~0xFFFFull;
+                if (length != 0 && g_kernel->Vm().Allocate(&base, &length, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) == STATUS_SUCCESS) {
+                    r->placement = base;
+                    r->host_size = size;
+                    r->placement_bytes = size;
+                    std::scoped_lock lock {g_res_mutex};
+                    g_placed.push_back(r);
+                }
+            }
+        }
+        if (r->texture && r->placement != 0) {
+            // A placement texture: Map hands out the memory the texture lives in (the title writes its texels there, in the
+            // layout the console's GPU reads) and they are picked up at the next draw that uses the texture.
+            if (const TileModel* model = ModelFor(*r)) {
+                const auto& info = gpu::TextureInfo(*r->texture);
+                const uint32_t sub = static_cast<uint32_t>(c.Arg(1));
+                const uint32_t slice = sub / std::max(1u, info.mips), mip = sub % std::max(1u, info.mips);
+                if (slice < info.array_size && slice * model->levels_per_slice + mip < model->levels.size()) {
+                    const TileLevel& lv = model->levels[slice * model->levels_per_slice + mip];
+                    const uint64_t size = model->linear ? static_cast<uint64_t>(lv.height) * lv.row_stride : std::max<uint64_t>((lv.height + 7) / 8, 1) * std::max<uint64_t>(lv.row_stride, ((lv.width + 7) / 8) * lv.tile_bytes);
+                    out[0] = r->placement + lv.base;
+                    reinterpret_cast<uint32_t*>(out)[2] = static_cast<uint32_t>(lv.row_stride);
+                    reinterpret_cast<uint32_t*>(out)[3] = static_cast<uint32_t>(size);
+                    r->placement_dirty = true;
+                    return 0;
+                }
+            }
+        }
         if (r->texture) {
+            if (static const bool log = std::getenv("UTSURO_MAPLOG") != nullptr; log) {
+                static std::mutex m;
+                static std::map<std::string, int> seen;
+                const auto& i = gpu::TextureInfo(*r->texture);
+                char key[128];
+                std::snprintf(key, sizeof key, "texture %ux%u fmt %u mips %u sub %llu type %llu usage %u bind %#x", i.width, i.height, i.format, i.mips, (unsigned long long)c.Arg(1), (unsigned long long)c.Arg(2), r->usage, r->bind);
+                std::scoped_lock lock {m};
+                const int n = ++seen[key];
+                if (n == 1 || n % 200 == 0) UT_INFO("d3d: Map %s (call %d)", key, n);
+            }
             uint32_t mip, slice, row, rows, depth;
             TextureShape(gpu::TextureInfo(*r->texture), static_cast<uint32_t>(c.Arg(1)), &mip, &slice, &row, &rows, &depth);
             r->staging.assign(static_cast<size_t>(row) * rows * depth, 0);
@@ -934,6 +1005,17 @@ void RegisterGpuOverrides() {
             TextureShape(gpu::TextureInfo(*src->texture), static_cast<uint32_t>(c.Arg(5)), &sm, &ss, &sr, &srs, &sd);
             TextureShape(gpu::TextureInfo(*dst->texture), static_cast<uint32_t>(c.Arg(1)), &dm, &ds, &dr, &drs, &dd);
             gpu::CopyTexture(*dst->texture, dm, ds, static_cast<uint32_t>(c.Arg(2)), static_cast<uint32_t>(c.Arg(3)), 0, *src->texture, sm, ss, box);
+        } else if (static const bool log = std::getenv("UTSURO_COPYLOG") != nullptr; log) {
+            static std::atomic<int> shown {0};
+            if (shown++ < 30) {
+                auto describe = [](Res* r) -> std::string {
+                    char b[96];
+                    if (r->texture) { const auto& i = gpu::TextureInfo(*r->texture); std::snprintf(b, sizeof b, "texture %ux%u fmt %u placed %d", i.width, i.height, i.format, r->placement != 0); }
+                    else std::snprintf(b, sizeof b, "buffer %u bytes host %#llx", r->host_size, (unsigned long long)r->host_ptr);
+                    return b;
+                };
+                UT_INFO("d3d: CopySubresourceRegion %s <- %s (box %s, dst sub %llu, src sub %llu)", describe(dst).c_str(), describe(src).c_str(), box ? "yes" : "no", (unsigned long long)c.Arg(1), (unsigned long long)c.Arg(5));
+            }
         }
         return 0;
     });
