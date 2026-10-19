@@ -102,6 +102,7 @@ struct Globals {
     uint64_t frame_count {0};
     int trace_draws {0};
     uint64_t trace_frame {0};
+    std::vector<std::shared_ptr<Texture>> trace_rts;   // render targets drawn to during the traced frame, dumped at its Present
     std::string snapshot_path;
     std::string debug;   // UTSURO_GPUDEBUG: nodepth, nocull, noblend
     struct Stats { uint64_t draws {0}, no_vs {0}, bad_vs {0}, bad_ps {0}, no_pass {0}, no_pso {0}, bad_topology {0}, clears {0}, no_ib {0}; } stats;
@@ -1029,20 +1030,23 @@ void Draw(const DrawState& st, const DrawArgs& args) {
             [e setVertexBuffer:st.vb[i].buffer->mtl offset:st.vb[i].buffer->offset + st.vb[i].offset atIndex:15 + i];
         }
 
-        if (g->frame_count == g->trace_frame && g->trace_draws < 400) {
+        if (g->frame_count == g->trace_frame && g->trace_draws < 1500) {
             ++g->trace_draws;
+            if (st.rtv[0] && st.rtv[0]->texture && std::find(g->trace_rts.begin(), g->trace_rts.end(), st.rtv[0]->texture) == g->trace_rts.end()) g->trace_rts.push_back(st.rtv[0]->texture);
             id<MTLTexture> rt0 = st.rtv[0] && st.rtv[0]->texture ? ViewOf(*st.rtv[0]->texture, st.rtv[0]->desc, true) : nil;
             UT_INFO("gpu: draw %s count %u inst %u topo %u vs %p(#%d) ps %p(#%d) layout %p rt0 %ux%u fmt %lu depth %d vp %.0fx%.0f+%.0f,%.0f cb0 %p tex0 %p blend %zu", args.indexed ? "indexed" : "plain", args.count, args.instances, st.topology,
                     (void*)st.vs.get(), st.vs->serial, (void*)st.ps.get(), st.ps ? st.ps->serial : 0, (void*)st.layout.get(), rt0 ? (unsigned)rt0.width : 0, rt0 ? (unsigned)rt0.height : 0, rt0 ? (unsigned long)rt0.pixelFormat : 0, has_depth,
                     st.num_viewports ? st.viewports[0].w : 0.f, st.num_viewports ? st.viewports[0].h : 0.f, st.num_viewports ? st.viewports[0].x : 0.f, st.num_viewports ? st.viewports[0].y : 0.f,
                     (void*)st.cb[0][0].buffer.get(), (void*)st.srv[1][0].get(), st.blend.bytes.size());
         }
-        if (g->frame_count == g->trace_frame && g->trace_draws <= 400 && g->trace_draws > 0 && std::getenv("UTSURO_TRACEPIXELS")) {
-            for (int stage = 0; stage < 2; ++stage) {
-                const BufferBinding& b = st.cb[stage][0];
-                if (!b.buffer) continue;
+        if (g->frame_count == g->trace_frame && g->trace_draws <= 1500 && g->trace_draws > 0 && std::getenv("UTSURO_TRACEPIXELS")) {
+            for (int stage = 0; stage < 2; ++stage) for (int slot = 0; slot < 14; ++slot) {
+                const BufferBinding& b = st.cb[stage][slot];
+                const Shader* shader = stage == 0 ? st.vs.get() : st.ps.get();
+                if (shader == nullptr || !(shader->translated.reflection.constant_buffers & (1u << slot))) continue;
+                if (!b.buffer) { UT_INFO("gpu:   %s cb%d: NOT BOUND", stage ? "ps" : "vs", slot); continue; }
                 const float* f = reinterpret_cast<const float*>(BufferData(*b.buffer) + b.offset);
-                UT_INFO("gpu:   %s cb0 (%u bytes, ring %d): %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g", stage ? "ps" : "vs", b.buffer->size, b.buffer->ring_frame,
+                UT_INFO("gpu:   %s cb%d (%u bytes, off %u, ring %d): %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g", stage ? "ps" : "vs", slot, b.buffer->size, b.offset, b.buffer->ring_frame,
                         f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9], f[10], f[11], f[12], f[13], f[14], f[15],
                         b.buffer->size >= 128 ? f[16] : 0, b.buffer->size >= 128 ? f[17] : 0, b.buffer->size >= 128 ? f[18] : 0, b.buffer->size >= 128 ? f[19] : 0,
                         b.buffer->size >= 128 ? f[20] : 0, b.buffer->size >= 128 ? f[21] : 0, b.buffer->size >= 128 ? f[22] : 0, b.buffer->size >= 128 ? f[23] : 0,
@@ -1182,22 +1186,57 @@ bool SavePng(Texture& texture, const std::string& path) {
         id<MTLTexture> t = texture.mtl;
         if (t == nil) return false;
         const NSUInteger w = t.width, h = t.height;
+        const bool half4 = t.pixelFormat == MTLPixelFormatRGBA16Float;
+        const bool r11 = t.pixelFormat == MTLPixelFormatRG11B10Float;
+        if (!half4 && !r11 && t.pixelFormat != MTLPixelFormatBGRA8Unorm && t.pixelFormat != MTLPixelFormatBGRA8Unorm_sRGB && t.pixelFormat != MTLPixelFormatRGBA8Unorm && t.pixelFormat != MTLPixelFormatRGBA8Unorm_sRGB) return false;
+        const NSUInteger bpp = half4 ? 8 : 4;
+        std::vector<uint8_t> raw(w * h * bpp);
         std::vector<uint8_t> px(w * h * 4);
         if (t.storageMode == MTLStorageModePrivate) {
             // Private textures (iOS) have no CPU view: blit into a shared buffer first.
-            id<MTLBuffer> staging = [g->device newBufferWithLength:w * h * 4 options:MTLResourceStorageModeShared];
+            id<MTLBuffer> staging = [g->device newBufferWithLength:w * h * bpp options:MTLResourceStorageModeShared];
             id<MTLCommandBuffer> cb = [g->queue commandBuffer];
             id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
             [blit copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1)
-                         toBuffer:staging destinationOffset:0 destinationBytesPerRow:w * 4 destinationBytesPerImage:w * h * 4];
+                         toBuffer:staging destinationOffset:0 destinationBytesPerRow:w * bpp destinationBytesPerImage:w * h * bpp];
             [blit endEncoding];
             [cb commit];
             [cb waitUntilCompleted];
-            std::memcpy(px.data(), staging.contents, px.size());
+            std::memcpy(raw.data(), staging.contents, raw.size());
         } else {
-            [t getBytes:px.data() bytesPerRow:w * 4 fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0];
+            [t getBytes:raw.data() bytesPerRow:w * bpp fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0];
         }
-        const bool bgra = t.pixelFormat == MTLPixelFormatBGRA8Unorm || t.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB;
+        if (r11) {
+            // 5-bit exponent floats: 6 (or 5) mantissa bits, no sign.
+            auto unpack = [](uint32_t bits, int mantissa) {
+                const uint32_t e = bits >> mantissa, m = bits & ((1u << mantissa) - 1);
+                if (e == 0) return static_cast<float>(m) / static_cast<float>(1u << mantissa) * (1.f / 16384.f);
+                if (e == 31) return 65504.f;
+                return (1.f + static_cast<float>(m) / static_cast<float>(1u << mantissa)) * std::ldexp(1.f, static_cast<int>(e) - 15);
+            };
+            const uint32_t* wp = reinterpret_cast<const uint32_t*>(raw.data());
+            for (size_t i = 0; i < w * h; ++i) {
+                const float c[3] = {unpack(wp[i] & 0x7FF, 6), unpack((wp[i] >> 11) & 0x7FF, 6), unpack(wp[i] >> 22, 5)};
+                for (int k = 0; k < 3; ++k) {
+                    const float v = c[k] < 0 ? 0 : c[k] > 1 ? 1 : c[k];
+                    px[i * 4 + k] = static_cast<uint8_t>(v * 255.f + 0.5f);
+                }
+                px[i * 4 + 3] = 255;
+            }
+        } else if (half4) {
+            const _Float16* hp = reinterpret_cast<const _Float16*>(raw.data());
+            for (size_t i = 0; i < w * h; ++i) {
+                for (int c = 0; c < 3; ++c) {
+                    float v = static_cast<float>(hp[i * 4 + c]);
+                    v = v < 0 ? 0 : v > 1 ? 1 : v;
+                    px[i * 4 + c] = static_cast<uint8_t>(v * 255.f + 0.5f);
+                }
+                px[i * 4 + 3] = 255;
+            }
+        } else {
+            px = raw;
+        }
+        const bool bgra = !half4 && !r11 && (t.pixelFormat == MTLPixelFormatBGRA8Unorm || t.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB);
         if (!bgra) for (size_t i = 0; i < px.size(); i += 4) std::swap(px[i], px[i + 2]);   // CoreGraphics below wants BGRA
         CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
         CGContextRef ctx = CGBitmapContextCreate(px.data(), w, h, 8, w * 4, cs, kCGBitmapByteOrder32Little | kCGImageAlphaNoneSkipFirst);
@@ -1275,6 +1314,16 @@ void Present(const std::shared_ptr<Texture>& back, uint32_t sync_interval) {
             if (snap) { std::snprintf(path, sizeof path, "%s", g->snapshot_path.c_str()); g->snapshot_path.clear(); }
             else std::snprintf(path, sizeof path, "%s/frame_%06llu.png", g->dump_dir, (unsigned long long)index);
             SavePng(*back, path);
+        }
+        if (index == g->trace_frame + 1 && g->dump_dir != nullptr && !g->trace_rts.empty()) {
+            [cmd waitUntilCompleted];
+            int n = 0;
+            for (const auto& rt : g->trace_rts) {
+                char path[512];
+                std::snprintf(path, sizeof path, "%s/rt_%02d_%ux%u_f%lu.png", g->dump_dir, n++, (unsigned)(rt->mtl ? rt->mtl.width : 0), (unsigned)(rt->mtl ? rt->mtl.height : 0), (unsigned long)(rt->mtl ? rt->mtl.pixelFormat : 0));
+                SavePng(*rt, path);
+            }
+            g->trace_rts.clear();
         }
         dispatch_semaphore_wait(g->frames_in_flight, DISPATCH_TIME_FOREVER);
         g->frame = (g->frame + 1) % kRingFrames;

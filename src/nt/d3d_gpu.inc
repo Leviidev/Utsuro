@@ -521,9 +521,19 @@ std::shared_ptr<gpu::Buffer> CopyOfHost(uint64_t address, uint32_t bytes) {
     if (address == 0 || bytes == 0) return nullptr;
     std::vector<uint8_t> data(std::max<uint32_t>(bytes, 16));
     if (!SafeCopy(address, data.data(), bytes)) {
-        static std::atomic<int> shown {0};
-        if (shown++ < 8) UT_INFO("d3d: a descriptor points at %#llx (%u bytes), which is not readable", (unsigned long long)address, bytes);
-        return nullptr;
+        // A constant buffer's size is its slot's maximum, not what was allocated: keep the readable part, page by page.
+        uint32_t got = 0;
+        while (got < bytes) {
+            const uint64_t at = address + got;
+            const uint32_t step = std::min<uint32_t>(bytes - got, static_cast<uint32_t>(4096 - (at & 4095)));
+            if (!SafeCopy(at, data.data() + got, step)) break;
+            got += step;
+        }
+        if (got == 0) {
+            static std::atomic<int> shown {0};
+            if (shown++ < 8) UT_INFO("d3d: a descriptor points at %#llx (%u bytes), which is not readable", (unsigned long long)address, bytes);
+            return nullptr;
+        }
     }
     return gpu::CreateBuffer(static_cast<uint32_t>(data.size()), false, data.data());
 }
@@ -611,9 +621,25 @@ void BindStream(CtxState& s, gpu::DrawState& d, gpu::DrawArgs& args) {
         for (uint32_t k = 0; k < 14; ++k) {
             if (!(rf.constant_buffers & (1u << k))) continue;
             const auto* v = get((stage == 0 ? kRegCbA : kRegCbB) + 0x10 * k);
-            if (v == nullptr || v->n < 3) continue;
-            const uint32_t size = std::min<uint32_t>(v->dw[2], 65536);
+            if (v == nullptr || v->n < 3) {
+                static std::atomic<int> shown {0};
+                if (std::getenv("UTSURO_REGLOG") != nullptr && shown++ < 6) {
+                    UT_INFO("d3d: %s cb%u has no packet; %zu registers hold:", stage ? "ps" : "vs", k, s.regs.size());
+                    std::vector<uint32_t> keys;
+                    for (const auto& [reg, r] : s.regs) keys.push_back(reg);
+                    std::sort(keys.begin(), keys.end());
+                    for (uint32_t reg : keys) { const auto& r = s.regs[reg]; UT_INFO("d3d:   reg %#x n %u: %08x %08x %08x %08x", reg, r.n, r.dw[0], r.dw[1], r.dw[2], r.dw[3]); }
+                }
+                continue;
+            }
+            uint32_t size = std::min<uint32_t>(v->dw[2], 65536);
+            if (rf.cb_size[k] != 0) size = std::min<uint32_t>(size, rf.cb_size[k] * 16);   // the shader reads no more than it declared
             d.cb[stage][k].buffer = CopyOfHost(address(*v), size);
+            if (!d.cb[stage][k].buffer) {
+                static std::atomic<int> shown {0};
+                if (std::getenv("UTSURO_REGLOG") != nullptr && shown++ < 12)
+                    UT_INFO("d3d: %s cb%u packet (n %u): %08x %08x %08x %08x gives no buffer (address %#llx size %u)", stage ? "ps" : "vs", k, v->n, v->dw[0], v->dw[1], v->dw[2], v->dw[3], (unsigned long long)address(*v), size);
+            }
             d.cb[stage][k].offset = 0;
             d.cb[stage][k].size = size;
         }
