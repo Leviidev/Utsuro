@@ -68,7 +68,7 @@ uint64_t Runtime::AllocGuest(size_t bytes, size_t align) {
 void Runtime::Init(Kernel& kernel) {
     if (ready_) return;
     kernel_ = &kernel;
-    uint64_t base = 0, size = 64 << 20;
+    uint64_t base = 0, size = 512ull << 20;
     if (kernel.Vm().Allocate(&base, &size, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE, RegionKind::Private, "host objects") != STATUS_SUCCESS) {
         UT_ERROR("winrt: cannot allocate the host heap");
         return;
@@ -201,7 +201,15 @@ Obj* Runtime::NewObject(const std::string& class_name, std::vector<Iface*> iface
         Iface* f = o->ifaces[i];
         if (f->vtable == 0) Materialize(*f);
         const size_t slots = static_cast<size_t>(f->base_slots) + f->methods.size();
-        const uint64_t block = AllocGuest(f->inline_table != 0 ? f->inline_table + slots * 8 + 64 : block_bytes, 16);
+        const size_t block_size = f->inline_table != 0 ? f->inline_table + slots * 8 + 64 : block_bytes;
+        uint64_t block = 0;
+        {
+            std::scoped_lock lock {mutex_};
+            auto& spare = free_blocks_[block_size];
+            if (!spare.empty()) { block = spare.back(); spare.pop_back(); std::memset(reinterpret_cast<void*>(block), 0, block_size); }
+        }
+        if (block == 0) block = AllocGuest(block_size, 16);
+        o->block_sizes.push_back(block_size);
         reinterpret_cast<uint64_t*>(block)[0] = f->vtable;
         if (f->inline_table != 0) std::memcpy(reinterpret_cast<void*>(block + f->inline_table), reinterpret_cast<void*>(f->vtable), slots * 8);
         reinterpret_cast<uint64_t*>(block)[1] = o->id;
@@ -251,6 +259,20 @@ Obj* Runtime::FromPointer(uint64_t pointer) {
     std::scoped_lock lock {mutex_};
     auto it = objects_.find(id);
     return it == objects_.end() ? nullptr : it->second.get();
+}
+
+void Runtime::Free(Obj& obj) {
+    if (on_free) on_free(obj);
+    std::unique_ptr<Obj> doomed;
+    std::scoped_lock lock {mutex_};
+    auto it = objects_.find(obj.id);
+    if (it == objects_.end()) return;
+    for (size_t i = 0; i < obj.blocks.size() && i < obj.block_sizes.size(); ++i) {
+        reinterpret_cast<uint64_t*>(obj.blocks[i])[1] = 0;   // a stale pointer no longer finds an object
+        free_blocks_[obj.block_sizes[i]].push_back(obj.blocks[i]);
+    }
+    doomed = std::move(it->second);
+    objects_.erase(it);
 }
 
 Obj* Runtime::NewGhost(const std::string& class_name) {
@@ -385,7 +407,10 @@ bool Runtime::Dispatch(NtThread& thread, uint32_t number, SyscallArgs& args, uin
         return true;
     }
     case 1: *result = static_cast<uint32_t>(++obj->refs); return true;
-    case 2: *result = static_cast<uint32_t>(obj->refs > 1 ? --obj->refs : 1); return true;
+    case 2:
+        if (obj->recycle && obj->refs <= 1) { Free(*obj); *result = 0; return true; }
+        *result = static_cast<uint32_t>(obj->refs > 1 ? --obj->refs : 1);
+        return true;
     case 3: {  // GetIids(ULONG*, IID**)
         *reinterpret_cast<uint32_t*>(args[1]) = 0;
         *reinterpret_cast<uint64_t*>(args[2]) = 0;

@@ -207,6 +207,7 @@ uint32_t Fallback(Call& c) {
             }
             Obj* o = Create(m.out_type, out);
             if (o != nullptr) {
+                if (m.out_type == "ID3D11CommandList") o->recycle = true;   // one per FinishCommandList, released after it runs
                 o->u64["device"] = DeviceOf(c);
                 if (o->ifaces[0]->inline_table != 0) *reinterpret_cast<uint64_t*>(o->blocks[0] + 0x10) = DeviceOf(c);   // m_pDevice
                 if (spec != nullptr) {
@@ -279,6 +280,12 @@ void Register(Runtime& rt, uint32_t os_timestamp) {
         g_defs[def.name] = &def;
         g_ifaces[def.name] = &rt.DefineComInterface(def.name, def.iid, std::move(methods), Fallback);
     }
+
+    rt.on_free = [](Obj& o) {
+        std::scoped_lock lock {g_res_mutex};
+        for (uint64_t b : o.blocks) g_res_cache.erase(b);
+        g_by_id.erase(o.id);
+    };
 
     // The Xbox device context embeds its vtable (m_Function) after the device-child fields, the
     // draw-state blocks and the 64-byte out-of-line flags. Offsets are for ABI >= 6.2.11294.

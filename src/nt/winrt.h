@@ -70,6 +70,8 @@ struct Obj {
     int refs {1};
     std::shared_ptr<void> user;        ///< Host state owned by whoever implements the object (the D3D layer's resources).
     bool ghost {false};                ///< Answers every IID it is asked for (a class the host does not model).
+    bool recycle {false};              ///< Released to zero by the title means freed (transient objects, like D3D command lists).
+    std::vector<size_t> block_sizes;   ///< Bytes of each block, to return them to the free list.
 };
 
 /// One call into a host method.
@@ -147,6 +149,7 @@ private:
     std::vector<std::unique_ptr<Iface>> ifaces_;
     std::vector<std::pair<Iface*, uint32_t>> method_table_;   // global id -> (iface, slot)
     std::map<uint64_t, std::unique_ptr<Obj>> objects_;
+    std::map<size_t, std::vector<uint64_t>> free_blocks_;   // by size: the memory of freed objects
     std::atomic<uint64_t> next_id_ {1};   // objects are created on several threads
     struct ClassDef { std::function<Obj*(Runtime&)> create; Iface* statics {nullptr}; std::vector<Iface*> more_statics; Obj* factory {nullptr}; };
     std::map<std::string, ClassDef> classes_;
@@ -156,6 +159,10 @@ private:
 public:
     /// The host object a guest interface pointer belongs to, or null.
     Obj* FromPointer(uint64_t pointer);
+    /// Destroys `obj` (a `recycle` object the title released for the last time) and keeps its memory for the next one.
+    void Free(Obj& obj);
+    /// Called just before an object is destroyed.
+    std::function<void(Obj&)> on_free;
     Iface* activation_factory_iface() { return activation_factory_; }
     uint64_t NextToken() { return next_token_++; }
     /// Remembers `delegate` as a handler of `event` on `obj`; returns the registration token.
