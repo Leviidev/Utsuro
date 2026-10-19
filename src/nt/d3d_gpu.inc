@@ -139,6 +139,10 @@ void OnCreate(Call& c, const winrt::Method& m, Obj& o) {
         r.usage = usage;
         r.bind = bind;
         r.texture = gpu::CreateTexture(d);
+        if (std::getenv("UTSURO_TEXLOG") != nullptr) {
+            static std::atomic<int> shown {0};
+            if (shown++ < 60) UT_INFO("d3d: %s %ux%u fmt %u mips %u array %u bind %#x usage %u misc %#x -> %s", n.c_str(), d.width, d.height, d.format, d.mips, d.array_size, bind, usage, misc, r.texture ? "ok" : "NO TEXTURE");
+        }
         if (placed) {
             r.tile_mode = static_cast<uint32_t>(c.Arg(1));
             r.pitch = static_cast<uint32_t>(c.Arg(2));
@@ -810,6 +814,16 @@ void DoDraw(Obj& ctx, const gpu::DrawArgs& args_in) {
             }
         }
     }
+    if (d.ps && std::getenv("UTSURO_SRVLOG") != nullptr) {
+        static std::atomic<int> logged {0};
+        const auto& rf = gpu::Reflection(*d.ps);
+        if (rf.textures && !d.srv[1][0] && logged++ < 6) {
+            Res* r = ResAt(state.srv[4][0]);
+            Obj* o = Runtime::Get().FromPointer(state.srv[4][0]);
+            UT_INFO("d3d: draw with an unbound t0: s.srv[PS][0]=%#llx res=%p object=%s view=%p base=%p texture=%p", (unsigned long long)state.srv[4][0], (void*)r, o ? o->class_name.c_str() : "?", r ? (void*)r->view.get() : nullptr,
+                    r ? (void*)r->base : nullptr, r && r->view ? (void*)r->view->texture.get() : nullptr);
+        }
+    }
     if (!d.vs) {
         static int shown = 0;
         const CtxState& s = state;
@@ -1245,6 +1259,13 @@ void RegisterGpuOverrides() {
 
     // ---- the swap chain ----
     OverrideAll("Present", [](Call& c) -> uint32_t {
+        Res* r = c.obj.user ? static_cast<Res*>(c.obj.user.get()) : nullptr;
+        ++g_frame;
+        if (gpu::Available()) gpu::Present(r ? r->texture : nullptr, static_cast<uint32_t>(c.Arg(0)));
+        return 0;
+    });
+    // Present1(sync interval, flags, params): the same.
+    OverrideAll("Present1", [](Call& c) -> uint32_t {
         Res* r = c.obj.user ? static_cast<Res*>(c.obj.user.get()) : nullptr;
         ++g_frame;
         if (gpu::Available()) gpu::Present(r ? r->texture : nullptr, static_cast<uint32_t>(c.Arg(0)));

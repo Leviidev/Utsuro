@@ -1,0 +1,17 @@
+A 1ffc 7  ; mov ebx, dword ptr [0x7ffe0240]
+A 2098 7  ; mov ebx, dword ptr [0x7ffe0240]
+A 26a4 8  ; cmp dword ptr [0x7ffe0240], -1
+A 286e 8  ; cmp dword ptr [0x7ffe0240], -1
+B b8f4 6 r9d  ; mov r9d, 0x7ffe0024
+B b8fa 6 r8d  ; mov r8d, 0x7ffe025c
+G b900 4 0  ; lea r10d, [r9 - 4]
+B b928 5 ecx  ; mov ecx, 0x7ffe0320
+A b930 7  ; mov eax, dword ptr [0x7ffe0004]
+B b940 5 ecx  ; mov ecx, 0x7ffe0320
+A b948 8  ; mov r8d, dword ptr [0x7ffe0004]
+B b970 5 eax  ; mov eax, 0x7ffe0014
+B b9ab 5 eax  ; mov eax, 0x7ffe0014
+B b9d9 5 eax  ; mov eax, 0x7ffe0014
+A edc5 7  ; mov al, byte ptr [0x7ffe0390]
+A ee47 7  ; mov al, byte ptr [0x7ffe0390]
+A f3c8 8  ; mov rax, qword ptr [0x7ffe03d8]

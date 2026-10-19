@@ -178,6 +178,9 @@ public:
 /// Registers every class the runtime provides (winrt_classes.cpp).
 void RegisterClasses(Runtime& rt);
 uint64_t CurrentUserPointer();   ///< The one signed-in Windows.Xbox.System.User.
+/// UserAdded handlers subscribed so far that have not been told about the user yet; the dispatcher raises them from its first ProcessEvents.
+bool HasPendingUserAdded();
+GuestStep RaisePendingUserAdded(std::function<GuestStep(NtThread&, uint64_t)> then);
 void RegisterCoreClasses(Runtime& rt);
 void RegisterCollections(Runtime& rt);
 void RegisterAsync(Runtime& rt);

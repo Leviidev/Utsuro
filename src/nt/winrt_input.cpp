@@ -20,7 +20,10 @@ Obj* g_pad = nullptr;
 
 uint64_t PadPointer(const char* iface_name) {
     Runtime& rt = Runtime::Get();
-    Iface* i = rt.FindInterface(iface_name);
+    // The pad's own interface of that name (the generated tables define a second, unrelated "IController").
+    Iface* i = nullptr;
+    for (Iface* f : g_pad->ifaces) if (f->name == iface_name) i = f;
+    if (i == nullptr) i = rt.FindInterface(iface_name);
     ++g_pad->refs;
     return rt.Pointer(*g_pad, *i);
 }

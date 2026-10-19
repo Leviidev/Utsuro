@@ -42,7 +42,7 @@ void RegisterCoreClasses(Runtime& rt) {
         Fn("ProcessEvents", None, [&rt](Call& c) -> uint32_t {
             // Run everything queued with RunAsync, in order, then return.
             Obj& d = c.obj;
-            if (d.queue.empty()) return 0;
+            if (d.queue.empty() && !HasPendingUserAdded()) return 0;
             auto drain = std::make_shared<std::function<GuestStep(NtThread&, uint64_t)>>();
             *drain = [&rt, &d, drain](NtThread&, uint64_t) -> GuestStep {
                 if (d.queue.empty()) return GuestStep::Return(0);
@@ -50,7 +50,8 @@ void RegisterCoreClasses(Runtime& rt) {
                 d.queue.erase(d.queue.begin());
                 return rt.InvokeDelegate(handler, {}, *drain);
             };
-            c.thread.CallGuest((*drain)(c.thread, 0));
+            if (HasPendingUserAdded()) c.thread.CallGuest(RaisePendingUserAdded(*drain));
+            else c.thread.CallGuest((*drain)(c.thread, 0));
             return 0;
         }),
         Fn("RunAsync", Ptr, [](Call& c) -> uint32_t {

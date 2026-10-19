@@ -371,6 +371,10 @@ void Register(Runtime& rt, uint32_t os_timestamp) {
         auto bind = [&](const std::string& name, winrt::HostFn fn) { OverrideAll(name.c_str(), std::move(fn)); };
         bind(p + "SetConstantBuffers", [st](Call& c) -> uint32_t {
             auto& s = StateOf(c.obj);
+            if (std::getenv("UTSURO_SRVLOG") != nullptr) {
+                static std::atomic<int> shown {0};
+                if (shown++ < 8) UT_INFO("d3d: SetConstantBuffers stage %d: args %#llx %#llx %#llx %#llx %#llx", st, (unsigned long long)c.Arg(0), (unsigned long long)c.Arg(1), (unsigned long long)c.Arg(2), (unsigned long long)c.Arg(3), (unsigned long long)c.Arg(4));
+            }
             for (uint64_t i = 0; i < c.Arg(1) && c.Arg(0) + i < 16; ++i) {
                 s.cb[st][c.Arg(0) + i] = c.Arg(2) ? c.Ptr<uint64_t>(2)[i] : 0;
                 s.cb_first[st][c.Arg(0) + i] = 0;
@@ -385,6 +389,18 @@ void Register(Runtime& rt, uint32_t os_timestamp) {
         });
         bind(p + "SetShaderResources", [st](Call& c) -> uint32_t {
             auto& s = StateOf(c.obj);
+            // Console builds from 2018 call the out-of-line setter as (views, start slot, descriptor packet header, ...): the header carries the
+            // texture register (0x6b40 and up) and eight dwords per view.
+            if ((c.Arg(2) & 0xFFFF) >= 0x6b40 && (c.Arg(2) & 0xFFFF) < 0x6b40 + 0x1000 && c.Arg(0) > 0x10000) {
+                const uint64_t count = ((c.Arg(2) >> 16) + 1) / 8;
+                for (uint64_t i = 0; i < count && c.Arg(1) + i < 128; ++i) s.srv[st][c.Arg(1) + i] = c.Ptr<uint64_t>(0)[i];
+                return 0;
+            }
+            if (std::getenv("UTSURO_SRVLOG") != nullptr) {
+                static std::atomic<int> shown {0};
+                if (shown++ < 12) UT_INFO("d3d: SetShaderResources stage %d: args %#llx %#llx %#llx %#llx %#llx", st, (unsigned long long)c.Arg(0), (unsigned long long)c.Arg(1), (unsigned long long)c.Arg(2), (unsigned long long)c.Arg(3), (unsigned long long)c.Arg(4));
+                if (shown <= 3) for (int a : {0, 4}) { const uint64_t* q = c.Ptr<uint64_t>(a); char t[256]; std::snprintf(t, sizeof t, "arg%d -> %llx %llx %llx %llx %llx %llx", a, (unsigned long long)q[0], (unsigned long long)q[1], (unsigned long long)q[2], (unsigned long long)q[3], (unsigned long long)q[4], (unsigned long long)q[5]); UT_INFO("d3d:   %s", t); }
+            }
             for (uint64_t i = 0; i < c.Arg(1) && c.Arg(0) + i < 128; ++i) s.srv[st][c.Arg(0) + i] = c.Arg(2) ? c.Ptr<uint64_t>(2)[i] : 0;
             return 0;
         });
@@ -395,6 +411,10 @@ void Register(Runtime& rt, uint32_t os_timestamp) {
         });
         bind(p + "SetSamplers", [st](Call& c) -> uint32_t {
             auto& s = StateOf(c.obj);
+            if (std::getenv("UTSURO_SRVLOG") != nullptr) {
+                static std::atomic<int> shown {0};
+                if (shown++ < 8) UT_INFO("d3d: SetSamplers stage %d: args %#llx %#llx %#llx %#llx %#llx", st, (unsigned long long)c.Arg(0), (unsigned long long)c.Arg(1), (unsigned long long)c.Arg(2), (unsigned long long)c.Arg(3), (unsigned long long)c.Arg(4));
+            }
             for (uint64_t i = 0; i < c.Arg(1) && c.Arg(0) + i < 16; ++i) s.sampler[st][c.Arg(0) + i] = c.Arg(2) ? c.Ptr<uint64_t>(2)[i] : 0;
             return 0;
         });
@@ -494,6 +514,10 @@ void Register(Runtime& rt, uint32_t os_timestamp) {
     OverrideAll("IAGetInputLayout", [](Call& c) -> uint32_t { if (c.Arg(0)) *c.Ptr<uint64_t>(0) = StateOf(c.obj).layout; return 0; });
     OverrideAll("IASetVertexBuffers", [](Call& c) -> uint32_t {
         auto& s = StateOf(c.obj);
+        if (std::getenv("UTSURO_SRVLOG") != nullptr) {
+            static std::atomic<int> shown {0};
+            if (shown++ < 6) UT_INFO("d3d: IASetVertexBuffers: args %#llx %#llx %#llx %#llx %#llx", (unsigned long long)c.Arg(0), (unsigned long long)c.Arg(1), (unsigned long long)c.Arg(2), (unsigned long long)c.Arg(3), (unsigned long long)c.Arg(4));
+        }
         for (uint64_t i = 0; i < c.Arg(1) && c.Arg(0) + i < 16; ++i) {
             const uint64_t k = c.Arg(0) + i;
             s.vb[k] = c.Arg(2) ? c.Ptr<uint64_t>(2)[i] : 0;

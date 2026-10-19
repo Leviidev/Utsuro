@@ -2,6 +2,10 @@
 // order follow WinDurango's IDL notes; a method without a body uses the generic default
 // (getters write zero, setters succeed, events hand out tokens).
 #include "nt/winrt.h"
+#include "nt/kernel.h"
+#include <cstdio>
+#include <cstdlib>
+#include <string>
 
 #include "engine/log.h"
 
@@ -36,6 +40,25 @@ Method Fn(const char* name, Out out, HostFn fn) { return Method {name, out, 0, f
 #include "nt/winrt_generated.inc"
 
 } // namespace
+
+static std::vector<std::pair<uint64_t, uint64_t>> g_pending_user_added;   // (handler, sender)
+
+bool HasPendingUserAdded() { return !g_pending_user_added.empty(); }
+
+GuestStep RaisePendingUserAdded(std::function<GuestStep(NtThread&, uint64_t)> then) {
+    if (g_pending_user_added.empty()) return GuestStep::Call(0, {}, nullptr);   // not reached: callers check HasPendingUserAdded
+    Runtime& r = Runtime::Get();
+    const auto [handler, sender] = g_pending_user_added.front();
+    UT_INFO("winrt: raising UserAdded to %#llx", (unsigned long long)handler);
+    g_pending_user_added.erase(g_pending_user_added.begin());
+    Iface* args_iface = r.FindInterface("IUserAddedEventArgs");
+    Obj* args = r.NewObject("Windows.Xbox.System.UserAddedEventArgs", {args_iface});
+    const uint64_t args_ptr = r.Pointer(*args, *args_iface);
+    return r.InvokeDelegate(handler, {sender, args_ptr}, [then](NtThread& t, uint64_t) -> GuestStep {
+        if (HasPendingUserAdded()) return RaisePendingUserAdded(then);
+        return then(t, 0);
+    });
+}
 
 uint64_t CurrentUserPointer() {
     static Obj* user = nullptr;
@@ -81,7 +104,61 @@ void RegisterClasses(Runtime& rt) {
         rt.Override("IUserDisplayInfo", "Reputation", [](Call& c) -> uint32_t { *c.Ptr<uint32_t>(0) = 50; return 0; });
         rt.Override("IUserDisplayInfo", "AgeGroup", [](Call& c) -> uint32_t { *c.Ptr<uint32_t>(0) = 2; return 0; });   // Adult
         rt.Override("IUserDisplayInfo", "Privileges", [](Call& c) -> uint32_t { *c.Ptr<uint64_t>(0) = Runtime::Get().NewVectorView({}); return 0; });
+        // A title that waits for UserAdded (instead of reading Users) is told about the one signed-in user as soon as it subscribes.
+        rt.Override("IUserAddedEventArgs", "get_User", [](Call& c) -> uint32_t { *c.Ptr<uint64_t>(0) = CurrentUserPointer(); return 0; });
+        rt.Override("IUserStatics", "add_UserAdded", [](Call& c) -> uint32_t {
+            Runtime& r = Runtime::Get();
+            const uint64_t handler = c.Arg(0);
+            const uint64_t token = r.AddDelegate(c.obj, "UserAdded", handler);
+            if (auto* tok = c.Ptr<uint64_t>(1)) *tok = token;
+            if (handler <= 0x10000) return 0;
+            // The callee keeps its own reference; the event itself is raised later, from the dispatcher (a title may not be ready for it yet).
+            const uint64_t vtable = *reinterpret_cast<uint64_t*>(handler);
+            c.thread.CallGuest(GuestStep::Call(reinterpret_cast<uint64_t*>(vtable)[1], {handler}, [](NtThread&, uint64_t) { return GuestStep::Return(0); }));
+            g_pending_user_added.push_back({handler, r.Pointer(c.obj, c.iface)});
+            UT_INFO("winrt: UserAdded handler %#llx subscribed; raised from the dispatcher", (unsigned long long)handler);
+            return 0;
+        });
+        // The account picker "picks" the one user straight away.
+        rt.Override("IAccountPickerResult", "get_User", [](Call& c) -> uint32_t { *c.Ptr<uint64_t>(0) = CurrentUserPointer(); return 0; });
+        rt.Override("ISystemUIStatics", "ShowAccountPickerAsync", [](Call& c) -> uint32_t {
+            Runtime& r = Runtime::Get();
+            Iface* i = r.FindInterface("IAccountPickerResult");
+            Obj* result = r.NewObject("Windows.Xbox.UI.AccountPickerResult", {i});
+            *c.Ptr<uint64_t>(2) = r.NewAsync(Out::Ptr, r.Pointer(*result, *i));
+            return 0;
+        });
         rt.Override("IUser", "get_XboxUserHash", [](Call& c) -> uint32_t { *c.Ptr<uint64_t>(0) = Runtime::Get().MakeHString(u"utsuro"); return 0; });
+    }
+    // Windows.Xbox.Services.XboxLiveConfiguration: the title's identity, from its manifest (<mx:XboxLive TitleId="34BA1DE0" PrimaryServiceConfigId="...">).
+    {
+        struct Identity { std::u16string title_id_decimal, service_config; };
+        static const Identity identity = [] {
+            Identity id;
+            std::string text;
+            if (FILE* f = std::fopen((Runtime::Get().kernel().Options().title_root + "/AppxManifest.xml").c_str(), "rb")) {
+                char buf[4096];
+                size_t n;
+                while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) text.append(buf, n);
+                std::fclose(f);
+            }
+            auto attr = [&](const char* name) {
+                const std::string key = std::string(name) + "=\"";
+                const size_t at = text.find(key);
+                if (at == std::string::npos) return std::string();
+                const size_t end = text.find('"', at + key.size());
+                return text.substr(at + key.size(), end - at - key.size());
+            };
+            const std::string hex = attr("TitleId");
+            const std::string decimal = std::to_string(std::strtoull(hex.c_str(), nullptr, 16));
+            id.title_id_decimal.assign(decimal.begin(), decimal.end());
+            const std::string cfg = attr("PrimaryServiceConfigId");
+            id.service_config.assign(cfg.begin(), cfg.end());
+            return id;
+        }();
+        rt.Override("IXboxLiveConfigurationStatics", "get_TitleId", [](Call& c) -> uint32_t { *c.Ptr<uint64_t>(0) = Runtime::Get().MakeHString(identity.title_id_decimal); return 0; });
+        rt.Override("IXboxLiveConfigurationStatics", "get_PrimaryServiceConfigId", [](Call& c) -> uint32_t { *c.Ptr<uint64_t>(0) = Runtime::Get().MakeHString(identity.service_config); return 0; });
+        rt.Override("IXboxLiveConfigurationStatics", "get_SandboxId", [](Call& c) -> uint32_t { *c.Ptr<uint64_t>(0) = Runtime::Get().MakeHString(u"RETAIL"); return 0; });
     }
     RegisterInput(rt);
     // Windows.ApplicationModel.Store.CurrentApp: the title is always licensed and never a trial.

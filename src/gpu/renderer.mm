@@ -109,6 +109,7 @@ struct Globals {
     uint64_t trace_frame {0};
     id<MTLRenderPipelineState> depth_copy_pipeline {nil};
     int step_dumps {0}, srv_dumps {0};
+    int draws_in_command {0};   ///< draws encoded into the current command buffer (it is committed every so many)
     const char* dir_or_empty() const { return dump_dir ? dump_dir : "."; }
     std::vector<std::shared_ptr<Texture>> trace_rts;   // render targets drawn to during the traced frame, dumped at its Present
     std::string snapshot_path;
@@ -1184,6 +1185,13 @@ void Draw(const DrawState& st, const DrawArgs& args) {
         } else {
             [e drawPrimitives:prim vertexStart:args.start vertexCount:args.count instanceCount:args.instances baseInstance:args.start_instance];
         }
+        if (++g->draws_in_command >= 1000) {
+            // A 2D game issues thousands of sprite draws a frame: one command buffer that large cannot be grown any more.
+            EndEncoder();
+            [Command() commit];
+            g->command = nil;
+            g->draws_in_command = 0;
+        }
         if (g->frame_count == g->trace_frame && g->dump_dir != nullptr && std::getenv("UTSURO_STEPDUMP") && g->trace_draws > 0 && ps != nullptr && g->srv_dumps < 3 && st.rtv[0] && st.rtv[0]->texture &&
             st.rtv[0]->texture->mtl.width >= 1900 && st.rtv[0]->texture->pixel_format == MTLPixelFormatRGBA8Unorm && std::popcount(ps->translated.reflection.textures) >= 4) {
             // Debug: the inputs of the final composite.
@@ -1388,6 +1396,7 @@ void Present(const std::shared_ptr<Texture>& back, uint32_t sync_interval) {
     std::scoped_lock lock {g->mutex};
     @autoreleasepool {
         EndEncoder();
+        g->draws_in_command = 0;
         const uint64_t index = ++g->frame_count;
         if (index % 120 == 1) {
             static auto last_report = std::chrono::steady_clock::now();
