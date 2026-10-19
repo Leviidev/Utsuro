@@ -551,6 +551,21 @@ void UploadPlacement(Res& r) {
         }
     }
     gpu::SetMinMip(*r.texture, std::min<uint32_t>(lowest_missing, info.mips > 0 ? info.mips - 1 : 0));
+    if (static const bool stats = std::getenv("UTSURO_STREAMLOG2") != nullptr; stats && info.width >= 512) {
+        static std::mutex m;
+        static std::map<std::string, std::pair<uint32_t, uint32_t>> seen;   // texture -> (first mip sampled, mips)
+        std::scoped_lock lock {m};
+        char key[64];
+        std::snprintf(key, sizeof key, "%#llx %ux%u f%u", (unsigned long long)r.placement, info.width, info.height, info.format);
+        seen[key] = {lowest_missing, info.mips};
+        static uint64_t last_frame = 0;
+        if (g_frame.load() >= last_frame + 600) {
+            last_frame = g_frame.load();
+            size_t full = 0, partial = 0, none = 0;
+            for (auto& [k, v] : seen) { if (v.first == 0) ++full; else if (v.first + 1 >= v.second) ++none; else ++partial; }
+            UT_INFO("d3d: streamed textures >=512: %zu with every level, %zu with some levels, %zu with only the smallest level", full, partial, none);
+        }
+    }
 }
 
 // ---- the title's inline descriptor stream ----------------------------------------------------------
@@ -645,6 +660,10 @@ void BindStream(CtxState& s, gpu::DrawState& d, gpu::DrawArgs& args) {
         if (v == nullptr || v->n < 3) continue;
         const uint64_t base = address(*v);
         const uint32_t stride = (v->dw[1] >> 16) & 0x3FFF, size = v->dw[2];
+        if (k == 0 && args.indexed && args.count == 6 && std::getenv("UTSURO_QUADLOG") != nullptr && g_frame.load() >= static_cast<uint64_t>(std::atoi(std::getenv("UTSURO_QUADLOG")))) {
+            static std::atomic<int> shown {0};
+            if (shown++ < 3000) UT_INFO("d3d: quad draw: stream0 base %#llx stride %u size %u dw %08x %08x %08x %08x; first_vertex %lld last %lld base_vertex %d start %u", (unsigned long long)base, stride, size, v->dw[0], v->dw[1], v->dw[2], v->dw[3], (long long)first_vertex, (long long)last_vertex, args.base_vertex, args.start);
+        }
         if (stride == 0 || base == 0) continue;
         bool per_instance = false;
         if (layout != nullptr) for (const auto& e : layout->elements) if (e.slot == k && e.slot_class == 1) per_instance = true;

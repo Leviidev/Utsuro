@@ -17,6 +17,7 @@
 #include <TargetConditionals.h>
 
 #include <algorithm>
+#include <bit>
 #include <cstdio>
 #include <cstdlib>
 #include <chrono>
@@ -43,6 +44,8 @@ struct Texture {
     TextureDesc desc;
     MTLPixelFormat pixel_format {MTLPixelFormatInvalid};
     std::map<std::string, id<MTLTexture>> views;
+    uint64_t depth_gen {0}, copy_gen {~0ull};   ///< a depth texture sampled as float: bumped when it is written, and when its R32Float copy was last made
+    id<MTLTexture> depth_copy {nil};
     uint32_t min_mip {0};   ///< sampled views start here (levels above it were never written)
     uint32_t uploads {0};   ///< UploadTexture calls (debugging: a texture nothing was ever written to)
 };
@@ -104,6 +107,9 @@ struct Globals {
     uint64_t frame_count {0};
     int trace_draws {0};
     uint64_t trace_frame {0};
+    id<MTLRenderPipelineState> depth_copy_pipeline {nil};
+    int step_dumps {0}, srv_dumps {0};
+    const char* dir_or_empty() const { return dump_dir ? dump_dir : "."; }
     std::vector<std::shared_ptr<Texture>> trace_rts;   // render targets drawn to during the traced frame, dumped at its Present
     std::string snapshot_path;
     std::string debug;   // UTSURO_GPUDEBUG: nodepth, nocull, noblend
@@ -114,6 +120,7 @@ struct Globals {
 };
 
 Globals* g = nullptr;
+bool g_png_alpha = false;   // debugging: RGBA16F targets are saved as their alpha channel
 
 // ---- format tables -------------------------------------------------------------------------
 
@@ -955,6 +962,47 @@ std::shared_ptr<InputLayout> CreateInputLayout(const std::vector<InputElement>& 
     return l;
 }
 
+/// D3D shaders sample a depth buffer's SRV as plain floats; Metal only allows that through a depth2d. Keeps a float copy of `t`
+/// (rebuilt whenever the depth texture was written since) and returns it.
+id<MTLTexture> DepthAsFloat(Texture& t) {
+    if (t.mtl == nil || t.mtl.textureType != MTLTextureType2D) return nil;
+    if (t.depth_copy == nil || t.depth_copy.width != t.mtl.width || t.depth_copy.height != t.mtl.height) {
+        MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float width:t.mtl.width height:t.mtl.height mipmapped:NO];
+        d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+        d.storageMode = MTLStorageModePrivate;
+        t.depth_copy = [g->device newTextureWithDescriptor:d];
+        t.copy_gen = ~0ull;
+    }
+    if (t.copy_gen == t.depth_gen) return t.depth_copy;
+    if (g->depth_copy_pipeline == nil) {
+        NSString* src = @"#include <metal_stdlib>\nusing namespace metal;\n"
+            "struct V { float4 pos [[position]]; float2 uv; };\n"
+            "vertex V vmain(uint vid [[vertex_id]]) { float2 p = float2((vid << 1) & 2, vid & 2); V o; o.pos = float4(p * 2.0 - 1.0, 0, 1); o.uv = float2(p.x, 1.0 - p.y); return o; }\n"
+            "fragment float4 fmain(V in [[stage_in]], depth2d<float> t [[texture(0)]]) { constexpr sampler s(filter::nearest, address::clamp_to_edge); float d = t.sample(s, in.uv); return float4(d, d, d, d); }\n";
+        NSError* err = nil;
+        id<MTLLibrary> lib = [g->device newLibraryWithSource:src options:nil error:&err];
+        if (lib == nil) { UT_ERROR("gpu: depth copy shader: %s", [[err localizedDescription] UTF8String]); return nil; }
+        MTLRenderPipelineDescriptor* pd = [MTLRenderPipelineDescriptor new];
+        pd.vertexFunction = [lib newFunctionWithName:@"vmain"];
+        pd.fragmentFunction = [lib newFunctionWithName:@"fmain"];
+        pd.colorAttachments[0].pixelFormat = MTLPixelFormatR32Float;
+        g->depth_copy_pipeline = [g->device newRenderPipelineStateWithDescriptor:pd error:&err];
+        if (g->depth_copy_pipeline == nil) { UT_ERROR("gpu: depth copy pipeline: %s", [[err localizedDescription] UTF8String]); return nil; }
+    }
+    EndEncoder();
+    MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = t.depth_copy;
+    pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> e = [Command() renderCommandEncoderWithDescriptor:pass];
+    [e setRenderPipelineState:g->depth_copy_pipeline];
+    [e setFragmentTexture:t.mtl atIndex:0];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [e endEncoding];
+    t.copy_gen = t.depth_gen;
+    return t.depth_copy;
+}
+
 void Draw(const DrawState& st, const DrawArgs& args) {
     std::scoped_lock lock {g->mutex};
     if (!st.vs) { ++g->stats.no_vs; return; }
@@ -962,6 +1010,9 @@ void Draw(const DrawState& st, const DrawArgs& args) {
     Shader* ps = st.ps && st.ps->translated.ok ? st.ps.get() : nullptr;
     if (ps != nullptr && !CompileShader(*ps)) { ++g->stats.bad_ps; return; }
     @autoreleasepool {
+        for (int stage = 0; stage < 2; ++stage)
+            for (int i = 0; i < 16; ++i)
+                if (st.srv[stage][i] && st.srv[stage][i]->texture && IsDepth(st.srv[stage][i]->texture->pixel_format)) DepthAsFloat(*st.srv[stage][i]->texture);
         int width = 0, height = 0;
         if (!BeginPass(st, &width, &height)) { ++g->stats.no_pass; return; }
         uint32_t strides[16] = {};
@@ -970,6 +1021,7 @@ void Draw(const DrawState& st, const DrawArgs& args) {
         if (pso == nil) { ++g->stats.no_pso; return; }
         id<MTLRenderCommandEncoder> e = g->encoder;
         [e setRenderPipelineState:pso];
+        if (st.dsv && st.dsv->texture && (st.depth_stencil.bytes.size() < 8 || (Rd<uint32_t>(st.depth_stencil.bytes, 0) != 0 && Rd<uint32_t>(st.depth_stencil.bytes, 4) != 0))) ++st.dsv->texture->depth_gen;   // this draw may write depth
 
         // Fixed-function state.
         bool has_depth = st.dsv && st.dsv->texture;
@@ -1020,7 +1072,10 @@ void Draw(const DrawState& st, const DrawArgs& args) {
             for (int i = 0; i < 16; ++i) {
                 if (!(rf.textures & (1u << i))) continue;
                 id<MTLTexture> tex = nil;
-                if (st.srv[stage][i] && st.srv[stage][i]->texture) tex = ViewOf(*st.srv[stage][i]->texture, st.srv[stage][i]->desc, false);
+                if (st.srv[stage][i] && st.srv[stage][i]->texture) {
+                    Texture& tx = *st.srv[stage][i]->texture;
+                    tex = IsDepth(tx.pixel_format) && tx.depth_copy != nil ? tx.depth_copy : ViewOf(tx, st.srv[stage][i]->desc, false);
+                }
                 if (tex == nil) tex = DummyTexture(rf.texture_dimension[i]);
                 if (stage == 0) [e setVertexTexture:tex atIndex:i];
                 else [e setFragmentTexture:tex atIndex:i];
@@ -1042,8 +1097,8 @@ void Draw(const DrawState& st, const DrawArgs& args) {
             ++g->trace_draws;
             if (st.rtv[0] && st.rtv[0]->texture && std::find(g->trace_rts.begin(), g->trace_rts.end(), st.rtv[0]->texture) == g->trace_rts.end()) g->trace_rts.push_back(st.rtv[0]->texture);
             id<MTLTexture> rt0 = st.rtv[0] && st.rtv[0]->texture ? ViewOf(*st.rtv[0]->texture, st.rtv[0]->desc, true) : nil;
-            UT_INFO("gpu: draw %s count %u inst %u topo %u vs %p(#%d) ps %p(#%d) layout %p rt0 %ux%u fmt %lu depth %d vp %.0fx%.0f+%.0f,%.0f cb0 %p tex0 %p blend %zu", args.indexed ? "indexed" : "plain", args.count, args.instances, st.topology,
-                    (void*)st.vs.get(), st.vs->serial, (void*)st.ps.get(), st.ps ? st.ps->serial : 0, (void*)st.layout.get(), rt0 ? (unsigned)rt0.width : 0, rt0 ? (unsigned)rt0.height : 0, rt0 ? (unsigned long)rt0.pixelFormat : 0, has_depth,
+            UT_INFO("gpu: draw %s count %u inst %u topo %u vs %p(#%d) ps %p(#%d) layout %p rt0 [%p] %ux%u fmt %lu depth %d vp %.0fx%.0f+%.0f,%.0f cb0 %p tex0 %p blend %zu", args.indexed ? "indexed" : "plain", args.count, args.instances, st.topology,
+                    (void*)st.vs.get(), st.vs->serial, (void*)st.ps.get(), st.ps ? st.ps->serial : 0, (void*)st.layout.get(), st.rtv[0] && st.rtv[0]->texture ? (__bridge void*)st.rtv[0]->texture->mtl : nullptr, rt0 ? (unsigned)rt0.width : 0, rt0 ? (unsigned)rt0.height : 0, rt0 ? (unsigned long)rt0.pixelFormat : 0, has_depth,
                     st.num_viewports ? st.viewports[0].w : 0.f, st.num_viewports ? st.viewports[0].h : 0.f, st.num_viewports ? st.viewports[0].x : 0.f, st.num_viewports ? st.viewports[0].y : 0.f,
                     (void*)st.cb[0][0].buffer.get(), (void*)st.srv[1][0].get(), st.blend.bytes.size());
         }
@@ -1059,6 +1114,11 @@ void Draw(const DrawState& st, const DrawArgs& args) {
                     const size_t count = std::min<size_t>(b.size ? b.size : b.buffer->size, b.buffer->size) / 4;
                     for (size_t k = 0; k < count; ++k) nz += dw[k] != 0;
                     UT_INFO("gpu:   %s cb%d has %zu non-zero dwords of %zu", stage ? "ps" : "vs", slot, nz, count);
+                    if (count <= 80) {
+                        std::string all;
+                        for (size_t k = 0; k < count; ++k) { char t[32]; std::snprintf(t, sizeof t, "%g%s", reinterpret_cast<const float*>(dw)[k], (k % 4 == 3) ? " | " : " "); all += t; }
+                        UT_INFO("gpu:   %s cb%d all: %s", stage ? "ps" : "vs", slot, all.c_str());
+                    }
                 }
                 const float* f = reinterpret_cast<const float*>(BufferData(*b.buffer) + b.offset);
                 UT_INFO("gpu:   %s cb%d (%u bytes, off %u, ring %d): %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g", stage ? "ps" : "vs", slot, b.buffer->size, b.offset, b.buffer->ring_frame,
@@ -1085,8 +1145,20 @@ void Draw(const DrawState& st, const DrawArgs& args) {
                 const NSUInteger mx = std::max<NSUInteger>(1, tx.mtl.width / 2), my = std::max<NSUInteger>(1, tx.mtl.height / 2);
                 if (!IsDepth(tx.pixel_format) && tx.mtl.textureType == MTLTextureType2D && (tx.pixel_format == MTLPixelFormatRGBA8Unorm || tx.pixel_format == MTLPixelFormatBGRA8Unorm))
                     [tx.mtl getBytes:px bytesPerRow:64 fromRegion:MTLRegionMake2D(mx, my, 4, 1) mipmapLevel:0];
-                UT_INFO("gpu:   ps t%d: %lux%lu fmt %lu mips %lu uploads %u centre %02x%02x%02x%02x %02x%02x%02x%02x", i, (unsigned long)tx.mtl.width, (unsigned long)tx.mtl.height, (unsigned long)tx.pixel_format,
+                UT_INFO("gpu:   ps t%d [%p]: %lux%lu fmt %lu mips %lu uploads %u centre %02x%02x%02x%02x %02x%02x%02x%02x", i, (__bridge void*)tx.mtl, (unsigned long)tx.mtl.width, (unsigned long)tx.mtl.height, (unsigned long)tx.pixel_format,
                         (unsigned long)tx.mtl.mipmapLevelCount, tx.uploads, px[0], px[1], px[2], px[3], px[4], px[5], px[6], px[7]);
+            }
+            if (args.indexed && args.count == 6 && st.index_buffer && st.vb[0].buffer && st.vb[0].stride >= 24) {
+                const uint8_t* ib = BufferData(*st.index_buffer) + st.index_offset + args.start * (st.index_format == 42 ? 4 : 2);
+                std::string idx;
+                for (int k = 0; k < 6; ++k) { char t[16]; std::snprintf(t, sizeof t, "%u ", st.index_format == 42 ? reinterpret_cast<const uint32_t*>(ib)[k] : reinterpret_cast<const uint16_t*>(ib)[k]); idx += t; }
+                std::string vtx;
+                const uint32_t nv = std::min<uint32_t>(6, st.vb[0].buffer->size / st.vb[0].stride);
+                for (uint32_t k = 0; k < nv; ++k) {
+                    const float* v = reinterpret_cast<const float*>(BufferData(*st.vb[0].buffer) + st.vb[0].offset + k * st.vb[0].stride);
+                    char t[96]; std::snprintf(t, sizeof t, "[%g %g %g %g | %g %g] ", v[0], v[1], v[2], v[3], v[4], v[5]); vtx += t;
+                }
+                UT_INFO("gpu:   quad indices %s base %d; vertices %s", idx.c_str(), args.base_vertex, vtx.c_str());
             }
             if (st.vb[0].buffer) {
                 const float* f = reinterpret_cast<const float*>(BufferData(*st.vb[0].buffer) + st.vb[0].offset);
@@ -1111,6 +1183,37 @@ void Draw(const DrawState& st, const DrawArgs& args) {
                        instanceCount:args.instances baseVertex:args.base_vertex baseInstance:args.start_instance];
         } else {
             [e drawPrimitives:prim vertexStart:args.start vertexCount:args.count instanceCount:args.instances baseInstance:args.start_instance];
+        }
+        if (g->frame_count == g->trace_frame && g->dump_dir != nullptr && std::getenv("UTSURO_STEPDUMP") && g->trace_draws > 0 && ps != nullptr && g->srv_dumps < 3 && st.rtv[0] && st.rtv[0]->texture &&
+            st.rtv[0]->texture->mtl.width >= 1900 && st.rtv[0]->texture->pixel_format == MTLPixelFormatRGBA8Unorm && std::popcount(ps->translated.reflection.textures) >= 4) {
+            // Debug: the inputs of the final composite.
+            EndEncoder();
+            [Command() commit];
+            [g->command waitUntilCompleted];
+            g->command = nil;
+            for (int i = 0; i < 16; ++i) {
+                if (!(ps->translated.reflection.textures & (1u << i)) || !st.srv[1][i] || !st.srv[1][i]->texture) continue;
+                char path[512];
+                std::snprintf(path, sizeof path, "%s/comp%d_t%d_%lux%lu.png", g->dir_or_empty(), g->srv_dumps, i, (unsigned long)st.srv[1][i]->texture->mtl.width, (unsigned long)st.srv[1][i]->texture->mtl.height);
+                SavePng(*st.srv[1][i]->texture, path);
+                std::snprintf(path, sizeof path, "%s/comp%d_t%d_alpha.png", g->dir_or_empty(), g->srv_dumps, i);
+                g_png_alpha = true; SavePng(*st.srv[1][i]->texture, path); g_png_alpha = false;
+            }
+            ++g->srv_dumps;
+        }
+        if (g->frame_count == g->trace_frame && g->dump_dir != nullptr && std::getenv("UTSURO_STEPDUMP") && g->trace_draws > 0 && g->trace_draws < 1500 && st.rtv[0] && st.rtv[0]->texture && st.rtv[0]->texture->mtl.width <= 960 && st.rtv[0]->texture->mtl.width >= 400 && g->step_dumps < 400) {
+            // Debug: the render target after this draw, one picture per draw.
+            EndEncoder();
+            [Command() commit];
+            [g->command waitUntilCompleted];
+            g->command = nil;
+            char path[512];
+            std::snprintf(path, sizeof path, "%s/step_%02d_draw%u_ps%d_%ux%u.png", g->dump_dir, g->step_dumps++, g->trace_draws, st.ps ? st.ps->serial : 0, (unsigned)st.rtv[0]->texture->mtl.width, (unsigned)st.rtv[0]->texture->mtl.height);
+            SavePng(*st.rtv[0]->texture, path);
+            std::snprintf(path, sizeof path, "%s/step_%02d_draw%u_ps%d_%ux%u_alpha.png", g->dump_dir, g->step_dumps - 1, g->trace_draws, st.ps ? st.ps->serial : 0, (unsigned)st.rtv[0]->texture->mtl.width, (unsigned)st.rtv[0]->texture->mtl.height);
+            g_png_alpha = true;
+            SavePng(*st.rtv[0]->texture, path);
+            g_png_alpha = false;
         }
         if (false) {
             // Debug: how much of the render target is lit after this draw?
@@ -1150,6 +1253,7 @@ void ClearRenderTarget(const TextureView& view, const float color[4]) {
 void ClearDepthStencil(const TextureView& view, uint32_t flags, float depth, uint8_t stencil) {
     std::scoped_lock lock {g->mutex};
     if (!view.texture || view.texture->mtl == nil) return;
+    ++view.texture->depth_gen;
     @autoreleasepool {
         EndEncoder();
         MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -1242,7 +1346,7 @@ bool SavePng(Texture& texture, const std::string& path) {
             const _Float16* hp = reinterpret_cast<const _Float16*>(raw.data());
             for (size_t i = 0; i < w * h; ++i) {
                 for (int c = 0; c < 3; ++c) {
-                    float v = static_cast<float>(hp[i * 4 + c]);
+                    float v = static_cast<float>(hp[i * 4 + (g_png_alpha ? 3 : c)]);
                     v = v < 0 ? 0 : v > 1 ? 1 : v;
                     px[i * 4 + c] = static_cast<uint8_t>(v * 255.f + 0.5f);
                 }
@@ -1365,6 +1469,8 @@ void RequestTrace() {
     std::scoped_lock lock {g->mutex};
     g->trace_frame = g->frame_count + 3;
     g->trace_draws = 0;
+    g->step_dumps = 0;
+    g->srv_dumps = 0;
 }
 
 void Flush() {

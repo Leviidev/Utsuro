@@ -805,7 +805,13 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
            "static inline uint4 ut_firstbit_lo(uint4 a) { return select(ctz(a), uint4(0xFFFFFFFFu), a == uint4(0u)); }\n"
            "static inline uint4 ut_firstbit_shi(int4 a) {\n"
            "    uint4 u = as_type<uint4>(select(a, ~a, a < int4(0)));\n"
-           "    return select(uint4(31u) - clz(u), uint4(0xFFFFFFFFu), u == uint4(0u));\n}\n\n";
+           "    return select(uint4(31u) - clz(u), uint4(0xFFFFFFFFu), u == uint4(0u));\n}\n"
+           // D3D stores NaN as 0 (and clamps infinities) in packed and unorm targets; Metal keeps them, and one NaN pixel blurs into a block.
+           "static inline float4 ut_clean(float4 v) {\n"
+           "    uint4 b = as_type<uint4>(v);\n"
+           "    uint4 mag = b & uint4(0x7fffffffu);\n"
+           "    float4 r = select(v, as_type<float4>((b & uint4(0x80000000u)) | uint4(0x477fe000u)), mag == uint4(0x7f800000u));\n"
+           "    return select(r, float4(0.0f), mag > uint4(0x7f800000u));\n}\n\n";
     if (!t.icb.empty()) {
         src << "constant float4 icb[" << t.icb.size() / 4 << "] = {\n";
         for (size_t i = 0; i + 3 < t.icb.size(); i += 4) {
@@ -897,7 +903,7 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
         epilogue << "    return out;\n";
     } else {
         epilogue << "    PSOut out;\n";
-        for (uint32_t reg : t.output_regs) epilogue << "    out.c" << reg << " = o" << reg << ";\n";
+        for (uint32_t reg : t.output_regs) epilogue << "    out.c" << reg << " = ut_clean(o" << reg << ");\n";
         if (t.refl.writes_depth) epilogue << "    out.depth = oDepth;\n";
         epilogue << "    return out;\n";
     }
