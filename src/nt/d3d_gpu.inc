@@ -387,6 +387,14 @@ TileModel BuildTileModel(const gpu::TextureDesc& info, uint32_t tile_mode, uint3
 /// Copies a placement texture's texels into the host texture.
 void UploadPlacement(Res& r) {
     r.placement_dirty = false;
+    if (static const bool stats = std::getenv("UTSURO_UPLOADSTATS") != nullptr; stats) {
+        static std::atomic<uint64_t> uploads {0}, bytes {0};
+        static std::atomic<int64_t> last_report {0};
+        ++uploads;
+        if (r.texture) { const auto& i = gpu::TextureInfo(*r.texture); bytes += static_cast<uint64_t>(i.width) * i.height * 2; }
+        const int64_t now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (now - last_report.load() >= 3) { last_report = now; UT_INFO("d3d: placement uploads so far: %llu textures, about %llu MB", (unsigned long long)uploads.load(), (unsigned long long)(bytes.load() >> 20)); }
+    }
     if (!r.texture || r.placement == 0 || (r.bind & 0x60) != 0) return;   // render targets and depth buffers are written by the GPU
     const auto& info = gpu::TextureInfo(*r.texture);
     uint32_t bytes, block;
@@ -950,6 +958,9 @@ void RegisterGpuOverrides() {
             }
             gpu::Draw(d, rd.args);
         }
+        // The title records a list per frame and runs it once; the host never frees objects, so the recording (with the data each draw
+        // copied) goes now.
+        std::vector<RecordedDraw>().swap(list->recorded);
         return 0;
     });
 
