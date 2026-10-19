@@ -1,0 +1,1 @@
+D 75d4 8  ; mov qword ptr [rbp - 0x59], 0x7ffe03d8

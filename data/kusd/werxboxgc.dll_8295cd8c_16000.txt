@@ -1,0 +1,1 @@
+A 7440 7  ; mov al, byte ptr [0x7ffe02d4]

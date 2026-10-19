@@ -1,0 +1,3 @@
+D 598a4 5  ; cmp eax, 0x7ffe0000
+D 925a3 6  ; cmp ecx, 0x7ffe0000
+D 318f94 5  ; cmp eax, 0x7ffe0000

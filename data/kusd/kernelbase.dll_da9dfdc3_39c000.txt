@@ -1,0 +1,55 @@
+B 7f22 5 eax  ; mov eax, 0x7ffe0014
+A efb3 7  ; mov eax, dword ptr [0x7ffe0014]
+B 11ad4 5 eax  ; mov eax, 0x7ffe0320
+A 11adc 7  ; mov ebx, dword ptr [0x7ffe0004]
+B 11d43 5 eax  ; mov eax, 0x7ffe0320
+A 11d4b 7  ; mov ecx, dword ptr [0x7ffe0004]
+A 4951a 8  ; mov ax, word ptr [0x7ffe026a]
+B 5aadd 5 eax  ; mov eax, 0x7ffe0320
+A 5aae5 7  ; mov esi, dword ptr [0x7ffe0004]
+A 5e718 7  ; mov eax, dword ptr [0x7ffe0004]
+B 6e2d4 6 r11d  ; mov r11d, 0x7ffe0320
+A 6e43b 7  ; mov ecx, dword ptr [0x7ffe0004]
+A 6eb88 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 6ec40 6 r11d  ; mov r11d, 0x7ffe0320
+B 6fedd 5 eax  ; mov eax, 0x7ffe0014
+A 7435e 8  ; test byte ptr [0x7ffe02f0], 0x40
+B 81792 5 esi  ; mov esi, 0x7ffe03b0
+B 82d3e 5 eax  ; mov eax, 0x7ffe0320
+A 82d46 7  ; mov ebx, dword ptr [0x7ffe0004]
+A 83633 7  ; mov eax, dword ptr [0x7ffe026c]
+A 83640 7  ; cmp edx, dword ptr [0x7ffe0270]
+A 8a641 7  ; cmp eax, dword ptr [0x7ffe037c]
+A ae4b1 7  ; mov ecx, dword ptr [0x7ffe0004]
+B ae4c3 6 r13d  ; mov r13d, 0x7ffe0320
+B ae55d 5 eax  ; mov eax, 0x7ffe0004
+A c9af4 8  ; mov rbx, qword ptr [0x7ffe0008]
+A c9b38 8  ; mov rcx, qword ptr [0x7ffe0008]
+B d2c7f 5 eax  ; mov eax, 0x7ffe0320
+A d2c87 7  ; mov edx, dword ptr [0x7ffe0004]
+B d44dd 5 eax  ; mov eax, 0x7ffe0014
+B e77a8 5 eax  ; mov eax, 0x7ffe0014
+B fd126 5 eax  ; mov eax, 0x7ffe0320
+A fd134 8  ; mov r10d, dword ptr [0x7ffe0004]
+B 10a45c 5 eax  ; mov eax, 0x7ffe0320
+A 10a464 7  ; mov ebx, dword ptr [0x7ffe0004]
+B 10ac9c 5 esi  ; mov esi, 0x7ffe0320
+A 10acef 7  ; mov edx, dword ptr [0x7ffe0004]
+A 10ad2a 7  ; mov ecx, dword ptr [0x7ffe0004]
+A 10ad50 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 124b6b 5 eax  ; mov eax, 0x7ffe0014
+B 151159 5 eax  ; mov eax, 0x7ffe03c4
+B 15123d 5 eax  ; mov eax, 0x7ffe03c4
+B 151319 5 eax  ; mov eax, 0x7ffe03c4
+B 1513f9 5 eax  ; mov eax, 0x7ffe03c4
+B 1523a9 5 eax  ; mov eax, 0x7ffe03c4
+B 15248d 5 eax  ; mov eax, 0x7ffe03c4
+B 152a29 5 eax  ; mov eax, 0x7ffe03c4
+B 152b09 5 eax  ; mov eax, 0x7ffe03c4
+B 15665c 5 eax  ; mov eax, 0x7ffe0030
+B 156727 5 edx  ; mov edx, 0x7ffe0030
+B 156757 5 edx  ; mov edx, 0x7ffe0030
+B 172834 5 eax  ; mov eax, 0x7ffe0320
+A 17283c 7  ; mov edx, dword ptr [0x7ffe0004]
+B 1786f5 5 ecx  ; mov ecx, 0x7ffe0320
+A 1786fd 7  ; mov eax, dword ptr [0x7ffe0004]

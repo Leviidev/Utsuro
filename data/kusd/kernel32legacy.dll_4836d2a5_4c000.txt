@@ -1,0 +1,3 @@
+B 30c2d 5 esi  ; mov esi, 0x7ffe0008
+B 31044 5 ecx  ; mov ecx, 0x7ffe0008
+B 3642d 5 ebx  ; mov ebx, 0x7ffe0030

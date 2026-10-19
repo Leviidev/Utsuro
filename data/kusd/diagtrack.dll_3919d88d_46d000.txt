@@ -1,0 +1,10 @@
+A a6872 9  ; movsx rax, word ptr [0x7ffe02c4]
+A d755c 7  ; mov eax, dword ptr [0x7ffe02e4]
+A 187e9e 7  ; mov eax, dword ptr [0x7ffe02c4]
+A 188ce9 7  ; mov eax, dword ptr [0x7ffe037c]
+D 1d3dec 7  ; mov qword ptr [r8], 0x7ffe0000
+A 1e4bdc 8  ; mov r8d, dword ptr [0x7ffe02c4]
+A 1e65c9 7  ; mov eax, dword ptr [0x7ffe02c4]
+A 269de1 8  ; mov r9d, dword ptr [0x7ffe02c4]
+A 27c20a 9  ; mov r8w, word ptr [0x7ffe02c4]
+A 30c7ce 7  ; mov edx, dword ptr [0x7ffe02c4]

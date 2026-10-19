@@ -1,0 +1,13 @@
+A 109431 8  ; cmp byte ptr [0x7ffe02d4], 0
+A 14b179 7  ; cmp byte ptr [0x7ffe02d4], al
+A 14b65f 7  ; cmp byte ptr [0x7ffe02d4], al
+A 17addc 7  ; cmp byte ptr [0x7ffe02d4], al
+A 1b061d 7  ; cmp byte ptr [0x7ffe02d4], al
+A 1ba4d3 7  ; mov al, byte ptr [0x7ffe02d4]
+A 1c30bf 7  ; cmp byte ptr [0x7ffe02d4], al
+A 1d4881 7  ; cmp byte ptr [0x7ffe02d4], al
+A 1d4944 7  ; cmp byte ptr [0x7ffe02d4], al
+A 1d49c9 7  ; cmp byte ptr [0x7ffe02d4], al
+A 1d4cf9 7  ; cmp byte ptr [0x7ffe02d4], al
+A 1d4e0e 7  ; cmp byte ptr [0x7ffe02d4], al
+A 1f3762 7  ; cmp byte ptr [0x7ffe02d4], bl

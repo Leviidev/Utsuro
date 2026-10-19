@@ -1,0 +1,6 @@
+B 115cd 5 esi  ; mov esi, 0x7ffe0030
+B 29de3 6 r15d  ; mov r15d, 0x7ffe0030
+B 29ff5 5 esi  ; mov esi, 0x7ffe0030
+B 2a1ff 5 esi  ; mov esi, 0x7ffe0030
+B 2a270 6 r14d  ; mov r14d, 0x7ffe0030
+B 5feb5 5 ebx  ; mov ebx, 0x7ffe0030

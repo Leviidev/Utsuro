@@ -1,0 +1,2 @@
+B 3f1c 5 eax  ; mov eax, 0x7ffe0320
+A 3f24 7  ; mov esi, dword ptr [0x7ffe0004]

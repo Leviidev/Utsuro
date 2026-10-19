@@ -1,0 +1,1 @@
+A 2750 8  ; test byte ptr [0x7ffe02f0], 0x20

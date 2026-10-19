@@ -617,7 +617,13 @@ void Kernel::RegisterSyscalls() {
     for (const auto& [name, address] : exports) {
         if (name.compare(0, 2, "Nt") != 0) continue;
         const auto* b = reinterpret_cast<const uint8_t*>(address);
-        if (b[0] == 0x4c && b[1] == 0x8b && b[2] == 0xd1 && b[3] == 0xb8 && b[8] == 0x0f && b[9] == 0x05) {
+        // `mov r10, rcx; mov eax, N; [test byte [KUSER+0x308], 1; jne ...;] syscall`: the later OS builds put a check before the syscall.
+        bool stub = b[0] == 0x4c && b[1] == 0x8b && b[2] == 0xd1 && b[3] == 0xb8;
+        if (stub) {
+            stub = false;
+            for (int i = 8; i + 1 < 24; ++i) if (b[i] == 0x0f && b[i + 1] == 0x05) { stub = true; break; }
+        }
+        if (stub) {
             uint32_t n;
             std::memcpy(&n, b + 4, 4);
             auto h = handlers_.find(name);

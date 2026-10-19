@@ -1,0 +1,1 @@
+A 2b4ee 8  ; cmp byte ptr [0x7ffe02d4], 0

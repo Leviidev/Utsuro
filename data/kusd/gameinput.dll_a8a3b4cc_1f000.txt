@@ -1,0 +1,4 @@
+F 92e6 6 rax  ; add rax, 0x7ffe0000
+B b3bf 5 eax  ; mov eax, 0x7ffe0014
+B b46b 5 eax  ; mov eax, 0x7ffe0014
+F d82e 6 rax  ; add rax, 0x7ffe0000

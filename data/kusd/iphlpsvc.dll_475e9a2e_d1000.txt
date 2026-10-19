@@ -1,0 +1,4 @@
+A 246da 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 246e8 5 eax  ; mov eax, 0x7ffe0320
+A 3f4d6 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 3f4dd 5 eax  ; mov eax, 0x7ffe0320

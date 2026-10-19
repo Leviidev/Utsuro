@@ -1,0 +1,3 @@
+A cd88 8  ; test byte ptr [0x7ffe02f0], sil
+A 150cc 7  ; mov eax, dword ptr [0x7ffe037c]
+B 3fcd7 5 edx  ; mov edx, 0x7ffe0000

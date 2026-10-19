@@ -1,0 +1,9 @@
+A e20d 7  ; mov ecx, dword ptr [0x7ffe0004]
+B e214 5 eax  ; mov eax, 0x7ffe0320
+A e29c 7  ; mov edx, dword ptr [0x7ffe0004]
+B e2a3 5 eax  ; mov eax, 0x7ffe0320
+B e2d8 5 edx  ; mov edx, 0x7ffe0008
+G e2e3 3 0  ; mov r8d, edx
+A 116d0 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 116d7 5 eax  ; mov eax, 0x7ffe0320
+B b3f0f 5 eax  ; mov eax, 0x7ffe0014

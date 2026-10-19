@@ -1,0 +1,9 @@
+B 22cb9 5 eax  ; mov eax, 0x7ffe0014
+A 8e677 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 8e67e 5 eax  ; mov eax, 0x7ffe0320
+A 8f06e 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 8f075 5 eax  ; mov eax, 0x7ffe0320
+A 8f3dc 7  ; mov edx, dword ptr [0x7ffe0004]
+B 8f3e3 5 eax  ; mov eax, 0x7ffe0320
+B 92ed1 5 ebx  ; mov ebx, 0x7ffe0030
+A 97921 7  ; cmp byte ptr [0x7ffe02d4], bl

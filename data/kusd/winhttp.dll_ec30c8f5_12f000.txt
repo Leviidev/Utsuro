@@ -1,0 +1,2 @@
+A d0f6 11  ; test dword ptr [0x7ffe02d0], 0x10000
+A 6b7db 11  ; test dword ptr [0x7ffe02d0], 0x10000

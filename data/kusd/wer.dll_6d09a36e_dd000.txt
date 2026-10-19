@@ -1,0 +1,2 @@
+B 2182c 6 r8d  ; mov r8d, 0x7ffe0000
+B 7887d 6 r9d  ; mov r9d, 0x7ffe0030

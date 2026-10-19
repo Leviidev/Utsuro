@@ -1,0 +1,7 @@
+A a6830 7  ; cmp byte ptr [0x7ffe02d4], al
+A a6a0e 7  ; mov ecx, dword ptr [0x7ffe0004]
+B a6a15 6 r14d  ; mov r14d, 0x7ffe0320
+B a6a1f 5 ebp  ; mov ebp, 0x7ffe0004
+B f6883 5 eax  ; mov eax, 0x7ffe0014
+B f696a 5 eax  ; mov eax, 0x7ffe0014
+F fbab6 6 rax  ; add rax, 0x7ffe0000

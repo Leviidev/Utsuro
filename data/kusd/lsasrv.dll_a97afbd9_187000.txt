@@ -1,0 +1,2 @@
+A 29aa8 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 29ab6 5 eax  ; mov eax, 0x7ffe0320

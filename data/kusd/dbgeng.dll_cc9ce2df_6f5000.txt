@@ -1,0 +1,14 @@
+B 35ddb 6 r8d  ; mov r8d, 0x7ffe0000
+B 360c6 5 ecx  ; mov ecx, 0x7ffe0000
+B 7297a 6 r8d  ; mov r8d, 0x7ffe0000
+D 729cb 8  ; mov qword ptr [rdx + 0x38], 0x7ffe0300
+F 729e1 6 rax  ; add rax, 0x7ffe02f8
+B 74136 5 ecx  ; mov ecx, 0x7ffe0000
+B 2b927d 5 edi  ; mov edi, 0x7ffe0000
+A 2e5b5c 8  ; test byte ptr [0x7ffe02d0], 0x10
+A 3cca02 7  ; mov eax, dword ptr [0x7ffe0008]
+A 3cca0d 7  ; mov eax, dword ptr [0x7ffe000c]
+A 3cca62 7  ; mov eax, dword ptr [0x7ffe0014]
+A 3cca6d 7  ; mov eax, dword ptr [0x7ffe0018]
+A 3cdea8 7  ; mov eax, dword ptr [0x7ffe0014]
+A 3cdeb3 7  ; mov eax, dword ptr [0x7ffe0018]

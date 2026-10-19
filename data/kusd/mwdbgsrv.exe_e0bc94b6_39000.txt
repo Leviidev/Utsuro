@@ -1,0 +1,11 @@
+B 262c 5 edx  ; mov edx, 0x7ffe0018
+G 2636 4 0  ; lea r8d, [rdx - 4]
+G 263a 4 0  ; lea r9d, [rdx + 4]
+A 16b20 7  ; mov eax, dword ptr [0x7ffe0014]
+A 16b2b 7  ; mov eax, dword ptr [0x7ffe0018]
+A 16b89 7  ; mov eax, dword ptr [0x7ffe0008]
+A 16b94 7  ; mov eax, dword ptr [0x7ffe000c]
+B 16ba9 5 eax  ; mov eax, 0x7ffe0320
+A 16bb1 7  ; mov ecx, dword ptr [0x7ffe0004]
+A 16c4a 7  ; mov ecx, dword ptr [0x7ffe0014]
+A 16c55 7  ; mov ecx, dword ptr [0x7ffe0018]

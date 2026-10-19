@@ -45,8 +45,8 @@ void Kernel::ApplyKusdPatches(const PeImage& pe, uint64_t base) {
         char kind;
         unsigned long long rva;
         int len;
-        char reg[16] = {};
-        if (std::sscanf(line, "%c %llx %d %15s", &kind, &rva, &len, reg) < 3) continue;
+        char reg[160] = {};
+        if (std::sscanf(line, "%c %llx %d %159s", &kind, &rva, &len, reg) < 3) continue;
         auto* code = reinterpret_cast<uint8_t*>(base + rva);
         // Offset within KUSER_SHARED_DATA, read back from the instruction itself.
         auto find_offset = [&](int from, int to) -> int64_t {
@@ -125,6 +125,42 @@ void Kernel::ApplyKusdPatches(const PeImage& pe, uint64_t base) {
                 put({static_cast<uint8_t>(0x48 | ((dest >> 3) ? 0x01 : 0x00)), 0x01, static_cast<uint8_t>(0xC0 | (scratch << 3) | (dest & 7))});
                 put({static_cast<uint8_t>(scratch == 2 ? 0x5A : 0x59)});
             }
+            stub[n++] = 0xE9;
+            const int64_t back = static_cast<int64_t>((reinterpret_cast<uint64_t>(code) + static_cast<uint64_t>(len)) - (kusd_stub_next_ + n + 4));
+            const int64_t fwd = static_cast<int64_t>(kusd_stub_next_ - (reinterpret_cast<uint64_t>(code) + 5));
+            if (back > INT32_MAX || back < INT32_MIN || fwd > INT32_MAX || fwd < INT32_MIN) { UT_ERROR("kusd: %s+%llx is out of jump range", name.c_str(), rva); continue; }
+            const int32_t back32 = static_cast<int32_t>(back), fwd32 = static_cast<int32_t>(fwd);
+            std::memcpy(stub + n, &back32, 4); n += 4;
+            code[0] = 0xE9;
+            std::memcpy(code + 1, &fwd32, 4);
+            for (int i = 5; i < len; ++i) code[i] = 0x90;
+            kusd_stub_next_ += (n + 15) & ~15ull;
+            ++b;
+        } else if (kind == 'H') {
+            // [base + index*scale + KUSD offset]: compute the address in r11 (saved around it) and run the instruction re-encoded as [r11].
+            char base_name[16] = {}, index_name[16] = {}, hex[96] = {};
+            int scale = 1;
+            unsigned long long offset = 0;
+            if (std::sscanf(reg, "%15[^,],%15[^,],%d,%llx,%95s", base_name, index_name, &scale, &offset, hex) != 5) { ++skipped; continue; }
+            const int base_reg = std::strcmp(base_name, "-") == 0 ? -1 : RegisterIndex(base_name);
+            const int index_reg = std::strcmp(index_name, "-") == 0 ? -1 : RegisterIndex(index_name);
+            const size_t new_len = std::strlen(hex) / 2;
+            if ((base_reg < 0 && std::strcmp(base_name, "-") != 0) || (index_reg < 0 && std::strcmp(index_name, "-") != 0) || len < 5) { ++skipped; continue; }
+            if (kusd_stub_next_ + 96 > kusd_ + 0x10000) { UT_ERROR("kusd: out of stub space"); break; }
+            auto* stub = reinterpret_cast<uint8_t*>(kusd_stub_next_);
+            size_t n = 0;
+            auto put = [&](std::initializer_list<uint8_t> bytes) { for (uint8_t v : bytes) stub[n++] = v; };
+            put({0x41, 0x53});                                            // push r11
+            put({0x49, 0xBB});                                            // mov r11, imm64
+            const uint64_t value = kusd_ + offset;
+            std::memcpy(stub + n, &value, 8); n += 8;
+            if (base_reg >= 0) put({static_cast<uint8_t>(0x49 | ((base_reg >> 3) << 2)), 0x01, static_cast<uint8_t>(0xC0 | ((base_reg & 7) << 3) | 3)});   // add r11, base
+            if (index_reg >= 0) {
+                const int log2 = scale == 8 ? 3 : scale == 4 ? 2 : scale == 2 ? 1 : 0;
+                put({static_cast<uint8_t>(0x4D | ((index_reg >> 3) << 1)), 0x8D, 0x1C, static_cast<uint8_t>((log2 << 6) | ((index_reg & 7) << 3) | 3)});   // lea r11, [r11 + index*scale]
+            }
+            for (size_t i = 0; i < new_len; ++i) { unsigned v; std::sscanf(hex + 2 * i, "%2x", &v); stub[n++] = static_cast<uint8_t>(v); }
+            put({0x41, 0x5B});                                            // pop r11
             stub[n++] = 0xE9;
             const int64_t back = static_cast<int64_t>((reinterpret_cast<uint64_t>(code) + static_cast<uint64_t>(len)) - (kusd_stub_next_ + n + 4));
             const int64_t fwd = static_cast<int64_t>(kusd_stub_next_ - (reinterpret_cast<uint64_t>(code) + 5));

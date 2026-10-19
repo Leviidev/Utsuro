@@ -1,0 +1,10 @@
+A 1d9e 8  ; test byte ptr [0x7ffe02f0], 0x20
+A 5ea8 7  ; mov edi, dword ptr [0x7ffe03c0]
+A de59 7  ; mov eax, dword ptr [0x7ffe03c0]
+B 13be6 5 ebx  ; mov ebx, 0x7ffe0014
+B 13d75 5 ecx  ; mov ecx, 0x7ffe0014
+B 14efe 5 eax  ; mov eax, 0x7ffe0320
+A 14f0a 8  ; mov r15d, dword ptr [0x7ffe0004]
+B 15be6 5 eax  ; mov eax, 0x7ffe0014
+B 173c2 5 eax  ; mov eax, 0x7ffe0320
+A 173ca 8  ; mov r14d, dword ptr [0x7ffe0004]

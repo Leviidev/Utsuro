@@ -1,0 +1,3 @@
+A 20970 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 20977 6 r15d  ; mov r15d, 0x7ffe0320
+B 20981 6 r12d  ; mov r12d, 0x7ffe0004

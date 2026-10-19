@@ -1,0 +1,1 @@
+D 658aa 10  ; test dword ptr [rbx + 0x288], 0x7ffe0ffd

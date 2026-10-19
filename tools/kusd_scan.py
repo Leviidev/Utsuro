@@ -5,7 +5,8 @@ usage: kusd_scan.py <out dir> <pe> [<pe> ...]
 Each output file is named <image>_<timestamp>_<sizeofimage>.txt, one record per line:
   A <rva> <len>                abs [disp32] operand, no base/index: becomes rip-relative
   B <rva> <len> <reg>          mov reg, imm (address as a value): becomes a jump to a stub
-  C <rva> <len>                indexed operand [idx*scale+disp32]: needs a hand stub (reported)
+  C <rva> <len>                indexed operand [idx*scale+disp32] that H could not encode (reported)
+  H <rva> <len> <base,idx,scale,off,newbytes>  [base+idx*scale+disp32]: the loader builds a stub that computes the address in r11 and runs `newbytes` (the instruction re-encoded as [r11])
   E <rva> <len>                mov qword ptr [rsp], imm32: stub stores the full 64-bit address
   F <rva> <len> <reg>          add reg64, imm32: stub adds the full 64-bit address
   G <rva> <len> <pos>          32-bit lea/mov/add on a register holding a relocated address: set REX.W at byte <pos>
@@ -14,7 +15,7 @@ Each output file is named <image>_<timestamp>_<sizeofimage>.txt, one record per 
 import os, sys, struct, re
 import pefile
 from capstone import Cs, CS_ARCH_X86, CS_MODE_64, CS_OP_MEM, CS_OP_IMM, CS_OP_REG
-from capstone.x86 import X86_REG_INVALID, X86_REG_RSP
+from capstone.x86 import X86_REG_INVALID, X86_REG_RSP, X86_REG_RIP
 
 LO, HI = 0x7FFE0000, 0x7FFE1000
 
@@ -30,6 +31,31 @@ def rex_pos(code):
         if 0x40 <= b <= 0x4F: return i
         if b not in (0x66, 0x67, 0xF2, 0xF3, 0x2E, 0x3E, 0x26, 0x36, 0x64, 0x65): return None
     return None
+
+
+PREFIXES = (0x66, 0x67, 0xF2, 0xF3, 0x2E, 0x3E, 0x26, 0x36, 0x64, 0x65)
+
+def h_form(ins, op):
+    """The instruction re-encoded with its [base+index*scale+disp32] operand as [r11], or None."""
+    b = bytes(ins.bytes)
+    if b[0] in (0xC4, 0xC5, 0x62) or ins.disp_size != 4 or ins.modrm_offset == 0: return None
+    if 0x67 in b[:4]: return None
+    m = op.mem
+    base = ins.reg_name(m.base) if m.base != X86_REG_INVALID else None
+    index = ins.reg_name(m.index) if m.index != X86_REG_INVALID else None
+    for r in (base, index):
+        if r is not None and (r.startswith('r11') or r in ('rsp', 'esp') or r[0] == 'e' and r not in ('eax', 'ecx', 'edx', 'ebx', 'ebp', 'esi', 'edi')): return None
+    if base is not None and not base.startswith('r'): return None
+    for o in ins.operands:
+        if o.type == CS_OP_REG and ins.reg_name(o.reg).startswith('r11'): return None
+    i = 0
+    while i < len(b) and b[i] in PREFIXES: i += 1
+    rexpos = i if i < len(b) and 0x40 <= b[i] <= 0x4F else None
+    mo, do = ins.modrm_offset, ins.disp_offset
+    start = i + (1 if rexpos is not None else 0)
+    rex = ((b[rexpos] | 0x01) & ~0x02) if rexpos is not None else 0x41
+    new = b[:i] + bytes([rex]) + b[start:mo] + bytes([(b[mo] & 0x38) | 0x03]) + b[do + 4:]
+    return (base or '-', index or '-', m.scale, (m.disp & 0xFFFFFFFF) - LO, new.hex())
 
 def derived(md, img, b_records, covered):
     """Instructions after a `mov r32, <kusd>` that keep the address in 32 bits, which a relocated
@@ -107,8 +133,12 @@ def scan(path):
                 hit = None
                 for op in ins.operands:
                     if op.type == CS_OP_MEM:
-                        if LO <= (op.mem.disp & 0xFFFFFFFF) < HI and op.mem.base == X86_REG_INVALID:
-                            hit = ('A', None) if op.mem.index == X86_REG_INVALID else ('C', None)
+                        if LO <= (op.mem.disp & 0xFFFFFFFF) < HI and op.mem.base != X86_REG_RIP:
+                            if op.mem.base == X86_REG_INVALID and op.mem.index == X86_REG_INVALID:
+                                hit = ('A', None)
+                            else:
+                                h = h_form(ins, op)
+                                hit = ('H', "%s,%s,%d,%x,%s" % h) if h is not None else ('C', None)
                     elif op.type == CS_OP_IMM and LO <= (op.imm & 0xFFFFFFFF) < HI and (op.imm >> 32) in (0, -1):
                         if ins.mnemonic == 'mov' and ins.operands[0].type == CS_OP_REG:
                             hit = ('B', ins.reg_name(ins.operands[0].reg))

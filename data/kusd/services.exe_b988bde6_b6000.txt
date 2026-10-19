@@ -1,0 +1,17 @@
+A 146ab 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 146b5 5 eax  ; mov eax, 0x7ffe0320
+A 1510b 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 15112 5 eax  ; mov eax, 0x7ffe0320
+B 15196 5 eax  ; mov eax, 0x7ffe0004
+B 1519d 5 eax  ; mov eax, 0x7ffe0320
+A 1c4a3 8  ; test byte ptr [0x7ffe02f0], 0x10
+A 1fbff 7  ; mov eax, dword ptr [0x7ffe02c4]
+A 27dd3 8  ; test byte ptr [0x7ffe02f0], 0x10
+B 2bf0d 5 ebx  ; mov ebx, 0x7ffe0014
+A 31897 8  ; test byte ptr [0x7ffe02f0], 0x10
+A 4a774 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 4a77b 5 eax  ; mov eax, 0x7ffe0320
+A 5bbc5 8  ; test byte ptr [0x7ffe02f0], 0x10
+A 61185 7  ; cmp byte ptr [0x7ffe02d4], bl
+A 66e52 8  ; cmp byte ptr [0x7ffe02d4], dil
+B 69026 5 eax  ; mov eax, 0x7ffe0014
