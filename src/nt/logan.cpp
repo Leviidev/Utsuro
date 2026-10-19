@@ -121,6 +121,7 @@ struct AcpEmulator {
     uint32_t audio_frame {0};
     uint32_t dropped {0};
     uint32_t flowgraph {0};
+    uint32_t flowgraphs_pending {0};   ///< flowgraphs the title has submitted that the ACP has not run yet
     uint64_t sent {0};
     std::chrono::steady_clock::time_point last_report {};
 };
@@ -159,7 +160,7 @@ void DispatchClient(const AcpCommand& c) {
     }
     if (c.command_type == kCmdRegisterMessage) g_acp.enabled_messages |= c.message;
     else if (c.command_type == kCmdUnregisterMessage) g_acp.enabled_messages &= ~c.message;
-    else if (c.command_type == 0x1) g_acp.flowgraph = c.raw[1];   // LOAD_SHAPE_FLOWGRAPH: {numCommands, flowgraph, ...}
+    else if (c.command_type == 0x1) { g_acp.flowgraph = c.raw[1]; ++g_acp.flowgraphs_pending; }   // LOAD_SHAPE_FLOWGRAPH: {numCommands, flowgraph, ...}
     // Everything else (XMA, DMA, SRC, EQ, filter contexts) is accepted without being acted on: there is no audio path behind it yet.
 }
 
@@ -236,9 +237,11 @@ void RunChannel(Channel* channel) {
                         Send(m, messages, state, i);
                     }
                 }
-                // The beat the title's audio engine runs on: one flowgraph completion per frame.
+                // The beat the title's audio engine runs on: the ACP runs one submitted flowgraph per audio frame and says so. (A completion
+                // for a flowgraph that was never submitted would take the title's count of pending flowgraphs below zero.)
                 if (g_acp.enabled_messages & kMsgFlowgraphCompleted) {
-                    for (uint32_t beat = 0; beat < due; ++beat) {
+                    for (uint32_t beat = 0; beat < due && g_acp.flowgraphs_pending > 0; ++beat) {
+                        --g_acp.flowgraphs_pending;
                         AcpMessage m {};
                         m.type = kMsgFlowgraphCompleted;
                         m.dropped = g_acp.dropped;

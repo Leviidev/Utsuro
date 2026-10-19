@@ -1,6 +1,8 @@
 // unwind.cpp -- x64 stack unwinding from .pdata, for crash and hang reports.
 #include "nt/kernel.h"
 
+#include "nt/safe_mem.h"
+
 #include "engine/log.h"
 
 #include <cstring>
@@ -37,6 +39,12 @@ const RuntimeFunction* LookupFunction(uint64_t base, uint64_t pc) {
 
 std::vector<uint64_t> Kernel::Backtrace(uint64_t rip, const uint64_t* regs_in, int max_frames) {
     std::vector<uint64_t> frames;
+    bool bad = false;   // a stack the host cannot read (a thread that has exited, say) ends the walk
+    auto rd = [&bad](uint64_t address) -> uint64_t {
+        uint64_t value = 0;
+        if (!SafeRead(address, &value, 8)) bad = true;
+        return value;
+    };
     uint64_t regs[16];
     std::memcpy(regs, regs_in, sizeof(regs));
     uint64_t pc = rip;
@@ -48,8 +56,9 @@ std::vector<uint64_t> Kernel::Backtrace(uint64_t rip, const uint64_t* regs_in, i
             // Not in an image (a call through a bad pointer, or code in a heap): assume the
             // return address is at the top of the stack and carry on from there.
             if (depth == 0 && regs[4] > 0x10000) {
-                pc = *reinterpret_cast<uint64_t*>(regs[4]);
+                pc = rd(regs[4]);
                 regs[4] += 8;
+                if (bad) break;
                 continue;
             }
             break;
@@ -59,8 +68,9 @@ std::vector<uint64_t> Kernel::Backtrace(uint64_t rip, const uint64_t* regs_in, i
         uint64_t& rsp = regs[4];
         if (fn == nullptr) {
             // Leaf: the return address is at the top of the stack.
-            pc = *reinterpret_cast<uint64_t*>(rsp);
+            pc = rd(rsp);
             rsp += 8;
+            if (bad) break;
             continue;
         }
         uint32_t offset_in_function = static_cast<uint32_t>(pc - base) - fn->begin;
@@ -87,7 +97,7 @@ std::vector<uint64_t> Kernel::Backtrace(uint64_t rip, const uint64_t* regs_in, i
                 uint32_t slots = 1;
                 switch (op) {
                 case 0:  // PUSH_NONVOL
-                    if (applies) { regs[opinfo] = *reinterpret_cast<uint64_t*>(rsp); rsp += 8; }
+                    if (applies) { regs[opinfo] = rd(rsp); rsp += 8; }
                     break;
                 case 1:  // ALLOC_LARGE
                     if (opinfo == 0) { slots = 2; if (applies) rsp += static_cast<uint64_t>(codes[i + 1]) * 8; }
@@ -100,11 +110,11 @@ std::vector<uint64_t> Kernel::Backtrace(uint64_t rip, const uint64_t* regs_in, i
                     break;
                 case 4:  // SAVE_NONVOL
                     slots = 2;
-                    if (applies) regs[opinfo] = *reinterpret_cast<uint64_t*>(rsp + static_cast<uint64_t>(codes[i + 1]) * 8);
+                    if (applies) regs[opinfo] = rd(rsp + static_cast<uint64_t>(codes[i + 1]) * 8);
                     break;
                 case 5:  // SAVE_NONVOL_FAR
                     slots = 3;
-                    if (applies) regs[opinfo] = *reinterpret_cast<uint64_t*>(rsp + (static_cast<uint64_t>(codes[i + 1]) | (static_cast<uint64_t>(codes[i + 2]) << 16)));
+                    if (applies) regs[opinfo] = rd(rsp + (static_cast<uint64_t>(codes[i + 1]) | (static_cast<uint64_t>(codes[i + 2]) << 16)));
                     break;
                 case 8: slots = 2; break;   // SAVE_XMM128
                 case 9: slots = 3; break;   // SAVE_XMM128_FAR
@@ -124,9 +134,9 @@ std::vector<uint64_t> Kernel::Backtrace(uint64_t rip, const uint64_t* regs_in, i
                 cur = nullptr;
             }
         }
-        pc = *reinterpret_cast<uint64_t*>(rsp);
+        pc = rd(rsp);
         rsp += 8;
-        if (pc < 0x10000) break;
+        if (bad || pc < 0x10000) break;
     }
     return frames;
 }

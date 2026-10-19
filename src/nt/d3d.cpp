@@ -4,6 +4,7 @@
 // name, the rest succeed and hand out new objects where they return one.
 #include "nt/d3d.h"
 
+#include "nt/safe_mem.h"
 #include "nt/winrt.h"
 #include "nt/xg.h"
 
@@ -602,6 +603,7 @@ uint64_t PresentArray(Kernel&, NtThread&, SyscallArgs& a) {
         Obj* o = Runtime::Get().FromPointer(chains[i]);
         if (o == nullptr || !o->user) continue;
         Res* r = static_cast<Res*>(o->user.get());
+        ++g_frame;
         if (gpu::Available()) gpu::Present(r->texture, sync);
     }
     return 0;

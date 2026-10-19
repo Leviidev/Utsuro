@@ -22,6 +22,8 @@ struct Res {
     uint64_t placement {0};
     uint32_t tile_mode {0}, pitch {0};
     bool placement_dirty {false};
+    uint64_t placement_bytes {0};                ///< how much of the placement memory the texels occupy
+    uint64_t content_hash {0}, checked_frame {~0ull};   ///< to notice texels the CPU rewrote without telling anyone
     Res* base {nullptr};                         ///< a view's resource
     std::vector<RecordedDraw> recorded;          ///< a command list: what to replay
     std::vector<gpu::InputElement> elements;     ///< an input layout's elements
@@ -57,6 +59,7 @@ Res* ResAt(uint64_t pointer) {
 // their object, which the packets then carry to the draw.
 constexpr uint32_t kDescMagic = 0xD3D1FACEu;
 std::unordered_map<uint64_t, Res*> g_by_id;
+std::atomic<uint64_t> g_frame {0};   // presented frames
 std::vector<Res*> g_placed;   // placement textures, to find which a cache flush covers
 
 uint8_t* ObjMem(Obj& o) { return reinterpret_cast<uint8_t*>(o.blocks[0]); }
@@ -298,17 +301,12 @@ uint32_t TopologyOf(uint64_t hardware) {
 /// (m_pCeCurrent / m_pCeBiasedLimit / m_pCeLimit and m_pBatchCurrent / m_pBatchLimit of the context's tiny device).
 constexpr uint32_t kBatchCurrent = 0x20 + 0x20, kBatchLimit = 0x20 + 0x28, kCeCurrent = 0x20 + 0x30, kCeBiasedLimit = 0x20 + 0x38, kCeLimit = 0x20 + 0x40;
 
-#include <mach/mach.h>
-#include <mach/mach_vm.h>
 
 Kernel* g_kernel {nullptr};
 bool HostRange(uint64_t address, uint64_t bytes) { return g_kernel != nullptr && g_kernel->Vm().Contains(address, bytes); }
 
 /// Copies guest memory the title's descriptors point at, without trusting them: reserved-but-uncommitted pages fault, so the kernel does the read.
-bool SafeCopy(uint64_t address, void* destination, uint64_t bytes) {
-    mach_vm_size_t done = 0;
-    return address != 0 && mach_vm_read_overwrite(mach_task_self(), address, bytes, reinterpret_cast<mach_vm_address_t>(destination), &done) == KERN_SUCCESS && done == bytes;
-}
+bool SafeCopy(uint64_t address, void* destination, uint64_t bytes) { return SafeRead(address, destination, bytes); }
 
 /// Bytes per element (a texel, or a 4x4 block of a compressed format) and the element's size in texels.
 void ElementOf(uint32_t fmt, uint32_t* bytes, uint32_t* block) {
@@ -384,6 +382,37 @@ TileModel BuildTileModel(const gpu::TextureDesc& info, uint32_t tile_mode, uint3
     return m;
 }
 
+uint64_t HashWords(const uint8_t* p, size_t bytes, uint64_t h) {
+    const auto* w = reinterpret_cast<const uint64_t*>(p);
+    uint64_t a = h, b = h ^ 0x9E3779B97F4A7C15ull, c = h + 0xC2B2AE3D27D4EB4Full, d = h ^ 0x165667B19E3779F9ull;
+    size_t n = bytes / 8;
+    for (; n >= 4; n -= 4, w += 4) {
+        a = (a ^ w[0]) * 0x100000001B3ull; b = (b ^ w[1]) * 0x100000001B3ull; c = (c ^ w[2]) * 0x100000001B3ull; d = (d ^ w[3]) * 0x100000001B3ull;
+        a ^= a >> 29; b ^= b >> 31; c ^= c >> 27; d ^= d >> 33;
+    }
+    for (; n > 0; --n, ++w) a = (a ^ *w) * 0x100000001B3ull;
+    return a ^ (b << 1) ^ (c << 2) ^ (d << 3);
+}
+
+/// Whether a placement texture's memory differs from what was last uploaded (checked at most once per frame; the CPU may rewrite
+/// dynamic textures, such as glyph caches, without any call the host sees).
+bool PlacementChanged(Res& r) {
+    if (r.placement == 0 || r.placement_bytes == 0 || r.placement_bytes > (4u << 20) || (r.bind & 0x60) != 0) return false;
+    const uint64_t frame = g_frame.load();
+    if (r.checked_frame == frame) return false;
+    r.checked_frame = frame;
+    static thread_local std::vector<uint8_t> chunk(64 << 10);
+    uint64_t h = 0x84222325CBF29CE4ull;
+    for (uint64_t at = 0; at < r.placement_bytes; at += chunk.size()) {
+        const uint64_t n = std::min<uint64_t>(chunk.size(), r.placement_bytes - at);
+        if (!SafeCopy(r.placement + at, chunk.data(), n)) return false;
+        h = HashWords(chunk.data(), static_cast<size_t>(n & ~7ull), h);
+    }
+    if (h == r.content_hash) return false;
+    r.placement_dirty = true;
+    return true;
+}
+
 /// Copies a placement texture's texels into the host texture.
 void UploadPlacement(Res& r) {
     r.placement_dirty = false;
@@ -409,7 +438,13 @@ void UploadPlacement(Res& r) {
         const uint32_t row_pitch = r.pitch != 0 ? r.pitch : row;
         std::vector<uint8_t> texels(static_cast<size_t>(row_pitch) * rows);
         if (!SafeCopy(r.placement, texels.data(), texels.size())) return fail("not readable");
+        r.placement_bytes = texels.size();
         gpu::UploadTexture(*r.texture, 0, 0, nullptr, texels.data(), row_pitch, row_pitch * rows);
+        {   // what PlacementChanged hashes: the same bytes, in its chunk size
+            uint64_t h = 0x84222325CBF29CE4ull;
+            for (size_t at = 0; at < texels.size(); at += 64 << 10) h = HashWords(texels.data() + at, std::min<size_t>(64 << 10, texels.size() - at) & ~7ull, h);
+            r.content_hash = h;
+        }
         return;
     }
     char key[96];
@@ -427,6 +462,12 @@ void UploadPlacement(Res& r) {
         need = std::max<uint64_t>(need, lv.base + std::max<uint64_t>((lv.height + 7) / 8, 1) * std::max<uint64_t>(lv.row_stride, ((lv.width + 7) / 8) * lv.tile_bytes));
     std::vector<uint8_t> raw(static_cast<size_t>(need));
     if (!SafeCopy(r.placement, raw.data(), raw.size())) return fail("not readable");
+    r.placement_bytes = raw.size();
+    {
+        uint64_t h = 0x84222325CBF29CE4ull;
+        for (size_t at = 0; at < raw.size(); at += 64 << 10) h = HashWords(raw.data() + at, std::min<size_t>(64 << 10, raw.size() - at) & ~7ull, h);
+        r.content_hash = h;
+    }
     std::vector<uint8_t> linear;
     for (uint32_t slice = 0; slice < info.array_size; ++slice) {
         for (uint32_t mip = 0; mip < info.mips; ++mip) {
@@ -555,7 +596,7 @@ void BindStream(CtxState& s, gpu::DrawState& d, gpu::DrawArgs& args) {
             if (rf.textures & (1u << k)) {
                 if (const auto* t = get(kRegTexture + 0x20 * k)) {
                     if (Res* view = ResFromDescriptor(t->dw)) {
-                        if (view->base != nullptr && view->base->placement_dirty) UploadPlacement(*view->base);
+                        if (view->base != nullptr && (view->base->placement_dirty || PlacementChanged(*view->base))) UploadPlacement(*view->base);
                         d.srv[stage][k] = view->view;
                     }
                 }
@@ -931,14 +972,20 @@ void RegisterGpuOverrides() {
         return 0;
     });
 
-    // FlushGpuCacheRange(address, size, flags): the title wrote this memory with the CPU; the GPU's copy of it is stale.
+    // FlushGpuCacheRange(flags, address, size): the title wrote this memory with the CPU; the GPU's copy of it is stale.
     OverrideAll("FlushGpuCacheRange", [](Call& c) -> uint32_t {
-        const uint64_t from = c.Arg(0), to = c.Arg(0) + c.Arg(1);
+        const uint64_t from = c.Arg(1), to = c.Arg(1) + c.Arg(2);
         static std::atomic<int> shown {0};
         if (std::getenv("UTSURO_PLACE") != nullptr && shown++ < 12) UT_INFO("d3d: FlushGpuCacheRange(%#llx, %#llx, %#llx)", (unsigned long long)c.Arg(0), (unsigned long long)c.Arg(1), (unsigned long long)c.Arg(2));
         std::scoped_lock lock {g_res_mutex};
+        int hit = 0;
         for (Res* r : g_placed)
-            if (r->placement < to && r->placement + r->host_size > from) r->placement_dirty = true;
+            if (r->placement < to && r->placement + r->host_size > from) { r->placement_dirty = true; ++hit; }
+        if (static const bool log = std::getenv("UTSURO_PLACE") != nullptr; log) {
+            static std::atomic<int> total {0}, shown {0};
+            ++total;
+            if (shown++ < 25) UT_INFO("d3d: FlushGpuCacheRange(%#llx, %#llx): %d placement textures; %d flushes so far", (unsigned long long)from, (unsigned long long)(to - from), hit, total.load());
+        }
         return 0;
     });
 
@@ -961,6 +1008,15 @@ void RegisterGpuOverrides() {
         // The title records a list per frame and runs it once; the host never frees objects, so the recording (with the data each draw
         // copied) goes now.
         std::vector<RecordedDraw>().swap(list->recorded);
+        return 0;
+    });
+
+    // InsertFence(flags) returns the fence's value; titles spin until it is not zero. All work here is done when the call returns,
+    // so no fence stays pending (IsFencePending keeps answering "no").
+    OverrideAll("InsertFence", [](Call& c) -> uint32_t {
+        static std::atomic<uint64_t> next {1};
+        c.wide_result = next++;
+        c.wide_set = true;
         return 0;
     });
 
@@ -1021,6 +1077,7 @@ void RegisterGpuOverrides() {
     // ---- the swap chain ----
     OverrideAll("Present", [](Call& c) -> uint32_t {
         Res* r = c.obj.user ? static_cast<Res*>(c.obj.user.get()) : nullptr;
+        ++g_frame;
         if (gpu::Available()) gpu::Present(r ? r->texture : nullptr, static_cast<uint32_t>(c.Arg(0)));
         return 0;
     });

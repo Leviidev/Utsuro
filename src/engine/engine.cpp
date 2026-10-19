@@ -452,6 +452,7 @@ bool RecoverAlignmentFault(int signal, siginfo_t* info, void* raw_context) {
 /// The guest thread this host thread is running, for the code that has only a signal
 /// context to go on.
 thread_local GuestThread* g_current_guest_thread = nullptr;
+thread_local void* g_sample_token = nullptr;   // this host thread's GuestThread::Impl, for GuestThread::SampleRunning
 
 
 std::atomic<uint64_t> g_arena_end {0};
@@ -1118,6 +1119,7 @@ public:
     std::unique_ptr<CallRetStack> callret;
     GuestSegments segments;
     FEXCore::Core::InternalThreadState* thread {};
+    std::atomic<pthread_t> host_thread {};   ///< while Run() is on it
 
     FEXCore::UncheckedLongJump::JumpBuf exit_jump {};
     /// The signal that killed this guest thread, if one did.
@@ -1145,6 +1147,8 @@ RunResult GuestThread::Run() {
     g_current_guest_thread = this;
     g_current_guest_base = impl_->guest_base;
     impl_->syscalls.SetHostThread(pthread_self());
+    impl_->host_thread = pthread_self();
+    g_sample_token = impl_.get();
     // Timed, because a guest thread that takes seconds to reach its first instruction is
     // invisible from outside -- the process exists, its rip never moves -- and a forked
     // child that starts late is a child still standing in its parent's memory when the
@@ -1277,6 +1281,63 @@ bool GuestThread::CaptureCpuState(GuestCpuState* out) const {
     std::memcpy(out->mm, state.mm, sizeof(out->mm));
     out->fcw = state.FCW;
     out->ftw = state.AbridgedFTW;
+    return true;
+}
+
+namespace {
+struct Sample {
+    std::atomic<void*> token {nullptr};   ///< the GuestThread::Impl being sampled
+    std::atomic<bool> done {false};
+    uint64_t rip {};
+    uint64_t gregs[16] {};
+} g_sample;
+
+void SampleHandler(int, siginfo_t*, void* raw_context) {
+#if defined(__aarch64__) && defined(__APPLE__)
+    if (g_sample.token.load() == nullptr || g_sample.token.load() != g_sample_token || g_active.context == nullptr || g_active.thread == nullptr) return;
+    auto* context = static_cast<ucontext_t*>(raw_context);
+    auto& ss = context->uc_mcontext->__ss;
+    const auto pc = static_cast<uintptr_t>(arm_thread_state64_get_pc(ss));
+    if (g_active.delegator != nullptr && g_active.context->IsAddressInCodeBuffer(g_active.thread, pc)) {
+        // In generated code the guest registers live in host registers.
+        const auto& config = g_active.delegator->GetConfig();
+        g_sample.rip = g_active.context->RestoreRIPFromHostPC(g_active.thread, pc);
+        for (size_t i = 0; i < config.SRAGPRCount && i < 16; ++i) g_sample.gregs[i] = ss.__x[config.SRAGPRMapping[i]];
+    } else {
+        // In the emulator (a system call, say): the frame is current.
+        const auto& state = g_active.thread->CurrentFrame->State;
+        g_sample.rip = state.rip;
+        std::memcpy(g_sample.gregs, state.gregs, sizeof g_sample.gregs);
+    }
+    g_sample.token = nullptr;
+    g_sample.done = true;
+#else
+    (void)raw_context;
+#endif
+}
+std::mutex g_sample_mutex;
+} // namespace
+
+bool GuestThread::SampleRunning(uint64_t* rip, uint64_t gregs[16]) {
+    const pthread_t host = impl_->host_thread.load();
+    if (host == pthread_t {} || impl_->thread == nullptr) return false;
+    std::scoped_lock lock {g_sample_mutex};
+    static std::once_flag once;
+    std::call_once(once, [] {
+        struct sigaction sa {};
+        sa.sa_sigaction = SampleHandler;
+        sa.sa_flags = SA_SIGINFO | SA_RESTART;
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGUSR2, &sa, nullptr);
+    });
+    g_sample.done = false;
+    g_sample.token = impl_.get();
+    if (pthread_kill(host, SIGUSR2) != 0) { g_sample.token = nullptr; return false; }
+    for (int i = 0; i < 200 && !g_sample.done.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    g_sample.token = nullptr;
+    if (!g_sample.done.load()) return false;
+    *rip = g_sample.rip;
+    std::memcpy(gregs, g_sample.gregs, sizeof g_sample.gregs);
     return true;
 }
 

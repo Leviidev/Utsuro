@@ -43,6 +43,8 @@ class GuestThreadControl {
 public:
     virtual ~GuestThreadControl() = default;
     virtual bool CaptureCpuState(GuestCpuState* out) const { (void)out; return false; }
+    /// Where a thread that is running right now is (a signal samples it): its rip and the sixteen general registers. For debugging.
+    virtual bool SampleRunning(uint64_t* rip, uint64_t gregs[16]) { (void)rip; (void)gregs; return false; }
     virtual bool RestoreCpuState(const GuestCpuState& state) { (void)state; return false; }
     virtual void AdvanceGuestRip(int64_t bytes) { (void)bytes; }
     virtual void SetFsBase(uint64_t base) = 0;
@@ -144,6 +146,7 @@ public:
                           bool point_gs_at_it = false) override;
     uint64_t GuestRip() const override { return Rip(); }
     bool CaptureCpuState(GuestCpuState* out) const override;
+    bool SampleRunning(uint64_t* rip, uint64_t gregs[16]) override;
     bool RestoreCpuState(const GuestCpuState& state) override;
     void AdvanceGuestRip(int64_t bytes) override;
 
