@@ -43,13 +43,24 @@ Method Fn(const char* name, Out out, HostFn fn) { return Method {name, out, 0, f
 
 static std::vector<std::pair<uint64_t, uint64_t>> g_pending_user_added;   // (handler, sender)
 
-bool HasPendingUserAdded() { return !g_pending_user_added.empty(); }
+static int g_pumps_since_subscribe = 0;
+
+/// UserAdded is raised a little after the title subscribes (about 1.5 s of frames), as the console does, not at its first pump.
+bool HasPendingUserAdded() {
+    if (g_pending_user_added.empty()) return false;
+    return ++g_pumps_since_subscribe > 90;
+}
 
 GuestStep RaisePendingUserAdded(std::function<GuestStep(NtThread&, uint64_t)> then) {
     if (g_pending_user_added.empty()) return GuestStep::Call(0, {}, nullptr);   // not reached: callers check HasPendingUserAdded
     Runtime& r = Runtime::Get();
     const auto [handler, sender] = g_pending_user_added.front();
     UT_INFO("winrt: raising UserAdded to %#llx", (unsigned long long)handler);
+    if (std::getenv("UTSURO_DELEGATELOG") != nullptr) {
+        const uint64_t* vt = *reinterpret_cast<const uint64_t* const*>(handler);
+        UT_INFO("winrt:   delegate vtable %p: %#llx %#llx %#llx %#llx; [+8] %#llx [+0x128] %#llx", (const void*)vt, (unsigned long long)vt[0], (unsigned long long)vt[1], (unsigned long long)vt[2], (unsigned long long)vt[3],
+                (unsigned long long)*reinterpret_cast<const uint64_t*>(handler + 8), (unsigned long long)*reinterpret_cast<const uint64_t*>(handler + 0x128));
+    }
     g_pending_user_added.erase(g_pending_user_added.begin());
     Iface* args_iface = r.FindInterface("IUserAddedEventArgs");
     Obj* args = r.NewObject("Windows.Xbox.System.UserAddedEventArgs", {args_iface});
@@ -187,6 +198,44 @@ void RegisterClasses(Runtime& rt) {
     });
     rt.DefineClass("Windows.ApplicationModel.Store.CurrentApp", [](Runtime&) -> Obj* { return nullptr; }, &current_app);
 
+    // Windows.Xbox.Management.Deployment.PackageTransferManager.Current: everything is installed, nothing is transferring.
+    {
+        rt.Override("IPackageTransferManagerStatics", "get_Current", [](Call& c) -> uint32_t {
+            Runtime& r = Runtime::Get();
+            static Obj* manager = nullptr;
+            Iface* main = r.FindInterface("IPackageTransferManager");
+            if (manager == nullptr) manager = r.NewObject("Windows.Xbox.Management.Deployment.PackageTransferManager", {main, r.FindInterface("IPackageTransferManagerTransferInfo"), r.FindInterface("IPackageTransferManagerForChunkSpecifiers")});
+            ++manager->refs;
+            *c.Ptr<uint64_t>(0) = r.Pointer(*manager, *main);
+            return 0;
+        });
+        for (const char* name : {"IsChunkInstalled", "AreChunksInstalled"})
+            rt.Override("IPackageTransferManager", name, [](Call& c) -> uint32_t { *c.Ptr<uint8_t>(1) = 1; return 0; });
+        rt.Override("IPackageTransferManager", "get_TransferStatus", [](Call& c) -> uint32_t { *c.Ptr<uint32_t>(0) = 0; return 0; });
+    }
+
+    // Windows.Media.Devices.MediaDevice: the default audio endpoints are named, nothing else is present.
+    {
+        auto text = [](const char16_t* value) { return [value](Call& c) -> uint32_t { *c.Ptr<uint64_t>(0) = Runtime::Get().MakeHString(value); return 0; }; };
+        auto id = [](const char16_t* value) { return [value](Call& c) -> uint32_t { *c.Ptr<uint64_t>(1) = Runtime::Get().MakeHString(value); return 0; }; };
+        Method sel_capture = Method {"GetAudioCaptureSelector", Out::Ptr, 0, false, false, nullptr};
+        Method sel_render = Method {"GetAudioRenderSelector", Out::Ptr, 0, false, false, nullptr};
+        Method sel_video = Method {"GetVideoCaptureSelector", Out::Ptr, 0, false, false, nullptr};
+        sel_capture.fn = text(u"audio-capture");
+        sel_render.fn = text(u"audio-render");
+        sel_video.fn = text(u"video-capture");
+        Method def_capture = Method {"GetDefaultAudioCaptureId", Out::Ptr, 1, false, false, nullptr};
+        Method def_render = Method {"GetDefaultAudioRenderId", Out::Ptr, 1, false, false, nullptr};
+        def_capture.fn = id(u"utsuro-capture");
+        def_render.fn = id(u"utsuro-render");
+        Iface& media_device = rt.DefineInterface("IMediaDeviceStatics", "AA2D9A40-909F-4BBA-BF8B-0C0D296F14F0", {
+            sel_capture, sel_render, sel_video, def_capture, def_render,
+            Add("add_DefaultAudioCaptureDeviceChanged"), Remove("remove_DefaultAudioCaptureDeviceChanged"),
+            Add("add_DefaultAudioRenderDeviceChanged"), Remove("remove_DefaultAudioRenderDeviceChanged"),
+        });
+        rt.DefineClass("Windows.Media.Devices.MediaDevice", [](Runtime&) -> Obj* { return nullptr; }, &media_device);
+    }
+
     // Windows.Networking.Connectivity.NetworkInformation: there is no network profile; the title copes with that.
     Iface& net_info = rt.DefineInterface("INetworkInformationStatics", "5074F851-950D-4165-9C15-365619481EEA", {
         Get("GetConnectionProfiles", Ptr), Get("GetInternetConnectionProfile", Ptr), Get("GetLanIdentifiers", Ptr),
@@ -194,6 +243,9 @@ void RegisterClasses(Runtime& rt) {
         Add("add_NetworkStatusChanged"), Remove("remove_NetworkStatusChanged"),
     });
     rt.DefineClass("Windows.Networking.Connectivity.NetworkInformation", [](Runtime&) -> Obj* { return nullptr; }, &net_info);
+    // The lists a title walks are empty, not null.
+    for (const char* name : {"GetConnectionProfiles", "GetLanIdentifiers", "GetHostNames"})
+        rt.Override("INetworkInformationStatics", name, [](Call& c) -> uint32_t { *c.Ptr<uint64_t>(0) = Runtime::Get().NewVectorView({}); return 0; });
 
 }
 

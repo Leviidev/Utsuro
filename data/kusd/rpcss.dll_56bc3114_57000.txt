@@ -1,0 +1,2 @@
+B 12b08 5 eax  ; mov eax, 0x7ffe0014
+A 2fdf5 7  ; cmp byte ptr [0x7ffe02d4], bl

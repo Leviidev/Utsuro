@@ -1,0 +1,5 @@
+D 17140 5  ; cmp eax, 0x7ffe0000
+D 188de 5  ; cmp eax, 0x7ffe0000
+D 1a1b7 5  ; cmp eax, 0x7ffe0000
+D 42892 5  ; cmp eax, 0x7ffe0000
+D 210c2d 5  ; cmp eax, 0x7ffe0000

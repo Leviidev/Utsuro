@@ -360,7 +360,11 @@ void Kernel::InstallTracepointsFor(const std::string& image, uint64_t base) {
     std::vector<std::string> specs;
     if (image == "ntdll.dll") {
         char b[64];
-        std::snprintf(b, sizeof b, "ntdll.dll+%llx:6", (unsigned long long)(FindExport(ntdll_base_, "vDbgPrintExWithPrefix") - ntdll_base_ + 0x20));
+        // The export is a thunk (sub rsp / ... / call <real function> / add rsp / ret); the real function's start differs between OS builds.
+        const uint64_t thunk = FindExport(ntdll_base_, "vDbgPrintExWithPrefix");
+        uint64_t real = thunk + 0x20;
+        if (*reinterpret_cast<const uint8_t*>(thunk + 0x13) == 0xE8) real = thunk + 0x18 + *reinterpret_cast<const int32_t*>(thunk + 0x14);
+        std::snprintf(b, sizeof b, "ntdll.dll+%llx:6", (unsigned long long)(real - ntdll_base_));
         specs.push_back(b);  // always on: ntdll's own diagnostics (DbgPrint)
     }
     if (const char* user = std::getenv("UTSURO_TP")) {

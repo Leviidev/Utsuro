@@ -1,0 +1,89 @@
+B 4d52 5 eax  ; mov eax, 0x7ffe0320
+A 4d6e 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 621b 5 edi  ; mov edi, 0x7ffe0320
+B 626e 6 r15d  ; mov r15d, 0x7ffe0320
+A 628d 7  ; mov edx, dword ptr [0x7ffe0004]
+A 6330 7  ; mov edx, dword ptr [0x7ffe0004]
+B 6386 5 edi  ; mov edi, 0x7ffe0320
+B 63ef 5 edi  ; mov edi, 0x7ffe0320
+B 7eb6 5 eax  ; mov eax, 0x7ffe0320
+A 7ebe 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 84f2 5 eax  ; mov eax, 0x7ffe0320
+A 84fa 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 8544 5 eax  ; mov eax, 0x7ffe0320
+A 854c 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 8563 5 eax  ; mov eax, 0x7ffe0320
+A 856b 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 858b 5 eax  ; mov eax, 0x7ffe0320
+A 8593 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 94ee 5 eax  ; mov eax, 0x7ffe0320
+A 94f6 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 9ea2 5 eax  ; mov eax, 0x7ffe0320
+A 9eaa 7  ; mov ecx, dword ptr [0x7ffe0004]
+B a663 5 eax  ; mov eax, 0x7ffe0320
+A a66b 7  ; mov ecx, dword ptr [0x7ffe0004]
+B ad80 6 r13d  ; mov r13d, 0x7ffe0320
+B adc4 5 ebp  ; mov ebp, 0x7ffe0004
+A ae4f 7  ; mov ecx, dword ptr [0x7ffe0004]
+A aef2 7  ; mov edx, dword ptr [0x7ffe0004]
+B b0aa 5 eax  ; mov eax, 0x7ffe0320
+A b0b2 7  ; mov ecx, dword ptr [0x7ffe0004]
+B be34 5 eax  ; mov eax, 0x7ffe0320
+A be3c 7  ; mov ecx, dword ptr [0x7ffe0004]
+B c096 5 eax  ; mov eax, 0x7ffe0320
+A c09e 7  ; mov ecx, dword ptr [0x7ffe0004]
+B c36a 5 eax  ; mov eax, 0x7ffe0320
+A c372 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 13676 5 eax  ; mov eax, 0x7ffe0320
+A 13681 7  ; mov edx, dword ptr [0x7ffe0004]
+B 16df5 5 eax  ; mov eax, 0x7ffe0320
+A 16dfd 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 1772b 5 ecx  ; mov ecx, 0x7ffe0320
+A 17733 7  ; mov edx, dword ptr [0x7ffe0004]
+B 18a8e 5 eax  ; mov eax, 0x7ffe0320
+A 18a96 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 1b7f5 5 eax  ; mov eax, 0x7ffe0320
+A 1b81c 8  ; mov r15d, dword ptr [0x7ffe0004]
+B 23630 5 edx  ; mov edx, 0x7ffe0320
+A 23659 7  ; mov ecx, dword ptr [0x7ffe0004]
+A 23670 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 23a26 5 eax  ; mov eax, 0x7ffe0320
+A 23a40 7  ; mov edi, dword ptr [0x7ffe0004]
+B 26361 5 eax  ; mov eax, 0x7ffe0320
+A 26372 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 28428 6 r13d  ; mov r13d, 0x7ffe0320
+A 284b3 7  ; mov ecx, dword ptr [0x7ffe0004]
+A 2867d 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 2a193 5 eax  ; mov eax, 0x7ffe0320
+A 2a19b 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 2a2ab 5 eax  ; mov eax, 0x7ffe0320
+A 2a2b3 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 2a607 5 eax  ; mov eax, 0x7ffe0320
+A 2a60f 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 31e5a 5 eax  ; mov eax, 0x7ffe0320
+B 31e5f 5 ecx  ; mov ecx, 0x7ffe0004
+B 31f58 5 eax  ; mov eax, 0x7ffe0320
+B 31f5d 5 ecx  ; mov ecx, 0x7ffe0004
+B 388ee 5 edx  ; mov edx, 0x7ffe0320
+A 388f6 7  ; mov ecx, dword ptr [0x7ffe0004]
+A 3891c 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 3aa0b 5 eax  ; mov eax, 0x7ffe0320
+A 3aa1d 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 3e390 5 ecx  ; mov ecx, 0x7ffe0320
+A 3e3ae 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 3e41c 5 eax  ; mov eax, 0x7ffe0320
+A 3e424 7  ; mov eax, dword ptr [0x7ffe0004]
+B 3e4e3 5 eax  ; mov eax, 0x7ffe0320
+A 3e4eb 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 3e7f2 5 eax  ; mov eax, 0x7ffe0320
+A 3e7fa 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 3f05c 5 eax  ; mov eax, 0x7ffe0320
+A 3f064 7  ; mov ecx, dword ptr [0x7ffe0004]
+B 4146d 5 eax  ; mov eax, 0x7ffe0320
+A 41477 7  ; mov ebx, dword ptr [0x7ffe0004]
+B 532fc 5 eax  ; mov eax, 0x7ffe0320
+A 53304 8  ; mov r15d, dword ptr [0x7ffe0004]
+B 54455 5 eax  ; mov eax, 0x7ffe0320
+A 5445d 7  ; mov ebx, dword ptr [0x7ffe0004]
+B 547a6 5 eax  ; mov eax, 0x7ffe0320
+A 547ae 7  ; mov edi, dword ptr [0x7ffe0004]

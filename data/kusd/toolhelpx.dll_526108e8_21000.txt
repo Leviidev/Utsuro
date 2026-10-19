@@ -1,0 +1,12 @@
+A 8660 7  ; cmp byte ptr [0x7ffe0388], bl
+A 866b 7  ; cmp byte ptr [0x7ffe0380], bl
+A 8676 7  ; cmp byte ptr [0x7ffe038a], bl
+A 86fb 8  ; movzx eax, byte ptr [0x7ffe0388]
+A 871d 8  ; movzx eax, byte ptr [0x7ffe0380]
+A 873c 8  ; movzx eax, byte ptr [0x7ffe038a]
+A 88c8 7  ; cmp byte ptr [0x7ffe0388], bl
+A 88d3 7  ; cmp byte ptr [0x7ffe0380], bl
+A 88de 7  ; cmp byte ptr [0x7ffe038a], bl
+A 8913 8  ; movzx eax, byte ptr [0x7ffe0388]
+A 8935 8  ; movzx eax, byte ptr [0x7ffe0380]
+A 8954 8  ; movzx eax, byte ptr [0x7ffe038a]

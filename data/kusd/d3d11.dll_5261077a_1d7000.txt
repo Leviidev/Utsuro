@@ -1,0 +1,1 @@
+D 3cb7b 6  ; test ecx, 0x7ffe0000

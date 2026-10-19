@@ -1,0 +1,13 @@
+B 20ec 5 edx  ; mov edx, 0x7ffe0018
+G 20f6 4 0  ; lea r8d, [rdx - 4]
+G 20fa 4 0  ; lea r9d, [rdx + 4]
+A 10e60 7  ; mov eax, dword ptr [0x7ffe0014]
+A 10e6b 7  ; mov eax, dword ptr [0x7ffe0018]
+A 10eb9 7  ; mov eax, dword ptr [0x7ffe0008]
+A 10ec4 7  ; mov eax, dword ptr [0x7ffe000c]
+B 10ed9 5 eax  ; mov eax, 0x7ffe0320
+A 10ee1 7  ; mov ecx, dword ptr [0x7ffe0004]
+A 10f59 7  ; mov ecx, dword ptr [0x7ffe0014]
+A 10f64 7  ; mov ecx, dword ptr [0x7ffe0018]
+E 1ad19 8  ; mov qword ptr [rsp], 0x7ffe0320
+F 1ad32 6 rax  ; add rax, 0x7ffe0000

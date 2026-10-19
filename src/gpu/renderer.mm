@@ -823,6 +823,8 @@ std::shared_ptr<Texture> CreateTexture(const TextureDesc& desc) {
     d.storageMode = MTLStorageModeShared;
     d.mipmapLevelCount = std::max<uint32_t>(1, desc.mips);
     d.sampleCount = std::max<uint32_t>(1, desc.samples);
+    // Not every GPU does 8x (or any) multisampling: take the largest count the device has.
+    while (d.sampleCount > 1 && ![g->device supportsTextureSampleCount:d.sampleCount]) d.sampleCount >>= 1;
     d.usage = MTLTextureUsagePixelFormatView;
     if (desc.shader_resource) d.usage |= MTLTextureUsageShaderRead;
     if (desc.render_target || desc.depth_stencil) d.usage |= MTLTextureUsageRenderTarget;
@@ -1149,7 +1151,7 @@ void Draw(const DrawState& st, const DrawArgs& args) {
                 UT_INFO("gpu:   ps t%d [%p]: %lux%lu fmt %lu mips %lu uploads %u centre %02x%02x%02x%02x %02x%02x%02x%02x", i, (__bridge void*)tx.mtl, (unsigned long)tx.mtl.width, (unsigned long)tx.mtl.height, (unsigned long)tx.pixel_format,
                         (unsigned long)tx.mtl.mipmapLevelCount, tx.uploads, px[0], px[1], px[2], px[3], px[4], px[5], px[6], px[7]);
             }
-            if (args.indexed && args.count == 6 && st.index_buffer && st.vb[0].buffer && st.vb[0].stride >= 24) {
+            if (args.indexed && (args.count == 6 || args.count == 4) && st.index_buffer && st.vb[0].buffer && st.vb[0].stride >= 24) {
                 const uint8_t* ib = BufferData(*st.index_buffer) + st.index_offset + args.start * (st.index_format == 42 ? 4 : 2);
                 std::string idx;
                 for (int k = 0; k < 6; ++k) { char t[16]; std::snprintf(t, sizeof t, "%u ", st.index_format == 42 ? reinterpret_cast<const uint32_t*>(ib)[k] : reinterpret_cast<const uint16_t*>(ib)[k]); idx += t; }
@@ -1157,7 +1159,7 @@ void Draw(const DrawState& st, const DrawArgs& args) {
                 const uint32_t nv = std::min<uint32_t>(6, st.vb[0].buffer->size / st.vb[0].stride);
                 for (uint32_t k = 0; k < nv; ++k) {
                     const float* v = reinterpret_cast<const float*>(BufferData(*st.vb[0].buffer) + st.vb[0].offset + k * st.vb[0].stride);
-                    char t[96]; std::snprintf(t, sizeof t, "[%g %g %g %g | %g %g] ", v[0], v[1], v[2], v[3], v[4], v[5]); vtx += t;
+                    char t[160]; std::snprintf(t, sizeof t, "[%g %g %g %g | %g %g %g %g %g] ", v[0], v[1], v[2], v[3], v[4], v[5], st.vb[0].stride >= 32 ? v[6] : 0.f, st.vb[0].stride >= 36 ? v[7] : 0.f, st.vb[0].stride >= 36 ? v[8] : 0.f); vtx += t;
                 }
                 UT_INFO("gpu:   quad indices %s base %d; vertices %s", idx.c_str(), args.base_vertex, vtx.c_str());
             }
@@ -1209,7 +1211,7 @@ void Draw(const DrawState& st, const DrawArgs& args) {
             }
             ++g->srv_dumps;
         }
-        if (g->frame_count == g->trace_frame && g->dump_dir != nullptr && std::getenv("UTSURO_STEPDUMP") && g->trace_draws > 0 && g->trace_draws < 1500 && st.rtv[0] && st.rtv[0]->texture && st.rtv[0]->texture->mtl.width <= 960 && st.rtv[0]->texture->mtl.width >= 400 && g->step_dumps < 400) {
+        if (g->frame_count == g->trace_frame && g->dump_dir != nullptr && std::getenv("UTSURO_STEPDUMP") && g->trace_draws > 0 && g->trace_draws < 1500 && st.rtv[0] && st.rtv[0]->texture && st.rtv[0]->texture->mtl.width <= (std::getenv("UTSURO_STEPDUMP")[0] == 'a' ? 4000 : 960) && st.rtv[0]->texture->mtl.width >= 400 && g->step_dumps < 400) {
             // Debug: the render target after this draw, one picture per draw.
             EndEncoder();
             [Command() commit];
@@ -1315,7 +1317,8 @@ bool SavePng(Texture& texture, const std::string& path) {
         const NSUInteger w = t.width, h = t.height;
         const bool half4 = t.pixelFormat == MTLPixelFormatRGBA16Float;
         const bool r11 = t.pixelFormat == MTLPixelFormatRG11B10Float;
-        if (!half4 && !r11 && t.pixelFormat != MTLPixelFormatBGRA8Unorm && t.pixelFormat != MTLPixelFormatBGRA8Unorm_sRGB && t.pixelFormat != MTLPixelFormatRGBA8Unorm && t.pixelFormat != MTLPixelFormatRGBA8Unorm_sRGB) return false;
+        const bool rgb10 = t.pixelFormat == MTLPixelFormatRGB10A2Unorm;
+        if (!half4 && !r11 && !rgb10 && t.pixelFormat != MTLPixelFormatBGRA8Unorm && t.pixelFormat != MTLPixelFormatBGRA8Unorm_sRGB && t.pixelFormat != MTLPixelFormatRGBA8Unorm && t.pixelFormat != MTLPixelFormatRGBA8Unorm_sRGB) return false;
         const NSUInteger bpp = half4 ? 8 : 4;
         std::vector<uint8_t> raw(w * h * bpp);
         std::vector<uint8_t> px(w * h * 4);
@@ -1333,7 +1336,15 @@ bool SavePng(Texture& texture, const std::string& path) {
         } else {
             [t getBytes:raw.data() bytesPerRow:w * bpp fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0];
         }
-        if (r11) {
+        if (rgb10) {
+            const uint32_t* wp = reinterpret_cast<const uint32_t*>(raw.data());
+            for (size_t i = 0; i < w * h; ++i) {
+                px[i * 4 + 0] = static_cast<uint8_t>(((wp[i] >> 0) & 0x3FF) >> 2);
+                px[i * 4 + 1] = static_cast<uint8_t>(((wp[i] >> 10) & 0x3FF) >> 2);
+                px[i * 4 + 2] = static_cast<uint8_t>(((wp[i] >> 20) & 0x3FF) >> 2);
+                px[i * 4 + 3] = 255;
+            }
+        } else if (r11) {
             // 5-bit exponent floats: 6 (or 5) mantissa bits, no sign.
             auto unpack = [](uint32_t bits, int mantissa) {
                 const uint32_t e = bits >> mantissa, m = bits & ((1u << mantissa) - 1);
@@ -1363,7 +1374,7 @@ bool SavePng(Texture& texture, const std::string& path) {
         } else {
             px = raw;
         }
-        const bool bgra = !half4 && !r11 && (t.pixelFormat == MTLPixelFormatBGRA8Unorm || t.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB);
+        const bool bgra = !half4 && !r11 && !rgb10 && (t.pixelFormat == MTLPixelFormatBGRA8Unorm || t.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB);
         if (!bgra) for (size_t i = 0; i < px.size(); i += 4) std::swap(px[i], px[i + 2]);   // CoreGraphics below wants BGRA
         CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
         CGContextRef ctx = CGBitmapContextCreate(px.data(), w, h, 8, w * 4, cs, kCGBitmapByteOrder32Little | kCGImageAlphaNoneSkipFirst);

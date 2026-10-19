@@ -484,7 +484,7 @@ NTSTATUS Kernel::Dispatch(NtThread& thread, uint32_t number, SyscallArgs& args) 
         const uint32_t id = number - 0xFFFF0000u;
         const uint64_t ret = args.rsp != 0 ? *reinterpret_cast<uint64_t*>(args.rsp + 32) : 0;
         if (id == 0) {  // vDbgPrintExWithPrefix(prefix, component, level, format, arglist)
-            auto readable = [&](uint64_t p, uint64_t n = 8) { return p > 0x10000 && vm_->Contains(p, n); };
+            auto readable = [&](uint64_t p, uint64_t n = 8) { return p > 0x10000 && vm_->Contains(p, n) && space_->MaybeCommitted(p) && space_->MaybeCommitted(p + n - 1); };
             const char* fmt = readable(args.reg[3]) ? reinterpret_cast<const char*>(args.reg[3]) : nullptr;
             uint64_t va_ptr = readable(args.rsp + 0x48) ? *reinterpret_cast<uint64_t*>(args.rsp + 0x48) : 0;
             const uint64_t* va = readable(va_ptr, 64) ? reinterpret_cast<const uint64_t*>(va_ptr) : nullptr;
@@ -548,6 +548,15 @@ NTSTATUS Kernel::Dispatch(NtThread& thread, uint32_t number, SyscallArgs& args) 
     if (it == syscalls_.end()) {
         UT_ERROR("[%llu] unknown syscall %u (%s) from %#llx", (unsigned long long)thread.tid_, number, SyscallName(number),
                  (unsigned long long)thread.current_rip);
+        if (thread.control != nullptr) {
+            GuestCpuState st;
+            if (thread.control->CaptureCpuState(&st)) {
+                uint64_t regs[16];
+                for (int i = 0; i < 16; ++i) regs[i] = st.gregs[i];
+                const auto frames = Backtrace(st.rip, regs, 10);
+                for (size_t i = 0; i < frames.size(); ++i) UT_ERROR("      #%zu %s", i, Describe(frames[i]).c_str());
+            }
+        }
         return STATUS_NOT_IMPLEMENTED;
     }
     if (it->second.second == nullptr) {

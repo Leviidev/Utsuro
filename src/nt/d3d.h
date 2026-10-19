@@ -11,6 +11,7 @@ namespace utsuro::nt::d3d {
 void Register(winrt::Runtime& rt, uint32_t os_timestamp);
 /// d3d11_x!D3D11CreateDevice.
 uint64_t CreateDevice(Kernel& kernel, NtThread& thread, SyscallArgs& args);
+uint64_t CreateDeviceX(Kernel& kernel, NtThread& thread, SyscallArgs& args);
 
 /// d3d11_x!DXGIXPresentArray(sync, immediate threshold, flags, count, IDXGISwapChain1** chains, parameters): the console's present.
 uint64_t PresentArray(Kernel& kernel, NtThread& thread, SyscallArgs& args);

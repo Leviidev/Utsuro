@@ -547,6 +547,19 @@ void Register(Runtime& rt, uint32_t os_timestamp) {
         s.ib_address = 0;
         s.ib_format = (format & 0xFF) == 0 ? 57 : 42;
         s.ib_offset = static_cast<uint32_t>(c.Arg(2));
+        if (Res* r = ResAt(s.ib); r != nullptr && !r->buffer && r->host_ptr != 0) s.ib_address = r->host_ptr + s.ib_offset;
+        return 0;
+    });
+    // IASetFastIndexBuffer(HardwareIndexFormat, pIndexBuffer): the same without an offset.
+    OverrideAll("IASetFastIndexBuffer", [](Call& c) -> uint32_t {
+        auto& s = StateOf(c.obj);
+        const bool buffer_first = Runtime::Get().FromPointer(c.Arg(0)) != nullptr;
+        s.ib = buffer_first ? c.Arg(0) : c.Arg(1);
+        s.ib_address = 0;
+        s.ib_format = ((buffer_first ? c.Arg(1) : c.Arg(0)) & 0xFF) == 0 ? 57 : 42;
+        s.ib_offset = 0;
+        // A placement buffer has no host GPU buffer of its own: its indices are read from its memory at draw time.
+        if (Res* r = ResAt(s.ib); r != nullptr && !r->buffer && r->host_ptr != 0) s.ib_address = r->host_ptr;
         return 0;
     });
     OverrideAll("IAGetIndexBuffer", [](Call& c) -> uint32_t {
@@ -638,6 +651,34 @@ uint64_t PresentArray(Kernel&, NtThread&, SyscallArgs& a) {
         if (gpu::Available()) gpu::Present(r->texture, sync);
     }
     return 0;
+}
+
+namespace {
+/// The device and immediate context every creation entry point hands out.
+uint32_t MakeDevice(uint64_t* out_device, uint64_t* out_context) {
+    Runtime& rt = Runtime::Get();
+    gpu::Init();
+    Obj* device = New("ID3D11DeviceX");
+    Obj* context = New("ID3D11DeviceContextX");
+    if (device == nullptr || context == nullptr) return 0x80004005u;
+    device->u64["context"] = rt.Pointer(*context, *g_ifaces["ID3D11DeviceContext"]);
+    {
+        auto* c = reinterpret_cast<uint8_t*>(device->u64["context"]);
+        *reinterpret_cast<uint64_t*>(c + 0x10) = rt.Pointer(*device, *g_ifaces["ID3D11Device"]);   // m_pDevice
+        c[g_flags_offset] = 1;                                                                     // m_OutOfLineFlags
+    }
+    context->u64["device"] = rt.Pointer(*device, *g_ifaces["ID3D11Device"]);
+    if (out_device != nullptr) *out_device = rt.Pointer(*device, *g_ifaces["ID3D11Device"]);
+    if (out_context != nullptr) *out_context = rt.Pointer(*context, *g_ifaces["ID3D11DeviceContext"]);
+    return kSOk;
+}
+} // namespace
+
+/// D3D11XCreateDeviceX(pParameters, ppDevice, ppImmediateContext): the Xbox-only entry point Unity titles use.
+uint64_t CreateDeviceX(Kernel& kernel, NtThread&, SyscallArgs& a) {
+    g_kernel = &kernel;
+    UT_INFO("d3d: D3D11XCreateDeviceX");
+    return MakeDevice(a[1] != 0 ? a.Ptr<uint64_t>(1) : nullptr, a[2] != 0 ? a.Ptr<uint64_t>(2) : nullptr);
 }
 
 uint64_t CreateDevice(Kernel& kernel, NtThread&, SyscallArgs& a) {

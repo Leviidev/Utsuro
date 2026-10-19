@@ -192,6 +192,7 @@ const Hook kHooks[] = {
     {"combase.dll", "RoGetActivationFactory", RoGetActivationFactory, 5},
     {"bcrypt.dll", "BCryptGenRandom", BCryptGenRandom, 0},
     {"d3d11_x.dll", "D3D11CreateDevice", d3d::CreateDevice, 0},
+    {"d3d11_x.dll", "D3D11XCreateDeviceX", d3d::CreateDeviceX, 0},
     {"d3d11_x.dll", "D3DAllocateGraphicsMemory", D3DAllocateGraphicsMemory, 0},
     {"d3d11_x.dll", "D3DFreeGraphicsMemory", D3DFreeGraphicsMemory, 0},
     {"d3d11_x.dll", "D3DConfigureVirtualMemory", ReturnOk, 0},

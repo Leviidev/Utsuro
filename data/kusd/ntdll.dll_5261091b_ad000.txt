@@ -1,0 +1,314 @@
+B 3c24 5 eax  ; mov eax, 0x7ffe02dc
+B 3eaf 5 eax  ; mov eax, 0x7ffe02dc
+A 6c3b 8  ; test byte ptr [0x7ffe02d4], 2
+B 8a01 5 eax  ; mov eax, 0x7ffe0320
+A 8a09 7  ; mov edx, dword ptr [0x7ffe0004]
+A 8ac1 8  ; cmp byte ptr [0x7ffe0384], 0
+A 8add 8  ; test byte ptr [0x7ffe0385], 0x20
+A 8b0c 8  ; cmp byte ptr [0x7ffe0384], 0
+A 8b28 8  ; test byte ptr [0x7ffe0385], 0x20
+A 8b7a 8  ; cmp byte ptr [0x7ffe0384], 0
+A 8b96 8  ; test byte ptr [0x7ffe0385], 0x20
+A 8bc6 8  ; cmp byte ptr [0x7ffe0384], 0
+A 8be4 8  ; test byte ptr [0x7ffe0385], 0x20
+A 8c4a 8  ; cmp byte ptr [0x7ffe0384], 0
+A 8c66 8  ; test byte ptr [0x7ffe0385], 0x20
+A 8ca5 8  ; cmp byte ptr [0x7ffe0384], 0
+A 8cc1 8  ; test byte ptr [0x7ffe0385], 0x20
+A 8ced 8  ; cmp byte ptr [0x7ffe0384], 0
+A 8d09 8  ; test byte ptr [0x7ffe0385], 0x20
+A 8d5f 8  ; cmp byte ptr [0x7ffe0384], 0
+A 8d7b 8  ; test byte ptr [0x7ffe0385], 0x20
+A 8d9e 8  ; cmp byte ptr [0x7ffe0384], 0
+A 8dba 8  ; test byte ptr [0x7ffe0385], 0x20
+B 8fdd 5 eax  ; mov eax, 0x7ffe0014
+A b661 8  ; cmp byte ptr [0x7ffe0384], 0
+A b67d 8  ; test byte ptr [0x7ffe0385], 0x20
+A b974 8  ; cmp byte ptr [0x7ffe0384], r12b
+A b9ef 8  ; movzx ecx, byte ptr [0x7ffe0384]
+A babc 8  ; movzx ecx, byte ptr [0x7ffe0384]
+A bb8d 8  ; movzx ecx, byte ptr [0x7ffe0384]
+A c7fa 8  ; cmp byte ptr [0x7ffe0384], r13b
+A c816 8  ; test byte ptr [0x7ffe0385], 0x20
+A c8cc 8  ; cmp byte ptr [0x7ffe0384], r13b
+A c8ec 8  ; test byte ptr [0x7ffe0385], 0x20
+A c921 8  ; cmp byte ptr [0x7ffe0384], r13b
+A c93d 8  ; test byte ptr [0x7ffe0385], 0x20
+A ca4c 8  ; cmp byte ptr [0x7ffe0384], r13b
+A ca70 8  ; test byte ptr [0x7ffe0385], 0x20
+A caa1 8  ; cmp byte ptr [0x7ffe0384], r13b
+A cabd 8  ; test byte ptr [0x7ffe0385], 0x20
+A cb65 8  ; cmp byte ptr [0x7ffe0384], r13b
+A cb81 8  ; test byte ptr [0x7ffe0385], 0x20
+A cba5 8  ; cmp byte ptr [0x7ffe0384], r13b
+A cbc1 8  ; test byte ptr [0x7ffe0385], 0x20
+A cbf3 8  ; cmp byte ptr [0x7ffe0384], r13b
+A cc0f 8  ; test byte ptr [0x7ffe0385], 0x20
+A cc64 8  ; cmp byte ptr [0x7ffe0384], r13b
+A cc88 8  ; test byte ptr [0x7ffe0385], 0x20
+A cc9e 8  ; cmp byte ptr [0x7ffe0384], r13b
+A ccba 8  ; test byte ptr [0x7ffe0385], 0x20
+A cdac 8  ; cmp byte ptr [0x7ffe0384], r13b
+A cdb6 8  ; test byte ptr [0x7ffe0385], 0x10
+A d41b 8  ; cmp byte ptr [0x7ffe0384], 0
+A d437 8  ; test byte ptr [0x7ffe0385], 0x20
+A d489 8  ; cmp byte ptr [0x7ffe0384], 0
+A d4aa 8  ; test byte ptr [0x7ffe0385], 0x20
+A e4d8 8  ; cmp byte ptr [0x7ffe0384], 0
+A e4f4 8  ; test byte ptr [0x7ffe0385], 0x20
+B f16d 5 edx  ; mov edx, 0x7ffe0030
+B f3b9 5 edx  ; mov edx, 0x7ffe0030
+A f7f5 8  ; cmp byte ptr [0x7ffe0384], dil
+A f815 8  ; test byte ptr [0x7ffe0385], 0x20
+B f832 5 ecx  ; mov ecx, 0x7ffe0384
+B f87b 5 ecx  ; mov ecx, 0x7ffe0384
+A 1017c 8  ; cmp byte ptr [0x7ffe02ec], r12b
+A 1077a 8  ; movzx ecx, byte ptr [0x7ffe02d5]
+B 150bd 6 r12d  ; mov r12d, 0x7ffe0382
+A 1522b 7  ; cmp byte ptr [0x7ffe0384], dl
+A 15246 8  ; test byte ptr [0x7ffe0385], 0x20
+A 15f10 7  ; mov cl, byte ptr [0x7ffe0382]
+A 16040 7  ; mov dl, byte ptr [0x7ffe0382]
+A 1b124 7  ; mov eax, dword ptr [0x7ffe0330]
+B 1b677 5 edx  ; mov edx, 0x7ffe0030
+A 1bf5a 8  ; mov r8d, dword ptr [0x7ffe0330]
+A 1c2f0 8  ; cmp byte ptr [0x7ffe02d4], 0
+A 1c690 7  ; mov eax, dword ptr [0x7ffe0330]
+A 1c6a8 8  ; mov r8d, dword ptr [0x7ffe0330]
+A 1d517 7  ; mov ecx, dword ptr [0x7ffe0244]
+A 1d68b 8  ; cmp byte ptr [0x7ffe038e], 0
+A 1d714 8  ; cmp byte ptr [0x7ffe038e], 0
+A 1daf8 7  ; mov dl, byte ptr [0x7ffe038e]
+A 1dbde 7  ; mov cl, byte ptr [0x7ffe038e]
+A 1e069 7  ; mov cl, byte ptr [0x7ffe038e]
+A 1e795 7  ; mov cl, byte ptr [0x7ffe038e]
+A 1efa9 8  ; movzx ecx, byte ptr [0x7ffe038e]
+B 1f171 6 r9d  ; mov r9d, 0x7ffe0030
+B 1f379 6 r9d  ; mov r9d, 0x7ffe0030
+B 1f477 5 edx  ; mov edx, 0x7ffe0030
+A 209f5 7  ; mov al, byte ptr [0x7ffe02d4]
+A 2195f 8  ; test byte ptr [0x7ffe02f0], 2
+A 2196f 8  ; test byte ptr [0x7ffe02f0], 4
+A 2197c 8  ; test byte ptr [0x7ffe02f0], 8
+B 24880 5 ecx  ; mov ecx, 0x7ffe0320
+A 24888 7  ; mov eax, dword ptr [0x7ffe0004]
+A 2489e 7  ; mov dl, byte ptr [0x7ffe03c6]
+A 248ad 8  ; mov r8, qword ptr [0x7ffe03b8]
+A 248b7 7  ; mov cl, byte ptr [0x7ffe03c7]
+A 248f0 8  ; mov rax, qword ptr [0x7ffe0300]
+B 2490d 6 r10d  ; mov r10d, 0x7ffe03b0
+B 24913 6 r11d  ; mov r11d, 0x7ffe0008
+B 2497c 6 r15d  ; mov r15d, 0x7ffe0340
+A 2498a 8  ; mov rdi, qword ptr [0x7ffe0348]
+A 24992 8  ; mov rbp, qword ptr [0x7ffe0358]
+A 2499a 8  ; mov r14b, byte ptr [0x7ffe0370]
+A 249a2 8  ; mov rsi, qword ptr [0x7ffe0014]
+A 25323 7  ; mov ecx, dword ptr [0x7ffe0244]
+A 26073 8  ; cmp byte ptr [0x7ffe0380], dil
+A 2657b 7  ; mov cl, byte ptr [0x7ffe0380]
+A 265b6 7  ; mov al, byte ptr [0x7ffe038a]
+A 265df 8  ; cmp byte ptr [0x7ffe0388], dil
+B 267a2 6 r13d  ; mov r13d, 0x7ffe0388
+A 268ed 8  ; cmp byte ptr [0x7ffe0388], 0
+A 26910 7  ; mov cl, byte ptr [0x7ffe0380]
+A 26938 7  ; mov al, byte ptr [0x7ffe038a]
+A 2694e 8  ; cmp byte ptr [0x7ffe0388], 0
+A 26c3d 8  ; cmp byte ptr [0x7ffe0380], 0
+A 26f98 8  ; cmp byte ptr [0x7ffe0380], r12b
+A 27c02 8  ; cmp byte ptr [0x7ffe0380], 0
+A 27d3f 7  ; mov cl, byte ptr [0x7ffe0380]
+A 27d7d 7  ; mov al, byte ptr [0x7ffe038a]
+A 27e92 8  ; cmp byte ptr [0x7ffe0380], 0
+A 282a5 8  ; cmp byte ptr [0x7ffe0380], 0
+A 282df 7  ; mov cl, byte ptr [0x7ffe0380]
+A 28323 7  ; mov al, byte ptr [0x7ffe038a]
+A 28355 8  ; cmp byte ptr [0x7ffe0388], 0
+A 28f24 8  ; cmp byte ptr [0x7ffe0380], 0
+A 290e3 7  ; mov cl, byte ptr [0x7ffe0380]
+A 29137 7  ; mov al, byte ptr [0x7ffe038a]
+A 2923b 8  ; cmp byte ptr [0x7ffe0380], r13b
+A 293b2 7  ; mov cl, byte ptr [0x7ffe0380]
+A 293fc 7  ; mov al, byte ptr [0x7ffe038a]
+A 29d05 8  ; cmp byte ptr [0x7ffe0380], 0
+A 29d54 7  ; mov cl, byte ptr [0x7ffe0380]
+A 29d9f 7  ; mov al, byte ptr [0x7ffe038a]
+A 29ec6 8  ; cmp byte ptr [0x7ffe0380], 0
+A 29f09 7  ; mov cl, byte ptr [0x7ffe0380]
+A 29f49 7  ; mov al, byte ptr [0x7ffe038a]
+A 2b7aa 8  ; cmp byte ptr [0x7ffe0380], 0
+A 2b7df 7  ; mov cl, byte ptr [0x7ffe0380]
+A 2b824 7  ; mov al, byte ptr [0x7ffe038a]
+A 2b9a7 8  ; cmp byte ptr [0x7ffe0388], 0
+A 2c146 7  ; mov cl, byte ptr [0x7ffe0380]
+A 2c192 7  ; mov al, byte ptr [0x7ffe038a]
+A 2c1e8 8  ; cmp byte ptr [0x7ffe0380], r13b
+A 2c220 8  ; cmp byte ptr [0x7ffe0388], r13b
+B 2c295 5 eax  ; mov eax, 0x7ffe0320
+A 2c29d 7  ; mov edx, dword ptr [0x7ffe0004]
+A 3044f 7  ; mov al, byte ptr [0x7ffe02d4]
+A 3379e 11  ; test dword ptr [0x7ffe02d0], 0x10000
+A 33b0e 7  ; mov dl, byte ptr [0x7ffe0380]
+A 33bca 7  ; mov dl, byte ptr [0x7ffe0380]
+A 33f39 7  ; mov dl, byte ptr [0x7ffe0380]
+A 34ba2 7  ; mov dl, byte ptr [0x7ffe0380]
+A 35fc7 7  ; mov cl, byte ptr [0x7ffe0380]
+A 36abf 7  ; mov cl, byte ptr [0x7ffe0380]
+B 3a366 5 edi  ; mov edi, 0x7ffe03d8
+B 3a373 6 r14d  ; mov r14d, 0x7ffe0400
+A 3aeb7 7  ; mov eax, dword ptr [0x7ffe03e8]
+A 3af67 7  ; mov eax, dword ptr [0x7ffe03e8]
+B 3b002 5 ecx  ; mov ecx, 0x7ffe03d8
+C 3b03d 8  ; mov ecx, dword ptr [r11*8 + 0x7ffe03f4]
+C 3b047 8  ; mov eax, dword ptr [r11*8 + 0x7ffe03f0]
+A 3b08b 8  ; mov rax, qword ptr [0x7ffe03d8]
+A 3b0ed 9  ; cmp qword ptr [0x7ffe03d8], 0
+A 40de4 8  ; mov rax, qword ptr [0x7ffe03d8]
+A 41f9c 8  ; mov ax, word ptr [0x7ffe02d0]
+A 41fb3 7  ; mov eax, dword ptr [0x7ffe02d0]
+B 42a73 5 ecx  ; mov ecx, 0x7ffe0320
+A 42a7b 8  ; mov r8d, dword ptr [0x7ffe0004]
+A 47b1e 7  ; mov al, byte ptr [0x7ffe02d4]
+A 4adda 7  ; mov edi, dword ptr [0x7ffe0258]
+A 4af4d 9  ; cmp qword ptr [0x7ffe03d8], 0
+A 4af5c 7  ; mov eax, dword ptr [0x7ffe03e8]
+A 4afaa 7  ; mov eax, dword ptr [0x7ffe03e8]
+A 4c7e4 8  ; mov rax, qword ptr [0x7ffe0014]
+B 4c806 5 eax  ; mov eax, 0x7ffe0014
+B 4c80b 5 esi  ; mov esi, 0x7ffe0320
+B 4c813 5 eax  ; mov eax, 0x7ffe0018
+A 4c838 7  ; mov edx, dword ptr [0x7ffe0004]
+A 4c858 7  ; mov ecx, dword ptr [0x7ffe0004]
+A 4ccaf 8  ; cmp byte ptr [0x7ffe0380], 0
+A 4cd3a 8  ; cmp byte ptr [0x7ffe0380], 0
+A 4cdab 8  ; cmp byte ptr [0x7ffe0380], r9b
+A 4d12a 8  ; cmp byte ptr [0x7ffe0380], 0
+A 4d4c1 8  ; cmp byte ptr [0x7ffe0380], bpl
+B 4d572 6 r15d  ; mov r15d, 0x7ffe0380
+A 4d6cd 7  ; mov dl, byte ptr [0x7ffe0380]
+A 4d9b8 7  ; mov cl, byte ptr [0x7ffe0380]
+A 4dc69 7  ; cmp byte ptr [0x7ffe0380], bl
+A 4dd74 7  ; cmp byte ptr [0x7ffe0380], bl
+A 4e299 7  ; cmp byte ptr [0x7ffe0380], bl
+A 4e5b5 7  ; cmp byte ptr [0x7ffe0380], bl
+A 4e6f3 7  ; cmp byte ptr [0x7ffe0380], bl
+A 4ea37 7  ; cmp byte ptr [0x7ffe0380], bl
+A 4f888 7  ; mov al, byte ptr [0x7ffe02d4]
+A 4f8d5 7  ; mov al, byte ptr [0x7ffe02d4]
+A 527b8 7  ; mov al, byte ptr [0x7ffe02d4]
+A 52ff2 8  ; movzx ecx, byte ptr [0x7ffe0388]
+A 5307e 8  ; movzx ecx, byte ptr [0x7ffe0388]
+A 5310b 8  ; movzx ecx, byte ptr [0x7ffe0380]
+A 53197 8  ; movzx ecx, byte ptr [0x7ffe0380]
+A 53223 8  ; movzx ecx, byte ptr [0x7ffe0380]
+A 532af 8  ; movzx ecx, byte ptr [0x7ffe0380]
+A 53349 8  ; movzx ecx, byte ptr [0x7ffe0380]
+A 533c6 8  ; movzx ecx, byte ptr [0x7ffe0380]
+A 5343a 8  ; movzx ecx, byte ptr [0x7ffe0380]
+A 534b4 8  ; movzx ecx, byte ptr [0x7ffe0380]
+A 53539 8  ; movzx ecx, byte ptr [0x7ffe0388]
+A 535a8 8  ; movzx ecx, byte ptr [0x7ffe0388]
+A 53626 8  ; movzx ecx, byte ptr [0x7ffe0388]
+A 536a6 8  ; movzx ecx, byte ptr [0x7ffe0388]
+A 537d0 8  ; movzx ecx, byte ptr [0x7ffe0380]
+A 53831 8  ; movzx ecx, byte ptr [0x7ffe0380]
+B 5bb27 5 ecx  ; mov ecx, 0x7ffe0014
+B 5c2b8 5 eax  ; mov eax, 0x7ffe0014
+B 5c883 5 ecx  ; mov ecx, 0x7ffe0014
+B 5df51 5 eax  ; mov eax, 0x7ffe0320
+B 5df56 5 edx  ; mov edx, 0x7ffe0004
+B 5dfaa 5 ecx  ; mov ecx, 0x7ffe0004
+B 5dfb2 5 eax  ; mov eax, 0x7ffe0320
+B 5e05a 5 eax  ; mov eax, 0x7ffe0320
+B 5e05f 5 edx  ; mov edx, 0x7ffe0004
+B 5e988 5 eax  ; mov eax, 0x7ffe0014
+B 5ec12 5 eax  ; mov eax, 0x7ffe0014
+A 5f092 7  ; mov al, byte ptr [0x7ffe026c]
+A 5f09e 7  ; mov al, byte ptr [0x7ffe0270]
+B 5f18e 5 eax  ; mov eax, 0x7ffe0014
+A 5f311 8  ; mov rax, qword ptr [0x7ffe0300]
+B 5fcdf 5 edi  ; mov edi, 0x7ffe03c0
+A 5fdb2 8  ; cmp byte ptr [0x7ffe0386], 0
+A 5fe4f 8  ; cmp byte ptr [0x7ffe0386], 0
+A 6094f 8  ; cmp byte ptr [0x7ffe0386], 0
+A 609b6 8  ; cmp byte ptr [0x7ffe0386], 0
+A 60cb0 8  ; cmp byte ptr [0x7ffe0386], 0
+A 60d15 8  ; cmp byte ptr [0x7ffe0386], 0
+B 60dd2 5 eax  ; mov eax, 0x7ffe03c0
+B 6111f 5 eax  ; mov eax, 0x7ffe03c0
+B 61406 5 eax  ; mov eax, 0x7ffe03c0
+A 61701 7  ; mov al, byte ptr [0x7ffe0386]
+A 6189c 7  ; mov al, byte ptr [0x7ffe0386]
+A 61ba0 7  ; mov al, byte ptr [0x7ffe0386]
+A 61c58 7  ; mov cl, byte ptr [0x7ffe0386]
+B 61ff5 5 eax  ; mov eax, 0x7ffe03c0
+B 6227d 5 eax  ; mov eax, 0x7ffe03c0
+A 62b40 7  ; mov al, byte ptr [0x7ffe0386]
+B 62bfa 5 edi  ; mov edi, 0x7ffe0008
+B 62bff 6 r11d  ; mov r11d, 0x7ffe03b0
+A 62c45 8  ; cmp byte ptr [0x7ffe0386], 0
+A 62d00 7  ; mov al, byte ptr [0x7ffe0386]
+A 62f1e 7  ; mov dl, byte ptr [0x7ffe0386]
+B 62f89 6 r8d  ; mov r8d, 0x7ffe03b0
+B 62f8f 6 r9d  ; mov r9d, 0x7ffe0008
+B 6318c 5 edi  ; mov edi, 0x7ffe0014
+B 631a1 6 r8d  ; mov r8d, 0x7ffe03b0
+B 631a7 6 r9d  ; mov r9d, 0x7ffe0008
+A 631fb 7  ; mov al, byte ptr [0x7ffe0386]
+A 63307 8  ; cmp byte ptr [0x7ffe0386], 0
+A 63360 7  ; mov al, byte ptr [0x7ffe0386]
+B 636e4 6 r9d  ; mov r9d, 0x7ffe03b0
+B 636ea 6 r10d  ; mov r10d, 0x7ffe0008
+A 63749 7  ; mov cl, byte ptr [0x7ffe0386]
+A 63b17 8  ; cmp byte ptr [0x7ffe0386], 0
+A 63b5e 8  ; cmp byte ptr [0x7ffe0386], 0
+A 63bb8 8  ; cmp byte ptr [0x7ffe0386], 0
+B 63f07 5 edx  ; mov edx, 0x7ffe0014
+A 64056 8  ; cmp byte ptr [0x7ffe0386], 0
+A 64527 8  ; cmp byte ptr [0x7ffe0386], 0
+A 64588 8  ; cmp byte ptr [0x7ffe0386], 0
+A 64a90 8  ; cmp byte ptr [0x7ffe0386], 0
+A 64bd3 8  ; cmp byte ptr [0x7ffe0386], 0
+A 64c71 8  ; cmp byte ptr [0x7ffe0386], 0
+A 64d1e 8  ; cmp byte ptr [0x7ffe0386], 0
+A 64d6f 8  ; cmp byte ptr [0x7ffe0386], dil
+B 658ea 5 ebx  ; mov ebx, 0x7ffe03b0
+B 658f2 5 edi  ; mov edi, 0x7ffe0008
+B 65928 6 r10d  ; mov r10d, 0x7ffe03b0
+B 6592e 6 r11d  ; mov r11d, 0x7ffe0008
+A 65ce7 8  ; cmp byte ptr [0x7ffe0386], 0
+A 65d2d 8  ; cmp byte ptr [0x7ffe0386], 0
+A 65d74 8  ; cmp byte ptr [0x7ffe0386], 0
+A 6621c 8  ; movzx ecx, byte ptr [0x7ffe0386]
+A 66290 8  ; movzx ecx, byte ptr [0x7ffe0386]
+A 66304 8  ; movzx ecx, byte ptr [0x7ffe0386]
+A 66378 8  ; movzx ecx, byte ptr [0x7ffe0386]
+A 663fb 8  ; movzx ecx, byte ptr [0x7ffe0386]
+A 66458 8  ; movzx ecx, byte ptr [0x7ffe0386]
+A 6677a 8  ; cmp byte ptr [0x7ffe0386], 0
+A 667b4 8  ; movzx ecx, byte ptr [0x7ffe0386]
+B 66a5a 6 r9d  ; mov r9d, 0x7ffe03b0
+B 66a63 5 edx  ; mov edx, 0x7ffe0008
+B 66bd0 6 r12d  ; mov r12d, 0x7ffe03c0
+B 66cf1 6 r12d  ; mov r12d, 0x7ffe03c0
+B 66d4f 6 r12d  ; mov r12d, 0x7ffe03c0
+B 66e35 6 r12d  ; mov r12d, 0x7ffe03c0
+B 66ed4 6 r12d  ; mov r12d, 0x7ffe03c0
+B 66f2c 6 r12d  ; mov r12d, 0x7ffe03c0
+A 675ec 8  ; cmp byte ptr [0x7ffe0386], 0
+A 67639 8  ; cmp byte ptr [0x7ffe0386], 0
+A 67b2f 8  ; cmp byte ptr [0x7ffe0386], 0
+A 67b9c 8  ; cmp byte ptr [0x7ffe0386], 0
+A 67fba 8  ; cmp byte ptr [0x7ffe0386], 0
+A 68094 8  ; cmp byte ptr [0x7ffe0386], dil
+A 68138 8  ; cmp byte ptr [0x7ffe0386], 0
+A 681a0 8  ; cmp byte ptr [0x7ffe0386], 0
+A 683be 8  ; mov r10b, byte ptr [0x7ffe0386]
+A 68532 8  ; cmp byte ptr [0x7ffe0386], 0
+A 6857d 8  ; cmp byte ptr [0x7ffe0386], 0
+A 68c80 8  ; movzx ecx, byte ptr [0x7ffe0386]
+A 750c3 8  ; mov rax, qword ptr [0x7ffe03e0]
+A 7527c 8  ; mov rax, qword ptr [0x7ffe03e0]
+A 7b322 8  ; cmp byte ptr [0x7ffe0384], 0
+A 7b33e 8  ; test byte ptr [0x7ffe0385], 0x20
+A 7b36b 8  ; cmp byte ptr [0x7ffe0384], 0
+A 7b387 8  ; test byte ptr [0x7ffe0385], 0x20

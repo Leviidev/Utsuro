@@ -178,6 +178,13 @@ public:
             if (!system_.valid()) system_.Load(std::string(alt) + "/SYSTEM");
             if (!default_.valid()) default_.Load(std::string(alt) + "/DEFAULT");
         }
+        // Failing that, the hives kept in the data directory (copied once from any dump of the console OS).
+        {
+            const std::string local = std::string(UTSURO_DATA_DIR) + "/hives";
+            if (!software_.valid()) software_.Load(local + "/SOFTWARE");
+            if (!system_.valid()) system_.Load(local + "/SYSTEM");
+            if (!default_.valid()) default_.Load(local + "/DEFAULT");
+        }
         UT_INFO("registry: SOFTWARE %s, SYSTEM %s, DEFAULT %s", software_.valid() ? "loaded" : "missing",
                 system_.valid() ? "loaded" : "missing", default_.valid() ? "loaded" : "missing");
     }
