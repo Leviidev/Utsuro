@@ -22,6 +22,7 @@ struct Res {
     uint64_t placement {0};
     uint32_t tile_mode {0}, pitch {0};
     bool placement_dirty {false};
+    uint64_t next_try_frame {0};                  ///< a texture with no readable pages yet is looked at again from this frame on
     uint64_t placement_bytes {0};                ///< how much of the placement memory the texels occupy
     uint64_t content_hash {0}, checked_frame {~0ull};   ///< to notice texels the CPU rewrote without telling anyone
     Res* base {nullptr};                         ///< a view's resource
@@ -422,7 +423,15 @@ bool PlacementChanged(Res& r) {
     uint64_t h = 0x84222325CBF29CE4ull;
     for (uint64_t at = 0; at < r.placement_bytes; at += chunk.size()) {
         const uint64_t n = std::min<uint64_t>(chunk.size(), r.placement_bytes - at);
-        if (!SafeCopy(r.placement + at, chunk.data(), n)) return false;
+        if (!SafeCopy(r.placement + at, chunk.data(), n)) {
+            // Some pages are not committed (yet): what is there, and zeros for the rest, as the upload read it.
+            std::fill(chunk.begin(), chunk.begin() + n, 0);
+            for (uint64_t o = 0; o < n;) {
+                const uint64_t step = std::min<uint64_t>(n - o, 4096 - ((r.placement + at + o) & 4095));
+                SafeCopy(r.placement + at + o, chunk.data() + o, step);
+                o += step;
+            }
+        }
         h = HashWords(chunk.data(), static_cast<size_t>(n & ~7ull), h);
     }
     if (h == r.content_hash) return false;
@@ -470,18 +479,36 @@ void UploadPlacement(Res& r) {
     for (const TileLevel& lv : model->levels)
         need = std::max<uint64_t>(need, model->linear ? lv.base + static_cast<uint64_t>(lv.height) * lv.row_stride
                                                       : lv.base + std::max<uint64_t>((lv.height + 7) / 8, 1) * std::max<uint64_t>(lv.row_stride, ((lv.width + 7) / 8) * lv.tile_bytes));
+    // A streamed texture has only some of its pages committed: read what is there, page by page, and upload the levels that are whole.
     std::vector<uint8_t> raw(static_cast<size_t>(need));
-    if (!SafeCopy(r.placement, raw.data(), raw.size())) return fail("not readable");
+    std::vector<uint8_t> present((raw.size() + 4095) / 4096 + 1, 0);
+    {
+        size_t got = 0;
+        for (size_t at = 0; at < raw.size();) {
+            const size_t step = std::min<size_t>(raw.size() - at, 4096 - ((r.placement + at) & 4095));
+            if (SafeCopy(r.placement + at, raw.data() + at, step)) { for (size_t k = at / 4096; k <= (at + step - 1) / 4096; ++k) present[k] = 1; got += step; }
+            at += step;
+        }
+        if (got == 0) { r.placement_dirty = true; r.next_try_frame = g_frame.load() + 20; return fail("not readable"); }
+    }
     r.placement_bytes = raw.size();
     {
         uint64_t h = 0x84222325CBF29CE4ull;
         for (size_t at = 0; at < raw.size(); at += 64 << 10) h = HashWords(raw.data() + at, std::min<size_t>(64 << 10, raw.size() - at) & ~7ull, h);
         r.content_hash = h;
     }
+    auto level_present = [&](const TileLevel& lv) {
+        const uint64_t end = std::min<uint64_t>(raw.size(), model->linear ? lv.base + static_cast<uint64_t>(lv.height) * lv.row_stride
+                                                                              : lv.base + std::max<uint64_t>((lv.height + 7) / 8, 1) * std::max<uint64_t>(lv.row_stride, ((lv.width + 7) / 8) * lv.tile_bytes));
+        for (uint64_t k = lv.base / 4096; k * 4096 < end; ++k) if (!present[k]) return false;
+        return true;
+    };
     std::vector<uint8_t> linear;
+    uint32_t lowest_missing = 0;   // sampled views start below the last level that is missing
     for (uint32_t slice = 0; slice < info.array_size; ++slice) {
         for (uint32_t mip = 0; mip < info.mips; ++mip) {
             const TileLevel& lv = model->levels[slice * model->levels_per_slice + mip];
+            if (!level_present(lv)) { if (slice == 0 && mip + 1 > lowest_missing) lowest_missing = mip + 1; continue; }
             const uint32_t row_pitch = lv.width * bytes;
             linear.resize(static_cast<size_t>(row_pitch) * lv.height);
             for (uint32_t y = 0; y < lv.height; ++y) {
@@ -496,10 +523,24 @@ void UploadPlacement(Res& r) {
                     std::memcpy(linear.data() + static_cast<size_t>(y) * row_pitch + static_cast<size_t>(x) * bytes, raw.data() + src, bytes);
                 }
             }
+            {
+                // Committed but never filled (a level the streamer has not delivered): not a level the shader may sample yet.
+                const uint64_t* w = reinterpret_cast<const uint64_t*>(linear.data());
+                const size_t words = linear.size() / 8;
+                size_t k = 0;
+                while (k < words && w[k] == 0) ++k;
+                if (k == words && linear.size() >= 64) { if (slice == 0 && mip + 1 > lowest_missing) lowest_missing = mip + 1; continue; }
+            }
             gpu::UploadTexture(*r.texture, mip, slice, nullptr, linear.data(), row_pitch, row_pitch * lv.height);
             if (const char* dump = std::getenv("UTSURO_DUMPR8"); dump != nullptr && info.format == 61 && mip == 0 && info.width >= 512) {
                 static std::atomic<int> n {0};
                 if (n < 12) { char path[512]; std::snprintf(path, sizeof path, "%s/r8_%02d_%ux%u.png", dump, n++, info.width, info.height); gpu::SavePng(*r.texture, path); }
+            }
+            if (static const bool log = std::getenv("UTSURO_UPLOADLOG") != nullptr; log && info.width >= 256 && lv.width >= 16) {
+                size_t nonzero = 0;
+                for (uint8_t b : linear) nonzero += b != 0;
+                static std::atomic<int> shown {0};
+                if (shown++ < 300) UT_INFO("d3d: uploaded %ux%u fmt %u mip %u (%ux%u) tile %u: %zu non-zero bytes of %zu", info.width, info.height, info.format, mip, lv.width, lv.height, r.tile_mode, nonzero, linear.size());
             }
             if (static const bool log = std::getenv("UTSURO_UPLOADLOG") != nullptr; log && info.format == 61 && mip == 0) {
                 size_t nonzero = 0;
@@ -509,6 +550,7 @@ void UploadPlacement(Res& r) {
             }
         }
     }
+    gpu::SetMinMip(*r.texture, std::min<uint32_t>(lowest_missing, info.mips > 0 ? info.mips - 1 : 0));
 }
 
 // ---- the title's inline descriptor stream ----------------------------------------------------------
@@ -647,7 +689,7 @@ void BindStream(CtxState& s, gpu::DrawState& d, gpu::DrawArgs& args) {
             if (rf.textures & (1u << k)) {
                 if (const auto* t = get(kRegTexture + 0x20 * k)) {
                     if (Res* view = ResFromDescriptor(t->dw)) {
-                        if (view->base != nullptr && (view->base->placement_dirty || PlacementChanged(*view->base))) UploadPlacement(*view->base);
+                        if (view->base != nullptr && ((view->base->placement_dirty && g_frame.load() >= view->base->next_try_frame) || PlacementChanged(*view->base))) UploadPlacement(*view->base);
                         d.srv[stage][k] = view->view;
                     }
                 }
@@ -1088,7 +1130,7 @@ void RegisterGpuOverrides() {
         std::scoped_lock lock {g_res_mutex};
         int hit = 0;
         for (Res* r : g_placed)
-            if (r->placement < to && r->placement + r->host_size > from) { r->placement_dirty = true; ++hit; }
+            if (r->placement < to && r->placement + r->host_size > from) { r->placement_dirty = true; r->next_try_frame = 0; ++hit; }
         if (static const bool log = std::getenv("UTSURO_PLACE") != nullptr; log) {
             static std::atomic<int> total {0}, shown {0};
             ++total;

@@ -43,6 +43,8 @@ struct Texture {
     TextureDesc desc;
     MTLPixelFormat pixel_format {MTLPixelFormatInvalid};
     std::map<std::string, id<MTLTexture>> views;
+    uint32_t min_mip {0};   ///< sampled views start here (levels above it were never written)
+    uint32_t uploads {0};   ///< UploadTexture calls (debugging: a texture nothing was ever written to)
 };
 
 struct Shader {
@@ -366,7 +368,7 @@ id<MTLTexture> ViewOf(Texture& t, const ViewDesc& v, bool as_render_target) {
     }
     const uint32_t total_mips = static_cast<uint32_t>(t.mtl.mipmapLevelCount);
     const uint32_t total_slices = static_cast<uint32_t>(t.mtl.arrayLength);
-    uint32_t first_mip = std::min(v.first_mip, total_mips - 1);
+    uint32_t first_mip = std::min(std::max(v.first_mip, as_render_target ? 0u : t.min_mip), total_mips - 1);
     uint32_t mip_count = v.mip_count == 0 ? total_mips - first_mip : std::min(v.mip_count, total_mips - first_mip);
     uint32_t first_slice = std::min(v.first_slice, total_slices > 0 ? total_slices - 1 : 0);
     uint32_t slice_count = v.slice_count == 0 ? (total_slices - first_slice) : std::min(v.slice_count, total_slices - first_slice);
@@ -851,9 +853,15 @@ uint32_t BlockSize(MTLPixelFormat f, bool* compressed) {
 }
 } // namespace
 
+void SetMinMip(Texture& t, uint32_t mip) {
+    std::scoped_lock lock {g->mutex};
+    t.min_mip = mip;
+}
+
 void UploadTexture(Texture& t, uint32_t mip, uint32_t slice, const uint32_t box[6], const void* data, uint32_t row_pitch, uint32_t slice_pitch) {
     std::scoped_lock lock {g->mutex};
     if (t.mtl == nil || data == nullptr) return;
+    ++t.uploads;
     const uint32_t mw = std::max<uint32_t>(1, (uint32_t)t.mtl.width >> mip), mh = std::max<uint32_t>(1, (uint32_t)t.mtl.height >> mip);
     const uint32_t md = std::max<uint32_t>(1, (uint32_t)t.mtl.depth >> mip);
     uint32_t l = 0, tp = 0, f = 0, r = mw, b = mh, bk = md;
@@ -1045,6 +1053,13 @@ void Draw(const DrawState& st, const DrawArgs& args) {
                 const Shader* shader = stage == 0 ? st.vs.get() : st.ps.get();
                 if (shader == nullptr || !(shader->translated.reflection.constant_buffers & (1u << slot))) continue;
                 if (!b.buffer) { UT_INFO("gpu:   %s cb%d: NOT BOUND", stage ? "ps" : "vs", slot); continue; }
+                {
+                    const uint32_t* dw = reinterpret_cast<const uint32_t*>(BufferData(*b.buffer) + b.offset);
+                    size_t nz = 0;
+                    const size_t count = std::min<size_t>(b.size ? b.size : b.buffer->size, b.buffer->size) / 4;
+                    for (size_t k = 0; k < count; ++k) nz += dw[k] != 0;
+                    UT_INFO("gpu:   %s cb%d has %zu non-zero dwords of %zu", stage ? "ps" : "vs", slot, nz, count);
+                }
                 const float* f = reinterpret_cast<const float*>(BufferData(*b.buffer) + b.offset);
                 UT_INFO("gpu:   %s cb%d (%u bytes, off %u, ring %d): %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g", stage ? "ps" : "vs", slot, b.buffer->size, b.offset, b.buffer->ring_frame,
                         f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9], f[10], f[11], f[12], f[13], f[14], f[15],
@@ -1070,8 +1085,8 @@ void Draw(const DrawState& st, const DrawArgs& args) {
                 const NSUInteger mx = std::max<NSUInteger>(1, tx.mtl.width / 2), my = std::max<NSUInteger>(1, tx.mtl.height / 2);
                 if (!IsDepth(tx.pixel_format) && tx.mtl.textureType == MTLTextureType2D && (tx.pixel_format == MTLPixelFormatRGBA8Unorm || tx.pixel_format == MTLPixelFormatBGRA8Unorm))
                     [tx.mtl getBytes:px bytesPerRow:64 fromRegion:MTLRegionMake2D(mx, my, 4, 1) mipmapLevel:0];
-                UT_INFO("gpu:   ps t%d: %lux%lu fmt %lu mips %lu centre %02x%02x%02x%02x %02x%02x%02x%02x", i, (unsigned long)tx.mtl.width, (unsigned long)tx.mtl.height, (unsigned long)tx.pixel_format,
-                        (unsigned long)tx.mtl.mipmapLevelCount, px[0], px[1], px[2], px[3], px[4], px[5], px[6], px[7]);
+                UT_INFO("gpu:   ps t%d: %lux%lu fmt %lu mips %lu uploads %u centre %02x%02x%02x%02x %02x%02x%02x%02x", i, (unsigned long)tx.mtl.width, (unsigned long)tx.mtl.height, (unsigned long)tx.pixel_format,
+                        (unsigned long)tx.mtl.mipmapLevelCount, tx.uploads, px[0], px[1], px[2], px[3], px[4], px[5], px[6], px[7]);
             }
             if (st.vb[0].buffer) {
                 const float* f = reinterpret_cast<const float*>(BufferData(*st.vb[0].buffer) + st.vb[0].offset);

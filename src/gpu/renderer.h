@@ -123,6 +123,8 @@ void CopyTexture(Texture& dst, uint32_t dst_mip, uint32_t dst_slice, uint32_t dx
                  Texture& src, uint32_t src_mip, uint32_t src_slice, const uint32_t box[6]);
 void GenerateMips(Texture& texture);
 const TextureDesc& TextureInfo(const Texture& texture);
+/// Sampled views start at this mip: the levels above it have no texels yet (a streamed texture).
+void SetMinMip(Texture& texture, uint32_t mip);
 
 // ---- shaders and layouts ----------------------------------------------------------------------
 std::shared_ptr<Shader> CreateShader(const uint8_t* dxbc, size_t size, ShaderStage stage);
