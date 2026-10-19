@@ -299,6 +299,19 @@ void RegisterStorage(Runtime& rt) {
             return 0;
         }),
     });
+    // Windows.Storage.Streams.Buffer is also activatable by titles (IBufferFactory::Create(capacity)).
+    {
+        Iface& factory = rt.DefineInterface("IBufferFactory", "71AF914D-C10F-484B-BC50-14BC623B3A27", {
+            fn("Create", [](Call& c) -> uint32_t {
+                const uint64_t capacity = c.Arg(0);
+                const uint64_t buffer = NewHostBuffer(std::vector<uint8_t>(static_cast<size_t>(capacity)));
+                if (Obj* o = Runtime::Get().FromPointer(buffer)) o->u64["length"] = 0;
+                *c.Ptr<uint64_t>(1) = buffer;
+                return 0;
+            }),
+        });
+        rt.DefineClass("Windows.Storage.Streams.Buffer", [](Runtime&) -> Obj* { return nullptr; }, &factory);
+    }
     rt.DefineComInterface("IBufferByteAccess", "905a0fef-bc53-11df-8c49-001e4fc686da", {
         [&] { Method m; m.name = "Buffer"; m.params = 1; m.fn = [](Call& c) -> uint32_t { *c.Ptr<uint64_t>(0) = c.obj.u64["data"]; return 0; }; return m; }(),
     }, [](Call&) -> uint32_t { return 0x80004001u; }).base_slots = 3;
