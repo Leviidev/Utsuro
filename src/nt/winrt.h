@@ -103,7 +103,8 @@ public:
     /// A class with several statics interfaces.
     void DefineClassMulti(const std::string& runtime_name, std::function<Obj*(Runtime&)> create, std::vector<Iface*> statics);
 
-    Obj* NewObject(const std::string& class_name, std::vector<Iface*> ifaces);
+    /// `block_bytes`: the least size of an object's memory, for classes whose fields the title reads in place (D3D resources).
+    Obj* NewObject(const std::string& class_name, std::vector<Iface*> ifaces, size_t block_bytes = 32);
     /// The guest pointer through which `obj` is seen as `iface`.
     uint64_t Pointer(Obj& obj, Iface& iface);
 

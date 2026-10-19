@@ -179,6 +179,7 @@ const Hook kHooks[] = {
     {"d3d11_x.dll", "D3DFreeGraphicsMemory", D3DFreeGraphicsMemory, 0},
     {"d3d11_x.dll", "D3DConfigureVirtualMemory", ReturnOk, 0},
     {"d3d11_x.dll", "D3DMapEsramMemory", ReturnOk, 0},
+    {"d3d11_x.dll", "DXGIXPresentArray", d3d::PresentArray, 0},
     {"d3d11_x.dll", "DXGIXSetVLineNotification", SignalOnVblank, 0},
     {"d3d11_x.dll", "DXGIXSetFrameNotification", SignalOnVblank, 0},
     {"mmdevapi.dll", "DllGetClassObject", mmdevice::DllGetClassObject, 0},

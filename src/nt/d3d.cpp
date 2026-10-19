@@ -70,7 +70,13 @@ std::vector<Iface*> InterfacesFor(const std::string& type) {
 Obj* New(const std::string& type) {
     auto ifaces = InterfacesFor(type);
     if (ifaces.empty()) return nullptr;
-    Obj* o = Runtime::Get().NewObject("D3D:" + type, ifaces);
+    // The title reads descriptor fields straight out of resource objects (inline accessors), well past the vtable and id.
+    Obj* o = Runtime::Get().NewObject("D3D:" + type, ifaces, 0x200);
+    if (std::getenv("UTSURO_SENTINEL") != nullptr && ifaces[0]->inline_table == 0) {
+        // Debugging aid: every dword of the object past its header holds its offset, to see in the title's output which fields it copies.
+        auto* w = reinterpret_cast<uint32_t*>(o->blocks[0]);
+        for (uint32_t i = 6; i < 0x200 / 4; ++i) w[i] = 0xC0DE0000u | (i * 4);
+    }
     // Contexts (immediate or deferred) tell the title's inline Set* functions to go out of line, to the function table.
     if (ifaces[0]->inline_table != 0) reinterpret_cast<uint8_t*>(o->blocks[0])[g_flags_offset] = 1;
     return o;
@@ -135,6 +141,8 @@ void FormatShape(uint32_t fmt, uint32_t width, uint32_t height, uint32_t* pitch,
 
 /// What the title has bound on a context. Getters read it back; a renderer reads it at draw time.
 struct Viewport { float x, y, w, h, min_depth, max_depth; };
+/// A draw a deferred context recorded: replayed, with the immediate context's render targets, when its command list executes.
+struct RecordedDraw { gpu::DrawState state; gpu::DrawArgs args; };
 struct CtxState {
     uint64_t cb[6][16] {}, srv[6][128] {}, sampler[6][16] {}, shader[6] {};
     uint64_t rtv[8] {}, dsv {};
@@ -148,10 +156,17 @@ struct CtxState {
     uint32_t cb_first[6][16] {}, cb_count[6][16] {};   ///< D3D11.1 constant ranges, in float4s (count 0: the whole buffer)
     uint64_t layout {}, vb[16] {}, ib {};
     uint32_t stride[16] {}, voffset[16] {}, ib_format {0}, ib_offset {0}, topology {0};
+    // Titles of console OS 6.2.13xxx bind resources by appending descriptor packets to the context's constant-engine buffer.
+    struct Reg { uint32_t dw[8] {}; uint32_t n {0}; };
+    std::unordered_map<uint32_t, Reg> regs;   ///< register (byte offset) -> the last descriptor written there
+    uint64_t stream_parsed {0};               ///< how far into the buffer the packets have been read
+    uint64_t ib_address {0};                  ///< the placement index buffer's data
+    std::vector<RecordedDraw> recorded;       ///< a deferred context: draws since the last FinishCommandList
 };
 
 std::map<uint64_t, CtxState> g_ctx;
-CtxState& StateOf(Obj& o) { return g_ctx[o.id]; }
+std::mutex g_ctx_mutex;
+CtxState& StateOf(Obj& o) { std::scoped_lock lock {g_ctx_mutex}; return g_ctx[o.id]; }   // nodes never move; contexts run on several threads
 
 void OverrideAll(const char* method, winrt::HostFn fn, const char* only_iface_prefix = nullptr) {
     for (auto& [name, iface] : g_ifaces) {
@@ -172,7 +187,7 @@ uint32_t Fallback(Call& c) {
     const winrt::Method& m = c.iface.methods[c.slot];
     {
         static std::map<std::string, bool> seen;
-        if (seen.emplace(c.iface.name + "::" + m.name, true).second) UT_INFO("d3d: first call of %s::%s", c.iface.name.c_str(), m.name.c_str());
+        if (seen.emplace(c.iface.name + "::" + m.name, true).second) UT_INFO("d3d: first call of %s::%s from %s", c.iface.name.c_str(), m.name.c_str(), c.args.rsp != 0 ? c.kernel.Describe(*reinterpret_cast<uint64_t*>(c.args.rsp)).c_str() : "?");
     }
     if (m.out_index >= 0 && g_defs.count(m.out_type)) {
         auto* out = c.Ptr<uint64_t>(m.out_index);
@@ -496,6 +511,7 @@ void Register(Runtime& rt, uint32_t os_timestamp) {
         const uint64_t buffer = buffer_first ? c.Arg(0) : c.Arg(1);
         const uint64_t format = buffer_first ? c.Arg(1) : c.Arg(0);
         s.ib = buffer;
+        s.ib_address = 0;
         s.ib_format = (format & 0xFF) == 0 ? 57 : 42;
         s.ib_offset = static_cast<uint32_t>(c.Arg(2));
         return 0;
@@ -526,6 +542,18 @@ void Register(Runtime& rt, uint32_t os_timestamp) {
         return 0;
     });
     OverrideAll("GetDesc", [](Call& c) -> uint32_t {
+        if (c.iface.name.rfind("IDXGISwapChain", 0) == 0 && c.Arg(0) != 0) {   // DXGI_SWAP_CHAIN_DESC, from the DXGI_SWAP_CHAIN_DESC1 it was made with
+            uint32_t d1[12] {};
+            auto it = c.obj.str.find("desc");
+            if (it != c.obj.str.end()) std::memcpy(d1, it->second.data(), std::min<size_t>(it->second.size(), sizeof d1));
+            auto* d = c.Ptr<uint32_t>(0);
+            std::memset(d, 0, 0x44);
+            d[0] = d1[0]; d[1] = d1[1]; d[2] = 60; d[3] = 1; d[4] = d1[2];   // size, 60/1 Hz, format
+            d[7] = d1[4]; d[8] = d1[5];                                       // sample count, quality
+            d[9] = d1[6]; d[10] = d1[7];                                      // buffer usage, buffer count
+            d[14] = 1; d[15] = d1[9]; d[16] = d1[11];                         // windowed, swap effect, flags
+            return 0;
+        }
         if (c.iface.name == "IDXGIOutput" && c.Arg(0) != 0) {   // DXGI_OUTPUT_DESC
             auto* d = c.Ptr<uint8_t>(0);
             std::memset(d, 0, 96);
@@ -566,7 +594,20 @@ void Register(Runtime& rt, uint32_t os_timestamp) {
     UT_INFO("d3d: %zu interfaces", g_ifaces.size());
 }
 
+uint64_t PresentArray(Kernel&, NtThread&, SyscallArgs& a) {
+    const uint32_t sync = static_cast<uint32_t>(a[0]), count = static_cast<uint32_t>(a[3]);
+    const auto* chains = a.Ptr<uint64_t>(4);
+    for (uint32_t i = 0; chains != nullptr && i < count; ++i) {
+        Obj* o = Runtime::Get().FromPointer(chains[i]);
+        if (o == nullptr || !o->user) continue;
+        Res* r = static_cast<Res*>(o->user.get());
+        if (gpu::Available()) gpu::Present(r->texture, sync);
+    }
+    return 0;
+}
+
 uint64_t CreateDevice(Kernel& kernel, NtThread&, SyscallArgs& a) {
+    g_kernel = &kernel;
     static bool stats = false;
     if (!stats && std::getenv("UTSURO_D3DSTATS") != nullptr) {
         stats = true;

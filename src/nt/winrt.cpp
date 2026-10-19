@@ -191,7 +191,7 @@ GuestStep Runtime::InvokeDelegate(uint64_t delegate, std::initializer_list<uint6
     return s;
 }
 
-Obj* Runtime::NewObject(const std::string& class_name, std::vector<Iface*> ifaces) {
+Obj* Runtime::NewObject(const std::string& class_name, std::vector<Iface*> ifaces, size_t block_bytes) {
     auto o = std::make_unique<Obj>();
     o->id = next_id_++;
     o->class_name = class_name;
@@ -200,7 +200,7 @@ Obj* Runtime::NewObject(const std::string& class_name, std::vector<Iface*> iface
         Iface* f = o->ifaces[i];
         if (f->vtable == 0) Materialize(*f);
         const size_t slots = static_cast<size_t>(f->base_slots) + f->methods.size();
-        const uint64_t block = AllocGuest(f->inline_table != 0 ? f->inline_table + slots * 8 + 64 : 32, 16);
+        const uint64_t block = AllocGuest(f->inline_table != 0 ? f->inline_table + slots * 8 + 64 : block_bytes, 16);
         reinterpret_cast<uint64_t*>(block)[0] = f->vtable;
         if (f->inline_table != 0) std::memcpy(reinterpret_cast<void*>(block + f->inline_table), reinterpret_cast<void*>(f->vtable), slots * 8);
         reinterpret_cast<uint64_t*>(block)[1] = o->id;

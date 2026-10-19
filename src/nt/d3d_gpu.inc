@@ -15,6 +15,16 @@ struct Res {
     uint32_t map_subresource {0};
     bool map_write {false};
     uint32_t usage {0}, bind {0};
+    // Memory the title's inline descriptors point at: a buffer's data, as host memory (placement memory, or the buffer's own storage).
+    uint64_t host_ptr {0};
+    uint32_t host_size {0};
+    // A placement texture: where the title keeps its texels (in the console GPU's tiled layout), and whether they were written since the last upload.
+    uint64_t placement {0};
+    uint32_t tile_mode {0}, pitch {0};
+    bool placement_dirty {false};
+    Res* base {nullptr};                         ///< a view's resource
+    std::vector<RecordedDraw> recorded;          ///< a command list: what to replay
+    std::vector<gpu::InputElement> elements;     ///< an input layout's elements
 };
 
 Res& R(Obj& o) {
@@ -38,6 +48,40 @@ Res* ResAt(uint64_t pointer) {
     std::scoped_lock lock {g_res_mutex};
     g_res_cache[pointer] = r;
     return r;
+}
+
+// ---- descriptors inside objects -----------------------------------------------------------------
+// Titles built for console OS 6.2.13xxx emit their resource bindings inline, as packets copying descriptors out of the resource
+// objects (found with UTSURO_SENTINEL): a buffer holds its V# at +0x20, a shader resource view its T# at +0x30, a sampler its S#
+// at +0x20. Buffers point at host memory (the console's GPU virtual addresses are the guest's); views and samplers carry the id of
+// their object, which the packets then carry to the draw.
+constexpr uint32_t kDescMagic = 0xD3D1FACEu;
+std::unordered_map<uint64_t, Res*> g_by_id;
+std::vector<Res*> g_placed;   // placement textures, to find which a cache flush covers
+
+uint8_t* ObjMem(Obj& o) { return reinterpret_cast<uint8_t*>(o.blocks[0]); }
+
+void SetBufferDescriptor(Obj& o, uint64_t base, uint32_t size) {
+    uint8_t* m = ObjMem(o);
+    std::memset(m + 0x20, 0, 0x20);
+    *reinterpret_cast<uint64_t*>(m + 0x20) = base & 0xFFFFFFFFFFFFull;
+    *reinterpret_cast<uint32_t*>(m + 0x28) = size;
+}
+
+void SetIdDescriptor(Obj& o, uint32_t offset, uint32_t bytes) {
+    uint8_t* m = ObjMem(o);
+    std::memset(m + offset, 0, bytes);
+    *reinterpret_cast<uint32_t*>(m + offset) = static_cast<uint32_t>(o.id);
+    *reinterpret_cast<uint32_t*>(m + offset + 4) = kDescMagic;
+    std::scoped_lock lock {g_res_mutex};
+    g_by_id[o.id] = &R(o);
+}
+
+Res* ResFromDescriptor(const uint32_t* d) {
+    if (d[1] != kDescMagic) return nullptr;
+    std::scoped_lock lock {g_res_mutex};
+    auto it = g_by_id.find(d[0]);
+    return it == g_by_id.end() ? nullptr : it->second;
 }
 
 uint32_t U32(const std::string& s, size_t index) {
@@ -67,13 +111,17 @@ void OnCreate(Call& c, const winrt::Method& m, Obj& o) {
         const void* initial = nullptr;
         if (c.Arg(1) != 0) initial = reinterpret_cast<const void*>(*c.Ptr<uint64_t>(1));
         r.buffer = gpu::CreateBuffer(std::max<uint32_t>(size, 16), r.usage == 2, initial);
-    } else if (n == "CreateTexture1D" || n == "CreateTexture2D" || n == "CreateTexture3D") {
+        r.host_ptr = reinterpret_cast<uint64_t>(gpu::BufferData(*r.buffer));
+        r.host_size = size;
+        SetBufferDescriptor(o, r.host_ptr, size);
+    } else if (n == "CreateTexture1D" || n == "CreateTexture2D" || n == "CreateTexture3D" || n == "CreatePlacementTexture2D") {
+        const bool placed = n == "CreatePlacementTexture2D";   // (desc, tile mode, pitch, placement address, ppTexture)
         gpu::TextureDesc d;
         uint32_t bind, misc, usage;
         if (n == "CreateTexture1D") {
             d.width = U32(desc, 0); d.height = 1; d.mips = MipCount(U32(desc, 1), d.width, 1); d.array_size = std::max(1u, U32(desc, 2)); d.format = U32(desc, 3);
             usage = U32(desc, 4); bind = U32(desc, 5); misc = U32(desc, 7);
-        } else if (n == "CreateTexture2D") {
+        } else if (n == "CreateTexture2D" || placed) {
             d.width = U32(desc, 0); d.height = U32(desc, 1); d.mips = MipCount(U32(desc, 2), d.width, d.height); d.array_size = std::max(1u, U32(desc, 3));
             d.format = U32(desc, 4); d.samples = std::max(1u, U32(desc, 5)); usage = U32(desc, 7); bind = U32(desc, 8); misc = U32(desc, 10);
         } else {
@@ -87,6 +135,20 @@ void OnCreate(Call& c, const winrt::Method& m, Obj& o) {
         r.usage = usage;
         r.bind = bind;
         r.texture = gpu::CreateTexture(d);
+        if (placed) {
+            r.tile_mode = static_cast<uint32_t>(c.Arg(1));
+            r.pitch = static_cast<uint32_t>(c.Arg(2));
+            r.placement = c.Arg(3);
+            r.placement_dirty = true;
+            {
+                uint32_t row, rows;
+                FormatShape(d.format, d.width, d.height, &row, &rows);
+                r.host_size = std::max(r.pitch, row) * rows * d.array_size * 2;   // generous: room for the mips
+                std::scoped_lock lock {g_res_mutex};
+                g_placed.push_back(&r);
+            }
+            return;
+        }
         if (d.width <= 4 && d.height <= 4) {
             const auto* init0 = c.Ptr<uint8_t>(1);
             uint64_t mem = 0;
@@ -114,6 +176,8 @@ void OnCreate(Call& c, const winrt::Method& m, Obj& o) {
         if (base == nullptr || !base->texture) return;   // buffer views are not drawn from yet
         auto v = std::make_shared<gpu::TextureView>();
         v->texture = base->texture;
+        r.base = base;
+        if (n == "CreateShaderResourceView") SetIdDescriptor(o, 0x30, 0x20);
         const bool have = c.Arg(1) != 0;
         gpu::ViewDesc& vd = v->desc;
         if (have) {
@@ -175,8 +239,22 @@ void OnCreate(Call& c, const winrt::Method& m, Obj& o) {
             elements.push_back(std::move(el));
         }
         r.layout = gpu::CreateInputLayout(elements, c.Ptr<uint8_t>(2), static_cast<size_t>(c.Arg(3)));
+        r.elements = elements;
     } else if (n == "CreateBlendState" || n == "CreateDepthStencilState" || n == "CreateRasterizerState" || n == "CreateSamplerState" || n == "CreateDepthStencilStateX") {
         r.state.bytes = desc;
+        if (n == "CreateSamplerState") SetIdDescriptor(o, 0x20, 0x10);
+    } else if (n == "CreateDeferredContext" || n == "CreateDeferredContext1" || n == "CreateDeferredContext2") {
+        o.u64["deferred"] = 1;
+    } else if (n == "FinishCommandList") {
+        r.recorded = std::move(StateOf(c.obj).recorded);
+        StateOf(c.obj).recorded.clear();
+    } else if (n == "CreatePlacementBuffer") {
+        // (desc, placement address, ppBuffer): the title keeps the data; descriptors point straight at it.
+        r.usage = U32(desc, 1);
+        r.bind = U32(desc, 2);
+        r.host_ptr = c.Arg(1);
+        r.host_size = U32(desc, 0);
+        SetBufferDescriptor(o, 0, r.host_size);   // the title adds the buffer's address itself (found by watching what its packets hold)
     } else if (n == "CreateSwapChainForCoreWindow") {
         gpu::TextureDesc d;
         d.width = U32(desc, 0);
@@ -208,7 +286,171 @@ uint32_t TopologyOf(uint64_t hardware) {
     }
 }
 
-gpu::DrawState Snapshot(Obj& ctx, CtxState s) {
+/// The constant-engine buffer the title's inline code appends packets to, and the resource batch it is recording
+/// (m_pCeCurrent / m_pCeBiasedLimit / m_pCeLimit and m_pBatchCurrent / m_pBatchLimit of the context's tiny device).
+constexpr uint32_t kBatchCurrent = 0x20 + 0x20, kBatchLimit = 0x20 + 0x28, kCeCurrent = 0x20 + 0x30, kCeBiasedLimit = 0x20 + 0x38, kCeLimit = 0x20 + 0x40;
+
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+
+Kernel* g_kernel {nullptr};
+bool HostRange(uint64_t address, uint64_t bytes) { return g_kernel != nullptr && g_kernel->Vm().Contains(address, bytes); }
+
+/// Copies guest memory the title's descriptors point at, without trusting them: reserved-but-uncommitted pages fault, so the kernel does the read.
+bool SafeCopy(uint64_t address, void* destination, uint64_t bytes) {
+    mach_vm_size_t done = 0;
+    return address != 0 && mach_vm_read_overwrite(mach_task_self(), address, bytes, reinterpret_cast<mach_vm_address_t>(destination), &done) == KERN_SUCCESS && done == bytes;
+}
+
+/// Copies a placement texture's texels into the host texture (the first mip, as laid out linearly for now).
+void UploadPlacement(Res& r) {
+    r.placement_dirty = false;
+    if (!r.texture || r.placement == 0 || (r.bind & 0x60) != 0) return;   // render targets and depth buffers are written by the GPU
+    const auto& info = gpu::TextureInfo(*r.texture);
+    uint32_t row, rows;
+    FormatShape(info.format, info.width, info.height, &row, &rows);
+    const uint32_t pitch = r.pitch != 0 ? r.pitch : row;
+    std::vector<uint8_t> texels(static_cast<size_t>(pitch) * rows);
+    if (!SafeCopy(r.placement, texels.data(), texels.size())) {
+        static std::atomic<int> shown {0};
+        if (shown++ < 6) {
+            mach_vm_address_t at = r.placement;
+            mach_vm_size_t size = 0;
+            vm_region_basic_info_data_64_t region {};
+            mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+            mach_port_t object = MACH_PORT_NULL;
+            const kern_return_t kr = mach_vm_region(mach_task_self(), &at, &size, VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&region), &count, &object);
+            UT_INFO("d3d: a placement texture at %#llx (%ux%u fmt %u, %zu bytes) is not readable; the host's region at/after it: kr %d %#llx+%#llx protection %d", (unsigned long long)r.placement, info.width, info.height, info.format, texels.size(), kr, (unsigned long long)at, (unsigned long long)size, region.protection);
+        }
+        return;
+    }
+    gpu::UploadTexture(*r.texture, 0, 0, nullptr, texels.data(), pitch, pitch * rows);
+}
+
+// ---- the title's inline descriptor stream ----------------------------------------------------------
+// Packets: a header (register | (dwords - 1) << 16) and the dwords. Registers are byte offsets of resource slots: textures (T#, 8 dwords)
+// from 0x6b40 in 0x20 steps, samplers (S#, 4) from 0x7b40 in 0x10 steps, vertex streams (V#, 4) from 0x7d70, constant buffers (V#, 4)
+// from 0x1c40 and from 0x6a00.
+constexpr uint32_t kRegTexture = 0x6b40, kRegSampler = 0x7b40, kRegVertex = 0x7d70, kRegCbA = 0x1c40, kRegCbB = 0x6a00;
+
+std::shared_ptr<gpu::Buffer> CopyOfHost(uint64_t address, uint32_t bytes) {
+    if (address == 0 || bytes == 0) return nullptr;
+    std::vector<uint8_t> data(std::max<uint32_t>(bytes, 16));
+    if (!SafeCopy(address, data.data(), bytes)) {
+        static std::atomic<int> shown {0};
+        if (shown++ < 8) UT_INFO("d3d: a descriptor points at %#llx (%u bytes), which is not readable", (unsigned long long)address, bytes);
+        return nullptr;
+    }
+    return gpu::CreateBuffer(static_cast<uint32_t>(data.size()), false, data.data());
+}
+
+/// Reads the packets the title appended to the context's constant-engine buffer since the last read.
+void ParseStream(Obj& ctx, CtxState& s) {
+    if (ctx.blocks.empty()) return;
+    const uint64_t buffer = ctx.u64["ce_buffer"];
+    if (buffer == 0) return;
+    const uint64_t current = *reinterpret_cast<const uint64_t*>(ctx.blocks[0] + kCeCurrent);
+    if (current < buffer || current > buffer + 16384 * 4) {   // not the buffer MakeCeSpace gave out
+        static std::atomic<int> shown {0};
+        if (shown++ < 4) UT_INFO("d3d: ctx %llu has its constant-engine cursor at %#llx, outside its buffer %#llx", (unsigned long long)ctx.id, (unsigned long long)current, (unsigned long long)buffer);
+        return;
+    }
+    if (s.stream_parsed < buffer || s.stream_parsed > current) s.stream_parsed = buffer;
+    uint64_t q = s.stream_parsed;
+    while (q + 4 <= current) {
+        const uint32_t header = *reinterpret_cast<const uint32_t*>(q);
+        const uint32_t n = (header >> 16) + 1;
+        if (n > 8) { static bool shown = false; if (!shown) { shown = true; UT_INFO("d3d: unknown packet %08x in a command stream", header); } q = current; break; }
+        if (q + 4 + 4ull * n > current) break;
+        auto& r = s.regs[header & 0xFFFF];
+        r.n = n;
+        std::memcpy(r.dw, reinterpret_cast<const void*>(q + 4), 4ull * n);
+        q += 4 + 4ull * n;
+    }
+    s.stream_parsed = q;
+}
+
+/// Resolves what the packets bound into the draw: vertex streams, constant buffers, textures and samplers.
+void BindStream(CtxState& s, gpu::DrawState& d, gpu::DrawArgs& args) {
+    if (s.regs.empty()) return;
+    auto get = [&](uint32_t reg) -> const CtxState::Reg* { auto it = s.regs.find(reg); return it == s.regs.end() ? nullptr : &it->second; };
+    auto address = [](const CtxState::Reg& r) { return static_cast<uint64_t>(r.dw[0]) | (static_cast<uint64_t>(r.dw[1] & 0xFFFF) << 32); };
+
+    // The indices the draw reads, and with them the vertices.
+    int64_t first_vertex = args.indexed ? 0 : args.start;
+    int64_t last_vertex = args.indexed ? 0 : static_cast<int64_t>(args.start) + args.count - 1;
+    if (args.indexed && s.ib_address != 0) {
+        const uint32_t size = s.ib_format == 42 ? 4 : 2;
+        const uint64_t at = s.ib_address + static_cast<uint64_t>(args.start) * size;
+        std::vector<uint8_t> indices(std::max<uint64_t>(static_cast<uint64_t>(args.count) * size, 16));
+        if (SafeCopy(at, indices.data(), static_cast<uint64_t>(args.count) * size)) {
+            uint32_t lo = 0xFFFFFFFFu, hi = 0;
+            for (uint32_t i = 0; i < args.count; ++i) {
+                const uint32_t v = size == 4 ? reinterpret_cast<const uint32_t*>(indices.data())[i] : reinterpret_cast<const uint16_t*>(indices.data())[i];
+                if (v == 0xFFFF && size == 2) continue;   // restart index
+                lo = std::min(lo, v); hi = std::max(hi, v);
+            }
+            d.index_buffer = gpu::CreateBuffer(static_cast<uint32_t>(indices.size()), false, indices.data());
+            d.index_offset = 0;
+            d.index_format = s.ib_format;
+            args.start = 0;
+            if (lo <= hi) {
+                first_vertex = static_cast<int64_t>(lo) + args.base_vertex;
+                last_vertex = static_cast<int64_t>(hi) + args.base_vertex;
+                args.base_vertex = -static_cast<int32_t>(lo);
+            }
+        }
+    } else if (!args.indexed) {
+        args.start = 0;
+    }
+    Res* layout = ResAt(s.layout);
+    for (uint32_t k = 0; k < 8; ++k) {
+        const auto* v = get(kRegVertex + 0x10 * k);
+        if (v == nullptr || v->n < 3) continue;
+        const uint64_t base = address(*v);
+        const uint32_t stride = (v->dw[1] >> 16) & 0x3FFF, size = v->dw[2];
+        if (stride == 0 || base == 0) continue;
+        bool per_instance = false;
+        if (layout != nullptr) for (const auto& e : layout->elements) if (e.slot == k && e.slot_class == 1) per_instance = true;
+        uint64_t lo, hi;
+        if (per_instance) { lo = 0; hi = std::min<uint64_t>(size, (static_cast<uint64_t>(args.start_instance) + args.instances) * stride); }
+        else { lo = static_cast<uint64_t>(std::max<int64_t>(first_vertex, 0)) * stride; hi = std::min<uint64_t>(size, static_cast<uint64_t>(std::max<int64_t>(last_vertex + 1, 0)) * stride); }
+        if (hi <= lo) continue;
+        d.vb[k].buffer = CopyOfHost(base + lo, static_cast<uint32_t>(hi - lo));
+        d.vb[k].stride = stride;
+        d.vb[k].offset = 0;
+    }
+    for (int stage = 0; stage < 2; ++stage) {
+        const auto& sh = stage == 0 ? d.vs : d.ps;
+        if (!sh) continue;
+        const auto& rf = gpu::Reflection(*sh);
+        for (uint32_t k = 0; k < 14; ++k) {
+            if (!(rf.constant_buffers & (1u << k))) continue;
+            const auto* v = get((stage == 0 ? kRegCbA : kRegCbB) + 0x10 * k);
+            if (v == nullptr || v->n < 3) continue;
+            const uint32_t size = std::min<uint32_t>(v->dw[2], 65536);
+            d.cb[stage][k].buffer = CopyOfHost(address(*v), size);
+            d.cb[stage][k].offset = 0;
+            d.cb[stage][k].size = size;
+        }
+        for (uint32_t k = 0; k < 16; ++k) {
+            if (rf.textures & (1u << k)) {
+                if (const auto* t = get(kRegTexture + 0x20 * k)) {
+                    if (Res* view = ResFromDescriptor(t->dw)) {
+                        if (view->base != nullptr && view->base->placement_dirty) UploadPlacement(*view->base);
+                        d.srv[stage][k] = view->view;
+                    }
+                }
+            }
+            if (rf.samplers & (1u << k)) {
+                if (const auto* t = get(kRegSampler + 0x10 * k))
+                    if (Res* sampler = ResFromDescriptor(t->dw)) d.sampler[stage][k] = sampler->state;
+            }
+        }
+    }
+}
+
+gpu::DrawState Snapshot(Obj& ctx, CtxState& s, gpu::DrawArgs& args) {
     gpu::DrawState d;
     if (!ctx.blocks.empty()) {
         const auto* u = reinterpret_cast<const uint8_t*>(ctx.blocks[0] + kUserDataOffset);
@@ -272,15 +514,34 @@ gpu::DrawState Snapshot(Obj& ctx, CtxState s) {
     std::memcpy(d.viewports, s.viewports, sizeof d.viewports);
     d.num_scissors = s.num_scissors;
     std::memcpy(d.scissors, s.scissors, sizeof d.scissors);
+    BindStream(s, d, args);
     return d;
 }
 
-void DoDraw(Obj& ctx, const gpu::DrawArgs& args) {
+void DoDraw(Obj& ctx, const gpu::DrawArgs& args_in) {
     if (!gpu::Available()) return;
-    const gpu::DrawState d = Snapshot(ctx, StateOf(ctx));
+    gpu::DrawArgs args = args_in;
+    CtxState& state = StateOf(ctx);
+    ParseStream(ctx, state);
+    const gpu::DrawState d = Snapshot(ctx, state, args);
+    if (static const bool log = std::getenv("UTSURO_STREAMLOG") != nullptr; log) {
+        static std::atomic<int> n {0};
+        if (n++ < 14 && d.vs && d.ps) {
+            const auto& vr = gpu::Reflection(*d.vs);
+            const auto& pr = gpu::Reflection(*d.ps);
+            std::string regs;
+            for (auto& [reg, v] : state.regs) { char t[64]; std::snprintf(t, sizeof t, " %x(%u)", reg, v.n); regs += t; }
+            UT_INFO("d3d: draw %d: vs cb %#x [%u %u %u] tex %#x smp %#x | ps cb %#x [%u %u %u] tex %#x smp %#x | regs%s", n.load(), vr.constant_buffers, vr.cb_size[0] * 16, vr.cb_size[1] * 16, vr.cb_size[2] * 16, vr.textures,
+                    vr.samplers, pr.constant_buffers, pr.cb_size[0] * 16, pr.cb_size[1] * 16, pr.cb_size[2] * 16, pr.textures, pr.samplers, regs.c_str());
+            for (uint32_t reg : {kRegCbA, kRegCbA + 0x10u, kRegCbB, kRegCbB + 0x10u, kRegCbB + 0x20u}) {
+                auto it = state.regs.find(reg);
+                if (it != state.regs.end()) UT_INFO("d3d:   reg %x: base %#llx stride %u size %u", reg, (unsigned long long)(it->second.dw[0] | (uint64_t(it->second.dw[1] & 0xFFFF) << 32)), (it->second.dw[1] >> 16) & 0x3FFF, it->second.dw[2]);
+            }
+        }
+    }
     if (!d.vs) {
         static int shown = 0;
-        const CtxState& s = StateOf(ctx);
+        const CtxState& s = state;
         if (shown++ < 5) {
             Res* r = ResAt(s.shader[0]);
             UT_INFO("d3d: draw without a vertex shader: vs=%#llx res=%p shader=%p ps=%#llx", (unsigned long long)s.shader[0], (void*)r, r ? (void*)r->shader.get() : nullptr, (unsigned long long)s.shader[4]);
@@ -288,12 +549,16 @@ void DoDraw(Obj& ctx, const gpu::DrawArgs& args) {
     }
     if (args.indexed && !d.index_buffer) {
         static int shown = 0;
-        const CtxState& s = StateOf(ctx);
+        const CtxState& s = state;
         if (shown++ < 5) {
             Res* r = ResAt(s.ib);
             Obj* o = Runtime::Get().FromPointer(s.ib);
-            UT_INFO("d3d: indexed draw without an index buffer: ib=%#llx res=%p buffer=%p obj=%s fmt=%u", (unsigned long long)s.ib, (void*)r, r ? (void*)r->buffer.get() : nullptr, o ? o->class_name.c_str() : "?", s.ib_format);
+            UT_INFO("d3d: indexed draw without an index buffer: ib=%#llx res=%p buffer=%p obj=%s fmt=%u address=%#llx", (unsigned long long)s.ib, (void*)r, r ? (void*)r->buffer.get() : nullptr, o ? o->class_name.c_str() : "?", s.ib_format, (unsigned long long)s.ib_address);
         }
+    }
+    if (ctx.u64["deferred"] != 0) {
+        state.recorded.push_back({d, args});
+        return;
     }
     gpu::Draw(d, args);
 }
@@ -313,6 +578,10 @@ uint32_t MapBuffer(Call& c, Res& r, uint32_t type, uint64_t* out) {
     if (type == 4) p = gpu::RenameBuffer(r.buffer, false);   // WRITE_DISCARD: new storage, old contents stay with the frames that use them
     else p = gpu::BufferData(*r.buffer);
     const uint32_t size = gpu::BufferSize(*r.buffer);
+    if (type == 4) {   // the descriptors the title copies now name the new storage
+        r.host_ptr = reinterpret_cast<uint64_t>(p);
+        if (Obj* o = Runtime::Get().FromPointer(c.Arg(0))) SetBufferDescriptor(*o, r.host_ptr, size);
+    }
     out[0] = reinterpret_cast<uint64_t>(p);
     reinterpret_cast<uint32_t*>(out)[2] = size;
     reinterpret_cast<uint32_t*>(out)[3] = size;
@@ -341,7 +610,6 @@ bool InflateGuest(const uint8_t* src, uint32_t n, bool zlib_header, std::vector<
 
 /// The constant-engine buffer the title's inline code appends packets to, and the resource batch it is recording
 /// (m_pCeCurrent / m_pCeBiasedLimit / m_pCeLimit and m_pBatchCurrent / m_pBatchLimit of the context's tiny device).
-constexpr uint32_t kBatchCurrent = 0x20 + 0x20, kBatchLimit = 0x20 + 0x28, kCeCurrent = 0x20 + 0x30, kCeBiasedLimit = 0x20 + 0x38, kCeLimit = 0x20 + 0x40;
 
 void RegisterGpuOverrides() {
     // ---- queries: GPU timing and occlusion answer at once, with plausible values ----
@@ -369,7 +637,8 @@ void RegisterGpuOverrides() {
         // The packets already appended are for the real GPU's constant engine; hand out a fresh buffer.
         constexpr uint32_t kDwords = 16384, kBias = 70;
         uint8_t* ctx = reinterpret_cast<uint8_t*>(c.obj.blocks[0]);
-        UT_INFO("d3d: MakeCeSpace on %s ctx %p (this %#llx)", c.obj.class_name.c_str(), (void*)ctx, (unsigned long long)c.args[0]);
+        ParseStream(c.obj, StateOf(c.obj));
+        StateOf(c.obj).stream_parsed = 0;
         uint64_t& buf = c.obj.u64["ce_buffer"];
         if (buf == 0) buf = Runtime::Get().AllocGuest(kDwords * 4, 64);
         auto* start = reinterpret_cast<uint32_t*>(buf);
@@ -531,6 +800,46 @@ void RegisterGpuOverrides() {
     OverrideAll("ClearState", [](Call& c) -> uint32_t {
         auto& s = StateOf(c.obj);
         s = CtxState {};
+        return 0;
+    });
+
+    // IASetPlacementIndexBuffer(HardwareIndexFormat (0: 16 bit, 1: 32 bit), buffer, address of the indices)
+    OverrideAll("IASetPlacementIndexBuffer", [](Call& c) -> uint32_t {
+        auto& st = StateOf(c.obj);
+        st.ib = c.Arg(1);
+        st.ib_address = c.Arg(2);
+        st.ib_format = (c.Arg(0) & 0xFF) == 0 ? 57 : 42;
+        st.ib_offset = 0;
+        return 0;
+    });
+
+    // FlushGpuCacheRange(address, size, flags): the title wrote this memory with the CPU; the GPU's copy of it is stale.
+    OverrideAll("FlushGpuCacheRange", [](Call& c) -> uint32_t {
+        const uint64_t from = c.Arg(0), to = c.Arg(0) + c.Arg(1);
+        static std::atomic<int> shown {0};
+        if (std::getenv("UTSURO_PLACE") != nullptr && shown++ < 12) UT_INFO("d3d: FlushGpuCacheRange(%#llx, %#llx, %#llx)", (unsigned long long)c.Arg(0), (unsigned long long)c.Arg(1), (unsigned long long)c.Arg(2));
+        std::scoped_lock lock {g_res_mutex};
+        for (Res* r : g_placed)
+            if (r->placement < to && r->placement + r->host_size > from) r->placement_dirty = true;
+        return 0;
+    });
+
+    // ExecuteCommandList(list, restore state): the recorded draws run now, on the immediate context's render targets.
+    OverrideAll("ExecuteCommandList", [](Call& c) -> uint32_t {
+        Res* list = ResAt(c.Arg(0));
+        if (list == nullptr || !gpu::Available()) return 0;
+        const CtxState& imm = StateOf(c.obj);
+        for (const RecordedDraw& rd : list->recorded) {
+            gpu::DrawState d = rd.state;
+            for (int i = 0; i < 8; ++i)
+                if (!d.rtv[i]) if (Res* r = ResAt(imm.rtv[i])) d.rtv[i] = r->view;
+            if (!d.dsv) if (Res* r = ResAt(imm.dsv)) d.dsv = r->view;
+            if (d.num_viewports == 0) {
+                d.num_viewports = imm.num_viewports;
+                std::memcpy(d.viewports, imm.viewports, sizeof d.viewports);
+            }
+            gpu::Draw(d, rd.args);
+        }
         return 0;
     });
 
