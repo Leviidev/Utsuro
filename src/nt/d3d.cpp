@@ -491,8 +491,12 @@ void Register(Runtime& rt, uint32_t os_timestamp) {
     // Xbox signature: IASetIndexBuffer(HardwareIndexFormat (0: 16 bit, 1: 32 bit), pIndexBuffer, Offset).
     OverrideAll("IASetIndexBuffer", [](Call& c) -> uint32_t {
         auto& s = StateOf(c.obj);
-        s.ib = c.Arg(1);
-        s.ib_format = c.Arg(0) == 0 ? 57 : 42;
+        // Older console builds take the format first; from 6.2.13xxx the buffer comes first. A host object pointer tells them apart.
+        const bool buffer_first = Runtime::Get().FromPointer(c.Arg(0)) != nullptr;
+        const uint64_t buffer = buffer_first ? c.Arg(0) : c.Arg(1);
+        const uint64_t format = buffer_first ? c.Arg(1) : c.Arg(0);
+        s.ib = buffer;
+        s.ib_format = (format & 0xFF) == 0 ? 57 : 42;
         s.ib_offset = static_cast<uint32_t>(c.Arg(2));
         return 0;
     });

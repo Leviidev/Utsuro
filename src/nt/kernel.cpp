@@ -342,6 +342,76 @@ uint64_t Kernel::GuestReturnStub() {
     return guest_return_stub_;
 }
 
+uint64_t Kernel::ThreadStartShim() {
+    static uint64_t shim = 0;
+    if (shim == 0) {
+        uint64_t base = 0, size = 0x1000;
+        vm_->Allocate(&base, &size, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE, RegionKind::Private, "thread start shim");
+        auto* p = reinterpret_cast<uint8_t*>(base);
+        size_t n = 0;
+        auto put = [&](std::initializer_list<uint8_t> bytes) { for (uint8_t b : bytes) p[n++] = b; };
+        const uint64_t allocate = FindExport(ntdll_base_, "RtlAllocateHeap");
+        put({0x53});                                  // push rbx
+        put({0x48, 0x89, 0xCB});                      // mov rbx, rcx           (block: start routine, argument)
+        put({0x48, 0x83, 0xEC, 0x20});                // sub rsp, 32
+        put({0x65, 0x48, 0x8B, 0x04, 0x25, 0x60, 0x00, 0x00, 0x00});   // mov rax, gs:[0x60]     PEB
+        put({0x48, 0x8B, 0x48, 0x30});                // mov rcx, [rax+0x30]    ProcessHeap
+        put({0xBA, 0x08, 0x00, 0x00, 0x00});          // mov edx, HEAP_ZERO_MEMORY
+        put({0x41, 0xB8, 0x80, 0x00, 0x00, 0x00});    // mov r8d, 128
+        put({0x48, 0xB8});                            // mov rax, RtlAllocateHeap
+        std::memcpy(p + n, &allocate, 8); n += 8;
+        put({0xFF, 0xD0});                            // call rax               a TLS array with room for the title's index
+        put({0x49, 0x89, 0xC2});                      // mov r10, rax
+        put({0xB8, 0xF1, 0xFF, 0xFF, 0xFF});          // mov eax, 0xFFFFFFF1
+        put({0x0F, 0x05});                            // syscall                (host: fills it in)
+        put({0x48, 0x83, 0xC4, 0x20});                // add rsp, 32
+        put({0x48, 0x8B, 0x4B, 0x08});                // mov rcx, [rbx+8]
+        put({0x48, 0x8B, 0x03});                      // mov rax, [rbx]
+        put({0x5B});                                  // pop rbx
+        put({0xFF, 0xE0});                            // jmp rax
+        shim = base;
+    }
+    return shim;
+}
+
+// The title's own implicit TLS (a .tls section; the host maps the image without the loader's help): the loader gives every thread a copy at
+// ThreadLocalStoragePointer[index], and the console's loader hands the title index 1, which its code has built in. ntdll here knows only
+// index 0 and sizes the per-thread array for that alone, so the thread gets a larger array (`heap_array`, from the process heap, so that
+// ntdll can free it as its own) holding the same block under both numbers.
+void Kernel::FixThreadTls(NtThread& thread, uint64_t heap_array) {
+    if (exe_image_ == nullptr || thread.teb == 0 || heap_array == 0) return;
+    const auto* dos = reinterpret_cast<const uint8_t*>(exe_base_);
+    const uint32_t nt = *reinterpret_cast<const uint32_t*>(dos + 0x3C);
+    const uint32_t tls_rva = *reinterpret_cast<const uint32_t*>(dos + nt + 0x18 + 0x70 + 9 * 8);   // PE32+ data directory 9
+    if (tls_rva == 0) return;
+    struct TlsDirectory { uint64_t start, end, index, callbacks; uint32_t zero_fill, characteristics; };
+    const auto* dir = reinterpret_cast<const TlsDirectory*>(exe_base_ + tls_rva);
+    constexpr uint64_t kIndex = 1;
+    uint64_t& array_ptr = *reinterpret_cast<uint64_t*>(thread.teb + 0x58);
+    const uint64_t own = dir->index != 0 && vm_->Contains(dir->index, 4) ? *reinterpret_cast<uint32_t*>(dir->index) : 0;
+    auto* old_slots = reinterpret_cast<uint64_t*>(array_ptr);
+    // ntdll's TLS arrays carry their length 16 bytes before the first slot, and it frees the block from there; one entry, so that the
+    // duplicate under the title's index is not freed a second time.
+    *reinterpret_cast<uint32_t*>(heap_array) = 1;
+    auto* slots = reinterpret_cast<uint64_t*>(heap_array + 0x10);
+    if (old_slots != nullptr) {
+        std::memcpy(slots, old_slots, 8 * (own + 1));
+    }
+    uint64_t block = slots[own];
+    if (block == 0) {
+        // ntdll has no block for it either: make one (it will not free this one).
+        const uint64_t raw = dir->end - dir->start, total = raw + dir->zero_fill;
+        uint64_t size = (total + 0xFFFF) & ~0xFFFFull;
+        if (vm_->Allocate(&block, &size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) != STATUS_SUCCESS) return;
+        std::memcpy(reinterpret_cast<void*>(block), reinterpret_cast<const void*>(dir->start), raw);
+        slots[own] = block;
+        *reinterpret_cast<uint32_t*>(heap_array) = 0;   // not a heap block: ntdll must not free it
+    }
+    slots[kIndex] = block;
+    array_ptr = heap_array + 0x10;
+    UT_INFO("tls: thread %llu: block %#llx under index %llu and 1; array %#llx", (unsigned long long)thread.tid_, (unsigned long long)block, (unsigned long long)own, (unsigned long long)array_ptr);
+}
+
 void Kernel::StartGuestCall(NtThread& thread, const GuestStep& step, const GuestCpuState& caller) {
     GuestCpuState st = caller;
     // A fresh frame below the caller's stack pointer: [ret][shadow x4] with the return address at rsp.
@@ -379,6 +449,10 @@ const char* Kernel::SyscallName(uint32_t number) const {
 }
 
 NTSTATUS Kernel::Dispatch(NtThread& thread, uint32_t number, SyscallArgs& args) {
+    if (number == 0xFFFFFFF1u) {  // a new thread is about to run its start routine
+        FixThreadTls(thread, args.reg[0]);
+        return STATUS_SUCCESS;
+    }
     if (number == 0xFFFFFFF0u) {  // a guest function called from the host returned; r10 holds its rax
         OnGuestReturn(thread, args.reg[0]);
         return STATUS_SUCCESS;

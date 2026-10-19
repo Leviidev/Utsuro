@@ -196,7 +196,7 @@ NTSTATUS NtCreateThreadEx(Kernel& k, NtThread& t, SyscallArgs& a) {
     if (const uint64_t list = a[10]) {
         const uint64_t total = *reinterpret_cast<uint64_t*>(list);
         for (uint64_t off = 8; off + 32 <= total; off += 32) {
-            const uint64_t attr = *reinterpret_cast<uint64_t*>(list + off) & 0xFFFFFF;
+            const uint64_t attr = *reinterpret_cast<uint64_t*>(list + off) & 0xFFFF;   // the number; the high bits say thread/input/in-out
             const uint64_t size = *reinterpret_cast<uint64_t*>(list + off + 8);
             const uint64_t value = *reinterpret_cast<uint64_t*>(list + off + 16);
             const uint64_t retlen = *reinterpret_cast<uint64_t*>(list + off + 24);
@@ -235,7 +235,16 @@ NTSTATUS NtCreateThreadEx(Kernel& k, NtThread& t, SyscallArgs& a) {
     }
     *out = k.AddHandle(thread);
     UT_INFO("thread %llu created by %llu: start %s arg %#llx%s%s%s", (unsigned long long)thread->tid_, (unsigned long long)t.tid_, k.Describe(start).c_str(), (unsigned long long)arg, (flags & 1) ? " (suspended)" : "", "", kind.c_str());
-    k.StartThread(thread, FindExport(k.NtdllBase(), "RtlUserThreadStart"), start, arg, (flags & 1) != 0);
+    // The thread starts in a shim that sets up the title's TLS first; its real start routine and argument ride along in a block.
+    uint64_t block_base = 0, block_size = 0x1000;
+    uint64_t real_start = start, real_arg = arg;
+    if (k.Vm().Allocate(&block_base, &block_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) == STATUS_SUCCESS) {
+        reinterpret_cast<uint64_t*>(block_base)[0] = start;
+        reinterpret_cast<uint64_t*>(block_base)[1] = arg;
+        real_start = k.ThreadStartShim();
+        real_arg = block_base;
+    }
+    k.StartThread(thread, FindExport(k.NtdllBase(), "RtlUserThreadStart"), real_start, real_arg, (flags & 1) != 0);
     return STATUS_SUCCESS;
 }
 
@@ -250,7 +259,17 @@ NTSTATUS NtTerminateThread(Kernel& k, NtThread& t, SyscallArgs& a) {
     return STATUS_NOT_SUPPORTED;
 }
 
-NTSTATUS NtTerminateProcess(Kernel& k, NtThread&, SyscallArgs& a) {
+NTSTATUS NtTerminateProcess(Kernel& k, NtThread& t, SyscallArgs& a) {
+    if ((a[0] == ~0ull || a[0] == 4) && a[1] != 0 && t.control != nullptr) {
+        GuestCpuState st;
+        if (t.control->CaptureCpuState(&st)) {
+            uint64_t regs[16];
+            for (int i = 0; i < 16; ++i) regs[i] = st.gregs[i];
+            UT_INFO("[%llu] the process is being terminated with status %#x, from:", (unsigned long long)t.tid_, static_cast<uint32_t>(a[1]));
+            const auto frames = k.Backtrace(st.rip, regs, 24);
+            for (size_t i = 0; i < frames.size(); ++i) UT_INFO("    #%zu %s", i, k.Describe(frames[i]).c_str());
+        }
+    }
     if (a[0] == ~0ull || a[0] == 4) k.ExitProcess(static_cast<int32_t>(a[1]));
     // NULL means "all threads but this one", which RtlExitUserProcess issues first.
     return STATUS_SUCCESS;

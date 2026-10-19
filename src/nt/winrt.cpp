@@ -332,6 +332,13 @@ std::u16string Runtime::ReadHString(uint64_t h) {
     return std::u16string(reinterpret_cast<const char16_t*>(*reinterpret_cast<const uint64_t*>(h + 0x10)), len);
 }
 
+std::string Runtime::NameOf(uint32_t number) const {
+    if (number < kBase || number - kBase >= method_table_.size()) return "?";
+    const auto& [iface, slot] = method_table_[number - kBase];
+    const uint32_t index = slot >= static_cast<uint32_t>(iface->base_slots) ? slot - iface->base_slots : slot;
+    return index < iface->methods.size() ? iface->name + "::" + iface->methods[index].name : iface->name + "::#" + std::to_string(slot);
+}
+
 bool Runtime::Dispatch(NtThread& thread, uint32_t number, SyscallArgs& args, uint64_t* result) {
     if (!ready_ || number < kBase || number - kBase >= method_table_.size()) return false;
     auto [iface, slot] = method_table_[number - kBase];

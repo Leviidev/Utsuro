@@ -358,6 +358,10 @@ public:
     /// A guest function called by the host has returned (via the return stub).
     void OnGuestReturn(NtThread& thread, uint64_t rax);
     uint64_t GuestReturnStub();
+    /// Code that new threads start in: it gives the thread the title's implicit TLS (see FixThreadTls) and then jumps to the real start.
+    /// `block` holds {start routine, argument}.
+    uint64_t ThreadStartShim();
+    void FixThreadTls(NtThread& thread, uint64_t heap_array);
     /// Unwinds a guest stack using the images' .pdata. `regs` is rax..r15 in encoding order.
     std::vector<uint64_t> Backtrace(uint64_t rip, const uint64_t* regs, int max_frames = 24);
 

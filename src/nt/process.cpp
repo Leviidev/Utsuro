@@ -7,6 +7,7 @@
 #include "jit/jit.h"
 
 #include <pthread.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -778,6 +779,68 @@ void Kernel::ExitProcess(int32_t status) {
 
 int Kernel::Run() {
     // The main thread has nothing to do but wait; the process ends in ExitProcess.
+    // Debugging aid: UTSURO_TLSWATCH=<tid>:<offset> logs every change of the qword at that offset in the thread's implicit TLS block.
+    // Debugging aid: UTSURO_GLOBALWATCH=<rva>:<offset> logs every change of the qword at [image base + rva] + offset (a pointer to an object, e.g. the RHI).
+    std::thread global_watch;
+    if (const char* spec = std::getenv("UTSURO_GLOBALWATCH")) {
+        const uint64_t rva = std::strtoull(spec, nullptr, 16);
+        const char* colon = std::strchr(spec, ':');
+        const uint64_t offset = colon != nullptr ? std::strtoull(colon + 1, nullptr, 16) : 0;
+        global_watch = std::thread([this, rva, offset] {
+            uint64_t last = ~0ull, last_object = 0;
+            while (true) {
+                {
+                    std::scoped_lock el {exit_mutex_};
+                    if (process_done_) break;
+                }
+                if (exe_base_ != 0 && vm_->Contains(exe_base_ + rva, 8)) {
+                    const uint64_t object = *reinterpret_cast<volatile uint64_t*>(exe_base_ + rva);
+                    if (object != last_object) { UT_INFO("globalwatch: global is now %#llx", (unsigned long long)object); last_object = object; last = ~0ull; }
+                    if (object != 0 && vm_->Contains(object + offset, 8)) {
+                        const uint64_t now = *reinterpret_cast<volatile uint64_t*>(object + offset);
+                        if (now != last) { UT_INFO("globalwatch: [%#llx+%#llx] %#llx -> %#llx", (unsigned long long)object, (unsigned long long)offset, (unsigned long long)(last == ~0ull ? 0 : last), (unsigned long long)now); last = now; }
+                    }
+                }
+                std::this_thread::sleep_for(std::chrono::microseconds(20));
+            }
+        });
+    }
+    std::thread tls_watch;
+    if (const char* spec = std::getenv("UTSURO_TLSWATCH")) {
+        const uint64_t want_tid = std::strtoull(spec, nullptr, 0);
+        const char* colon = std::strchr(spec, ':');
+        const uint64_t offset = colon != nullptr ? std::strtoull(colon + 1, nullptr, 16) : 8;
+        tls_watch = std::thread([this, want_tid, offset] {
+            uint64_t last = ~0ull;
+            while (true) {
+                {
+                    std::scoped_lock el {exit_mutex_};
+                    if (process_done_) break;
+                }
+                std::shared_ptr<NtThread> t;
+                {
+                    std::scoped_lock tl {thread_mutex_};
+                    auto it = threads_.find(want_tid);
+                    if (it != threads_.end()) t = it->second;
+                }
+                if (t != nullptr && t->teb != 0) {
+                    const uint64_t array_ptr = *reinterpret_cast<volatile uint64_t*>(t->teb + 0x58);
+                    if (array_ptr != 0 && vm_->Contains(array_ptr, 8)) {
+                        const uint64_t block = *reinterpret_cast<volatile uint64_t*>(array_ptr);
+                        if (block != 0 && vm_->Contains(block + offset, 8)) {
+                            const uint64_t now = *reinterpret_cast<volatile uint64_t*>(block + offset);
+                            if (now != last) {
+                                UT_INFO("tlswatch: thread %llu [%#llx] %#llx -> %#llx (last syscall %s %#llx at %s)", (unsigned long long)want_tid, (unsigned long long)offset,
+                                        (unsigned long long)(last == ~0ull ? 0 : last), (unsigned long long)now, (t->current_syscall >= winrt::Runtime::kBase ? winrt::Runtime::Get().NameOf(static_cast<uint32_t>(t->current_syscall)) : std::string(SyscallName(static_cast<uint32_t>(t->current_syscall)))).c_str(), (unsigned long long)t->current_syscall, Describe(t->current_rip).c_str());
+                                last = now;
+                            }
+                        }
+                    }
+                }
+                std::this_thread::sleep_for(std::chrono::microseconds(20));
+            }
+        });
+    }
     std::unique_lock lock {exit_mutex_};
     // Debugging aid: UTSURO_STACKS=<seconds> prints, at that interval, what every guest thread is blocked in.
     if (const char* every = std::getenv("UTSURO_STACKS")) {
@@ -804,6 +867,8 @@ int Kernel::Run() {
         }
     }
     exit_cv_.wait(lock, [&] { return process_done_; });
+    if (tls_watch.joinable()) tls_watch.detach();
+    if (global_watch.joinable()) global_watch.detach();
     return exit_code.load();
 }
 

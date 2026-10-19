@@ -128,6 +128,8 @@ public:
     uint64_t AllocGuest(size_t bytes, size_t align = 16);
 
     bool Dispatch(NtThread& thread, uint32_t number, SyscallArgs& args, uint64_t* result);
+    /// "Interface::method" for a host-method syscall number (debugging).
+    std::string NameOf(uint32_t number) const;
 
     static constexpr uint32_t kBase = 0xFFFE0000u;
 
