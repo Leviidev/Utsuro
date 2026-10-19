@@ -34,12 +34,18 @@ enum Op : uint32_t {
     OP_DCL_INPUT_PS_SIV = 100, OP_DCL_OUTPUT = 101, OP_DCL_OUTPUT_SGV = 102, OP_DCL_OUTPUT_SIV = 103, OP_DCL_TEMPS = 104,
     OP_DCL_INDEXABLE_TEMP = 105, OP_DCL_GLOBAL_FLAGS = 106,
     OP_RCP = 129,   // SM5
+    OP_EVAL_SAMPLE_INDEX = 204,
+    OP_SAMPLE_INFO = 111, OP_GATHER4 = 109,
+    OP_DERIV_RTX_COARSE = 122, OP_DERIV_RTX_FINE = 123, OP_DERIV_RTY_COARSE = 124, OP_DERIV_RTY_FINE = 125,
+    OP_COUNTBITS = 134, OP_FIRSTBIT_HI = 135, OP_FIRSTBIT_LO = 136, OP_FIRSTBIT_SHI = 137,
+    OP_UBFE = 138, OP_IBFE = 139, OP_BFI = 140, OP_BFREV = 141, OP_SWAPC = 142,
+    OP_SAMPLE_CLAMP_FEEDBACK = 230,   // D3D11.2 tiled-resource sample with a minimum LOD; the feedback status is not tracked
 };
 
 enum OperandType : uint32_t {
     T_TEMP = 0, T_INPUT = 1, T_OUTPUT = 2, T_INDEXABLE_TEMP = 3, T_IMM32 = 4, T_IMM64 = 5, T_SAMPLER = 6, T_RESOURCE = 7,
     T_CONSTANT_BUFFER = 8, T_ICB = 9, T_LABEL = 10, T_INPUT_PRIMITIVE_ID = 11, T_OUTPUT_DEPTH = 12, T_NULL = 13,
-    T_RASTERIZER = 14, T_OUTPUT_COVERAGE = 15,
+    T_RASTERIZER = 14, T_OUTPUT_COVERAGE = 15, T_INPUT_COVERAGE_MASK = 35,
 };
 
 struct Operand;
@@ -73,6 +79,7 @@ struct Decoder {
         const uint32_t t = Next();
         o->components = (t & 3) == 0 ? 0 : (t & 3) == 1 ? 1 : 4;
         o->type = (t >> 12) & 0xFF;
+        if (o->type == 39 || o->type == 40) o->type = T_OUTPUT_DEPTH;   // oDepthGE / oDepthLE: written like oDepth
         o->index_dim = (t >> 20) & 3;
         if (o->components == 4) {
             o->select_mode = (t >> 2) & 3;
@@ -179,6 +186,7 @@ struct Translator {
             std::string idx = o.relative[1] ? "(" + RelIndex(*o.relative[1]) + " + " + std::to_string(o.index[1]) + ")" : std::to_string(o.index[1]);
             return std::string(buf) + "[" + idx + "]";
         }
+        case T_INPUT_COVERAGE_MASK: return "as_type<float4>(uint4(0xFFFFFFFFu))";   // every sample covered
         case T_ICB: {
             std::string idx = o.relative[0] ? "(" + RelIndex(*o.relative[0]) + " + " + std::to_string(o.index[0]) + ")" : std::to_string(o.index[0]);
             return "icb[" + idx + "]";
@@ -224,7 +232,7 @@ struct Translator {
     struct Dest { std::string reg; std::string mask; bool valid {false}; };
     Dest DestOf(const Operand& o) {
         Dest d;
-        if (o.type == T_NULL) return d;
+        if (o.type == T_NULL || o.type == T_OUTPUT_COVERAGE) return d;   // oMask is not modelled
         d.valid = true;
         if (o.type == T_OUTPUT_DEPTH) { d.reg = "oDepth"; d.mask = ""; return d; }
         d.reg = RegisterBase(o);
@@ -512,11 +520,11 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
             t.Write(*d, saturate, std::string("float4(dot((") + t.SrcF(*a) + ")." + sw + ", (" + t.SrcF(*b) + ")." + sw + "))");
             break;
         }
-        case OP_RSQ: case OP_SQRT: case OP_EXP: case OP_LOG: case OP_FRC: case OP_ROUND_NE: case OP_ROUND_NI: case OP_ROUND_PI: case OP_ROUND_Z: case OP_DERIV_RTX: case OP_DERIV_RTY: case OP_RCP: {
+        case OP_RSQ: case OP_SQRT: case OP_EXP: case OP_LOG: case OP_FRC: case OP_ROUND_NE: case OP_ROUND_NI: case OP_ROUND_PI: case OP_ROUND_Z: case OP_DERIV_RTX: case OP_DERIV_RTY: case OP_DERIV_RTX_COARSE: case OP_DERIV_RTX_FINE: case OP_DERIV_RTY_COARSE: case OP_DERIV_RTY_FINE: case OP_RCP: {
             auto d = operand(); auto a = operand();
             const char* fn = op == OP_RSQ ? "rsqrt" : op == OP_SQRT ? "sqrt" : op == OP_EXP ? "exp2" : op == OP_LOG ? "log2" : op == OP_FRC ? "fract"
                            : op == OP_ROUND_NE ? "rint" : op == OP_ROUND_NI ? "floor" : op == OP_ROUND_PI ? "ceil" : op == OP_ROUND_Z ? "trunc"
-                           : op == OP_DERIV_RTX ? "dfdx" : op == OP_DERIV_RTY ? "dfdy" : "";
+                           : (op == OP_DERIV_RTX || op == OP_DERIV_RTX_COARSE || op == OP_DERIV_RTX_FINE) ? "dfdx" : (op == OP_DERIV_RTY || op == OP_DERIV_RTY_COARSE || op == OP_DERIV_RTY_FINE) ? "dfdy" : "";
             t.Write(*d, saturate, op == OP_RCP ? "(float4(1.0f) / " + t.SrcF(*a) + ")" : std::string(fn) + "(" + t.SrcF(*a) + ")");
             break;
         }
@@ -587,6 +595,46 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
         case OP_FTOI: { auto d = operand(); auto a = operand(); t.WriteBits(*d, "int4(" + t.SrcF(*a) + ")"); break; }
         case OP_FTOU: { auto d = operand(); auto a = operand(); t.WriteBits(*d, "uint4(max(" + t.SrcF(*a) + ", float4(0.0f)))"); break; }
 
+        // ---------------- bit manipulation (SM5) ----------------
+        case OP_BFI: {
+            auto d = operand(); auto w = operand(); auto o = operand(); auto ins = operand(); auto base = operand();
+            t.WriteBits(*d, "ut_bfi(" + t.SrcI(*w, true) + ", " + t.SrcI(*o, true) + ", " + t.SrcI(*ins, true) + ", " + t.SrcI(*base, true) + ")");
+            break;
+        }
+        case OP_UBFE: case OP_IBFE: {
+            auto d = operand(); auto w = operand(); auto o = operand(); auto a = operand();
+            const bool u = op == OP_UBFE;
+            t.WriteBits(*d, std::string(u ? "ut_ubfe(" : "ut_ibfe(") + t.SrcI(*w, true) + ", " + t.SrcI(*o, true) + ", " + t.SrcI(*a, u) + ")");
+            break;
+        }
+        case OP_BFREV: { auto d = operand(); auto a = operand(); t.WriteBits(*d, "reverse_bits(" + t.SrcI(*a, true) + ")"); break; }
+        case OP_COUNTBITS: { auto d = operand(); auto a = operand(); t.WriteBits(*d, "popcount(" + t.SrcI(*a, true) + ")"); break; }
+        case OP_FIRSTBIT_HI: case OP_FIRSTBIT_LO: case OP_FIRSTBIT_SHI: {
+            auto d = operand(); auto a = operand();
+            const char* fn = op == OP_FIRSTBIT_HI ? "ut_firstbit_hi(" : op == OP_FIRSTBIT_LO ? "ut_firstbit_lo(" : "ut_firstbit_shi(";
+            t.WriteBits(*d, std::string(fn) + t.SrcI(*a, op != OP_FIRSTBIT_SHI) + ")");
+            break;
+        }
+        case OP_EVAL_SAMPLE_INDEX: {
+            // An input evaluated at one sample: the interpolated value at the pixel is what a shader that is not
+            // running per sample gets anyway.
+            auto d = operand(); auto a = operand(); auto idx = operand();
+            (void)idx;
+            t.Write(*d, false, t.SrcF(*a));
+            break;
+        }
+        case OP_SWAPC: {
+            // swapc d0, d1, cond, a, b:  d0 = cond ? b : a;  d1 = cond ? a : b.  Both read their sources before either is written.
+            auto d0 = operand(); auto d1 = operand(); auto c = operand(); auto a = operand(); auto b = operand();
+            static int swap_id = 0;
+            const std::string n = std::to_string(swap_id++);
+            t.Line("float4 sw" + n + "a = select(" + t.SrcF(*a) + ", " + t.SrcF(*b) + ", " + t.SrcI(*c, true) + " != uint4(0u));");
+            t.Line("float4 sw" + n + "b = select(" + t.SrcF(*b) + ", " + t.SrcF(*a) + ", " + t.SrcI(*c, true) + " != uint4(0u));");
+            t.Write(*d0, false, "sw" + n + "a");
+            t.Write(*d1, false, "sw" + n + "b");
+            break;
+        }
+
         // ---------------- texture sampling ----------------
         case OP_SAMPLE: case OP_SAMPLE_L: case OP_SAMPLE_B: case OP_SAMPLE_D: {
             auto d = operand(); auto coord = operand(); auto res = operand(); auto smp = operand();
@@ -609,6 +657,56 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
             if (has_offset && (dim == 3 || dim == 8)) args += ", int2(" + std::to_string(offset[0]) + ", " + std::to_string(offset[1]) + ")";
             else if (has_offset && dim == 5) args += ", int3(" + std::to_string(offset[0]) + ", " + std::to_string(offset[1]) + ", " + std::to_string(offset[2]) + ")";
             t.Write(*d, saturate, "t" + std::to_string(slot) + ".sample(" + args + ")." + Translator::Swizzle(*res));
+            break;
+        }
+        case OP_SAMPLE_C: case OP_SAMPLE_C_LZ: {
+            // Comparison sampling on an ordinary float texture: the reference is compared with the (unfiltered-by-compare) depth read.
+            auto d = operand(); auto coord = operand(); auto res = operand(); auto smp = operand(); auto ref = operand();
+            const uint32_t slot = res->index[0];
+            const uint32_t dim = sample_args_for(slot);
+            std::string c = t.SrcF(*coord);
+            std::string args = "s" + std::to_string(smp->index[0]) + ", " + t.Coord(dim, c) + t.ArraySlice(dim, c) + ", level(0)";
+            if (has_offset && (dim == 3 || dim == 8)) args += ", int2(" + std::to_string(offset[0]) + ", " + std::to_string(offset[1]) + ")";
+            t.Write(*d, saturate, "float4(float4(" + t.Scalar(*ref) + ") <= float4(t" + std::to_string(slot) + ".sample(" + args + ").r)).xxxx");
+            break;
+        }
+        case OP_SAMPLE_CLAMP_FEEDBACK: {
+            auto d = operand(); auto status = operand(); auto coord = operand(); auto res = operand(); auto smp = operand(); auto lod = operand();
+            (void)status;
+            const uint32_t slot = res->index[0];
+            const uint32_t dim = sample_args_for(slot);
+            std::string c = t.SrcF(*coord);
+            std::string args = "s" + std::to_string(smp->index[0]) + ", " + t.Coord(dim, c) + t.ArraySlice(dim, c) + ", min_lod_clamp(" + t.Scalar(*lod) + ")";
+            if (has_offset && (dim == 3 || dim == 8)) args += ", int2(" + std::to_string(offset[0]) + ", " + std::to_string(offset[1]) + ")";
+            t.Write(*d, saturate, "t" + std::to_string(slot) + ".sample(" + args + ")." + Translator::Swizzle(*res));
+            break;
+        }
+        case OP_GATHER4: {
+            auto d = operand(); auto coord = operand(); auto res = operand(); auto smp = operand();
+            const uint32_t slot = res->index[0];
+            const uint32_t dim = sample_args_for(slot);
+            const char* comp[4] = {"component::x", "component::y", "component::z", "component::w"};
+            const uint32_t pick = smp->components == 4 ? (smp->select_mode == 2 ? (smp->bits & 3) : (smp->bits & 3)) : 0;
+            std::string c = t.SrcF(*coord);
+            std::string args = "s" + std::to_string(smp->index[0]) + ", " + t.Coord(dim, c) + t.ArraySlice(dim, c);
+            if (has_offset && (dim == 3 || dim == 8)) args += ", int2(" + std::to_string(offset[0]) + ", " + std::to_string(offset[1]) + ")";
+            args += std::string(", ") + comp[pick];
+            t.Write(*d, saturate, "t" + std::to_string(slot) + ".gather(" + args + ")." + Translator::Swizzle(*res));
+            break;
+        }
+        case OP_LD_MS: {
+            auto d = operand(); auto coord = operand(); auto res = operand(); auto idx = operand();
+            const uint32_t slot = res->index[0];
+            const std::string c = t.SrcI(*coord, true);
+            t.Write(*d, false, "t" + std::to_string(slot) + ".read(uint2((" + c + ").xy), " + t.SrcI(*idx, true) + ".x)." + Translator::Swizzle(*res));
+            break;
+        }
+        case OP_SAMPLE_INFO: {
+            auto d = operand(); auto res = operand();
+            const uint32_t slot = res->index[0];
+            const uint32_t dim = sample_args_for(slot);
+            const std::string v = (dim == 4 || dim == 9) ? "float4(float(t" + std::to_string(slot) + ".get_num_samples()))" : "float4(0.0f)";
+            t.Write(*d, false, v + "." + Translator::Swizzle(*res));
             break;
         }
         case OP_LD: {
@@ -684,6 +782,25 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
     // ---- assemble the MSL ---------------------------------------------------------------
     std::ostringstream src;
     src << "#include <metal_stdlib>\nusing namespace metal;\n\n";
+    src << "static inline uint4 ut_bfi(uint4 w, uint4 o, uint4 ins, uint4 base) {\n"
+           "    w &= 31u; o &= 31u;\n"
+           "    uint4 m = ((uint4(1u) << w) - uint4(1u)) << o;\n"
+           "    return ((ins << o) & m) | (base & ~m);\n}\n"
+           "static inline uint4 ut_ubfe(uint4 w, uint4 o, uint4 a) {\n"
+           "    w &= 31u; o &= 31u;\n"
+           "    uint4 left = uint4(32u) - w - o;\n"
+           "    uint4 r = select(a >> o, (a << left) >> (uint4(32u) - w), (w + o) < uint4(32u));\n"
+           "    return select(r, uint4(0u), w == uint4(0u));\n}\n"
+           "static inline int4 ut_ibfe(uint4 w, uint4 o, int4 a) {\n"
+           "    w &= 31u; o &= 31u;\n"
+           "    uint4 left = uint4(32u) - w - o;\n"
+           "    int4 r = select(a >> int4(o), (a << int4(left)) >> int4(uint4(32u) - w), (w + o) < uint4(32u));\n"
+           "    return select(r, int4(0), w == uint4(0u));\n}\n"
+           "static inline uint4 ut_firstbit_hi(uint4 a) { return select(uint4(31u) - clz(a), uint4(0xFFFFFFFFu), a == uint4(0u)); }\n"
+           "static inline uint4 ut_firstbit_lo(uint4 a) { return select(ctz(a), uint4(0xFFFFFFFFu), a == uint4(0u)); }\n"
+           "static inline uint4 ut_firstbit_shi(int4 a) {\n"
+           "    uint4 u = as_type<uint4>(select(a, ~a, a < int4(0)));\n"
+           "    return select(uint4(31u) - clz(u), uint4(0xFFFFFFFFu), u == uint4(0u));\n}\n\n";
     if (!t.icb.empty()) {
         src << "constant float4 icb[" << t.icb.size() / 4 << "] = {\n";
         for (size_t i = 0; i + 3 < t.icb.size(); i += 4) {

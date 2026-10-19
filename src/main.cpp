@@ -1,6 +1,8 @@
 // utsuro-run -- runs an Xbox One title on the NT kernel half.
 //
 //   utsuro-run [--trace[=substring]] <dump dir containing Mount/ and EmbeddedXvd/> [exe]
+#include <map>
+#include <filesystem>
 #include "engine/log.h"
 #include "nt/kernel.h"
 #include "gpu/dxbc.h"
@@ -25,6 +27,37 @@ int main(int argc, char** argv) {
     std::string dump;
     std::string exe;
     if (argc > 1 && std::string(argv[1]) == "--selftest") return RunSelfTest();
+    if (argc > 2 && std::string(argv[1]) == "--dxbc-scan") {
+        // Development aid: translate every file in a folder and count the reasons for failures.
+        std::map<std::string, std::pair<int, std::string>> reasons;
+        int ok = 0, failed = 0;
+        for (const auto& entry : std::filesystem::directory_iterator(argv[2])) {
+            if (!entry.is_regular_file()) continue;
+            const std::string name = entry.path().filename().string();
+            if (name.find("Shader_") == std::string::npos || name.find("ResourceView") != std::string::npos) continue;
+            FILE* f = std::fopen(entry.path().c_str(), "rb");
+            if (!f) continue;
+            std::string bytes;
+            char chunk[4096];
+            size_t n;
+            while ((n = std::fread(chunk, 1, sizeof chunk, f)) > 0) bytes.append(chunk, n);
+            std::fclose(f);
+            auto r = gpu::TranslateDxbc(reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size());
+            if (r.ok) {
+                ++ok;
+                if (argc > 3) {   // also keep the Metal source, for compiling offline
+                    if (FILE* o = std::fopen((std::string(argv[3]) + "/" + name + ".metal").c_str(), "w")) { std::fputs(r.msl.c_str(), o); std::fclose(o); }
+                }
+                continue;
+            }
+            ++failed;
+            auto& slot = reasons[r.error];
+            if (slot.first++ == 0) slot.second = name;
+        }
+        std::printf("%d translated, %d failed\n", ok, failed);
+        for (const auto& [why, info] : reasons) std::printf("%5d  %s  (e.g. %s)\n", info.first, why.c_str(), info.second.c_str());
+        return 0;
+    }
     if (argc > 2 && std::string(argv[1]) == "--dxbc") {
         // Development aid: translate a DXBC file to MSL on stdout.
         FILE* f = std::fopen(argv[2], "rb");
