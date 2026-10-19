@@ -5,6 +5,7 @@
 #include "nt/d3d.h"
 
 #include "nt/winrt.h"
+#include "nt/xg.h"
 
 #include "gpu/renderer.h"
 

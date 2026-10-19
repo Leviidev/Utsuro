@@ -138,6 +138,14 @@ void OnCreate(Call& c, const winrt::Method& m, Obj& o) {
         if (placed) {
             r.tile_mode = static_cast<uint32_t>(c.Arg(1));
             r.pitch = static_cast<uint32_t>(c.Arg(2));
+            if (static const bool log = std::getenv("UTSURO_PLACE") != nullptr; log) {
+                static std::mutex m;
+                static std::map<std::string, int> seen;
+                char key[160];
+                std::snprintf(key, sizeof key, "tile %u fmt %u %ux%u mips %u arr %u bind %#x pitch %u", r.tile_mode, d.format, d.width, d.height, d.mips, d.array_size, bind, r.pitch);
+                std::scoped_lock lock {m};
+                if (seen[key]++ == 0 && seen.size() < 200) UT_INFO("d3d: placement texture: %s", key);
+            }
             r.placement = c.Arg(3);
             r.placement_dirty = true;
             {
@@ -302,35 +310,137 @@ bool SafeCopy(uint64_t address, void* destination, uint64_t bytes) {
     return address != 0 && mach_vm_read_overwrite(mach_task_self(), address, bytes, reinterpret_cast<mach_vm_address_t>(destination), &done) == KERN_SUCCESS && done == bytes;
 }
 
-/// Copies a placement texture's texels into the host texture (the first mip, as laid out linearly for now).
+/// Bytes per element (a texel, or a 4x4 block of a compressed format) and the element's size in texels.
+void ElementOf(uint32_t fmt, uint32_t* bytes, uint32_t* block) {
+    *block = 1;
+    if ((fmt >= 70 && fmt <= 72) || (fmt >= 79 && fmt <= 81)) { *bytes = 8; *block = 4; return; }
+    if ((fmt >= 73 && fmt <= 78) || (fmt >= 82 && fmt <= 84) || (fmt >= 94 && fmt <= 99)) { *bytes = 16; *block = 4; return; }
+    uint32_t bits = 32;
+    if (fmt >= 1 && fmt <= 4) bits = 128;
+    else if (fmt >= 5 && fmt <= 8) bits = 96;
+    else if ((fmt >= 9 && fmt <= 18) || (fmt >= 19 && fmt <= 22)) bits = 64;
+    else if ((fmt >= 48 && fmt <= 52) || (fmt >= 53 && fmt <= 59) || fmt == 68 || fmt == 69 || fmt == 85 || fmt == 86) bits = 16;
+    else if (fmt >= 60 && fmt <= 65) bits = 8;
+    *bytes = std::max(1u, bits / 8);
+}
+
+/// How a tiled placement texture is laid out, learned from xg_x.dll (the console's own tiling code) by asking it where texels are:
+/// the console's thin 1D tiling is rows of 8x8-element micro tiles, each in Morton order, and what varies is where the levels start
+/// and how far apart the micro tiles are.
+struct TileLevel { uint64_t base {0}, row_stride {0}, tile_bytes {0}; uint32_t width {0}, height {0}; };
+struct TileModel {
+    bool ok {false};
+    uint32_t bytes {0};            ///< per element
+    uint32_t levels_per_slice {0};
+    std::vector<TileLevel> levels; ///< [slice * levels_per_slice + mip]
+};
+std::mutex g_tile_mutex;
+std::map<std::string, TileModel> g_tile_models;
+
+uint32_t Morton8(uint32_t x, uint32_t y) {   // bit i of x and y interleaved: x0 y0 x1 y1 x2 y2
+    return (x & 1) | ((y & 1) << 1) | ((x & 2) << 1) | ((y & 2) << 2) | ((x & 4) << 2) | ((y & 4) << 3);
+}
+
+TileModel BuildTileModel(const gpu::TextureDesc& info, uint32_t tile_mode, uint32_t pitch) {
+    TileModel m;
+    if (g_kernel == nullptr) return m;
+    uint32_t block;
+    ElementOf(info.format, &m.bytes, &block);
+    const uint64_t create = xg::Export("XGCreateTexture2DComputer");
+    if (create == 0) return m;
+    const uint64_t desc = Runtime::Get().AllocGuest(0x40, 16), out = Runtime::Get().AllocGuest(0x10, 16);
+    auto* d = reinterpret_cast<uint32_t*>(desc);
+    std::memset(d, 0, 0x40);
+    d[0] = info.width; d[1] = info.height; d[2] = info.mips; d[3] = info.array_size; d[4] = info.format; d[5] = 1; d[8] = 8; d[10] = info.cube ? 4 : 0; d[13] = tile_mode; d[14] = pitch;
+    *reinterpret_cast<uint64_t*>(out) = 0;
+    if (xg::Call(*g_kernel, create, {desc, out}) != 0 || *reinterpret_cast<uint64_t*>(out) == 0) return m;
+    const uint64_t comp = *reinterpret_cast<uint64_t*>(out);
+    const uint64_t* vtable = *reinterpret_cast<uint64_t**>(comp);
+    const uint64_t offset_fn = vtable[6];
+    auto at = [&](uint32_t mip, uint32_t x, uint32_t y, uint32_t slice) { return xg::Call(*g_kernel, offset_fn, {comp, 0, mip, x, y, slice, 0}); };
+    m.levels_per_slice = info.mips;
+    bool ok = true;
+    for (uint32_t slice = 0; slice < info.array_size && ok; ++slice) {
+        for (uint32_t mip = 0; mip < info.mips && ok; ++mip) {
+            TileLevel lv;
+            lv.width = std::max(1u, ((info.width >> mip) + block - 1) / block);
+            lv.height = std::max(1u, ((info.height >> mip) + block - 1) / block);
+            lv.base = at(mip, 0, 0, slice);
+            if (lv.base == ~0ull) { ok = false; break; }
+            lv.tile_bytes = lv.width > 8 ? at(mip, 8, 0, slice) - lv.base : 64ull * m.bytes;
+            lv.row_stride = lv.height > 8 ? at(mip, 0, 8, slice) - lv.base : 0;
+            // The model must reproduce what the library says at a few more texels.
+            const uint32_t probes[][2] = {{1, 0}, {0, 1}, {2, 0}, {0, 2}, {4, 0}, {0, 4}, {7, 7}, {lv.width - 1, lv.height - 1}, {lv.width / 2, lv.height / 2}};
+            for (const auto& pt : probes) {
+                if (pt[0] >= lv.width || pt[1] >= lv.height) continue;
+                const uint64_t expect = lv.base + (pt[1] >> 3) * lv.row_stride + (pt[0] >> 3) * lv.tile_bytes + static_cast<uint64_t>(Morton8(pt[0] & 7, pt[1] & 7)) * m.bytes;
+                if (at(mip, pt[0], pt[1], slice) != expect) { ok = false; break; }
+            }
+            m.levels.push_back(lv);
+        }
+    }
+    xg::Call(*g_kernel, vtable[1], {comp});   // Release
+    m.ok = ok;
+    return m;
+}
+
+/// Copies a placement texture's texels into the host texture.
 void UploadPlacement(Res& r) {
     r.placement_dirty = false;
     if (!r.texture || r.placement == 0 || (r.bind & 0x60) != 0) return;   // render targets and depth buffers are written by the GPU
     const auto& info = gpu::TextureInfo(*r.texture);
-    uint32_t row, rows;
-    FormatShape(info.format, info.width, info.height, &row, &rows);
-    const uint32_t pitch = r.pitch != 0 ? r.pitch : row;
-    std::vector<uint8_t> texels(static_cast<size_t>(pitch) * rows);
-    if (!SafeCopy(r.placement, texels.data(), texels.size())) {
+    uint32_t bytes, block;
+    ElementOf(info.format, &bytes, &block);
+    auto fail = [&](const char* why) {
         static std::atomic<int> shown {0};
-        if (shown++ < 6) {
-            mach_vm_address_t at = r.placement;
-            mach_vm_size_t size = 0;
-            vm_region_basic_info_data_64_t region {};
-            mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
-            mach_port_t object = MACH_PORT_NULL;
-            const kern_return_t kr = mach_vm_region(mach_task_self(), &at, &size, VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&region), &count, &object);
-            UT_INFO("d3d: a placement texture at %#llx (%ux%u fmt %u, %zu bytes) is not readable; the host's region at/after it: kr %d %#llx+%#llx protection %d", (unsigned long long)r.placement, info.width, info.height, info.format, texels.size(), kr, (unsigned long long)at, (unsigned long long)size, region.protection);
-        }
+        if (shown++ < 10) UT_INFO("d3d: placement texture at %#llx (%ux%u fmt %u mips %u tile %u): %s", (unsigned long long)r.placement, info.width, info.height, info.format, info.mips, r.tile_mode, why);
+    };
+    if (r.tile_mode == 0 || r.tile_mode == 1) {   // linear
+        uint32_t row, rows;
+        FormatShape(info.format, info.width, info.height, &row, &rows);
+        const uint32_t row_pitch = r.pitch != 0 ? r.pitch : row;
+        std::vector<uint8_t> texels(static_cast<size_t>(row_pitch) * rows);
+        if (!SafeCopy(r.placement, texels.data(), texels.size())) return fail("not readable");
+        gpu::UploadTexture(*r.texture, 0, 0, nullptr, texels.data(), row_pitch, row_pitch * rows);
         return;
     }
-    gpu::UploadTexture(*r.texture, 0, 0, nullptr, texels.data(), pitch, pitch * rows);
+    char key[96];
+    std::snprintf(key, sizeof key, "%u %u %u %u %u %u %u %u", info.width, info.height, info.mips, info.array_size, info.format, info.cube ? 1 : 0, r.tile_mode, r.pitch);
+    TileModel* model;
+    {
+        std::scoped_lock lock {g_tile_mutex};
+        auto it = g_tile_models.find(key);
+        if (it == g_tile_models.end()) it = g_tile_models.emplace(key, BuildTileModel(info, r.tile_mode, r.pitch)).first;
+        model = &it->second;
+    }
+    if (!model->ok) return fail("its layout is not a thin 1D tiling (or xg_x.dll did not answer)");
+    uint64_t need = 0;
+    for (const TileLevel& lv : model->levels)
+        need = std::max<uint64_t>(need, lv.base + std::max<uint64_t>((lv.height + 7) / 8, 1) * std::max<uint64_t>(lv.row_stride, ((lv.width + 7) / 8) * lv.tile_bytes));
+    std::vector<uint8_t> raw(static_cast<size_t>(need));
+    if (!SafeCopy(r.placement, raw.data(), raw.size())) return fail("not readable");
+    std::vector<uint8_t> linear;
+    for (uint32_t slice = 0; slice < info.array_size; ++slice) {
+        for (uint32_t mip = 0; mip < info.mips; ++mip) {
+            const TileLevel& lv = model->levels[slice * model->levels_per_slice + mip];
+            const uint32_t row_pitch = lv.width * bytes;
+            linear.resize(static_cast<size_t>(row_pitch) * lv.height);
+            for (uint32_t y = 0; y < lv.height; ++y) {
+                for (uint32_t x = 0; x < lv.width; ++x) {
+                    const uint64_t src = lv.base + (y >> 3) * lv.row_stride + (x >> 3) * lv.tile_bytes + static_cast<uint64_t>(Morton8(x & 7, y & 7)) * bytes;
+                    if (src + bytes > raw.size()) continue;
+                    std::memcpy(linear.data() + static_cast<size_t>(y) * row_pitch + static_cast<size_t>(x) * bytes, raw.data() + src, bytes);
+                }
+            }
+            gpu::UploadTexture(*r.texture, mip, slice, nullptr, linear.data(), row_pitch, row_pitch * lv.height);
+        }
+    }
 }
 
 // ---- the title's inline descriptor stream ----------------------------------------------------------
 // Packets: a header (register | (dwords - 1) << 16) and the dwords. Registers are byte offsets of resource slots: textures (T#, 8 dwords)
-// from 0x6b40 in 0x20 steps, samplers (S#, 4) from 0x7b40 in 0x10 steps, vertex streams (V#, 4) from 0x7d70, constant buffers (V#, 4)
-// from 0x1c40 and from 0x6a00.
+// from 0x6b40 in 0x20 steps, samplers (S#, 4) from 0x7b40 in 0x10 steps, vertex streams (V#, 4) from 0x7d70, and constant buffers
+// (V#, 4) from 0x1c40 (vertex stage) and from 0x6a00 (pixel stage).
 constexpr uint32_t kRegTexture = 0x6b40, kRegSampler = 0x7b40, kRegVertex = 0x7d70, kRegCbA = 0x1c40, kRegCbB = 0x6a00;
 
 std::shared_ptr<gpu::Buffer> CopyOfHost(uint64_t address, uint32_t bytes) {

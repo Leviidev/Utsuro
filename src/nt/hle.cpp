@@ -1,7 +1,9 @@
 // hle.cpp -- exports of guest DLLs that are implemented by the host instead. The entry of
 // the guest function is overwritten with `mov r10, rcx; mov eax, N; syscall; ret`, which
 // lands in Kernel::Dispatch like any other syscall; the host function's result is rax.
+#include <atomic>
 #include "nt/d3d.h"
+#include "nt/xg.h"
 #include "nt/hle_classes.h"
 #include "nt/kernel.h"
 #include "nt/logan.h"
@@ -65,6 +67,10 @@ bool AllocAligned(Kernel& k, uint64_t size, uint64_t align, uint64_t desired, ui
 }
 
 uint64_t D3DAllocateGraphicsMemory(Kernel& k, NtThread&, SyscallArgs& a) {
+    if (static const bool log = std::getenv("UTSURO_GFXLOG") != nullptr; log) {
+        static std::atomic<int> n {0};
+        if (n++ < 60) UT_INFO("hle: D3DAllocateGraphicsMemory(size %#llx, align %#llx, desired %#llx, flags %#llx)", (unsigned long long)a[0], (unsigned long long)a[1], (unsigned long long)a[2], (unsigned long long)a[3]);
+    }
     auto* out = a.Ptr<uint64_t>(4);
     if (out == nullptr || a[1] > 0x20000) return 0x80070057u;   // E_INVALIDARG
     if (AllocAligned(k, a[0], a[1], a[2], out)) return 0;
@@ -171,6 +177,16 @@ uint64_t SignalOnVblank(Kernel& k, NtThread&, SyscallArgs& a) {
     return 0;
 }
 
+// xg_x!XGComputeTexture2DLayout(desc, layout): only looked at (UTSURO_XGLOG), to learn the layout of the description.
+uint64_t XgLayoutLog(Kernel&, NtThread&, SyscallArgs& a) {
+    static std::atomic<int> n {0};
+    if (std::getenv("UTSURO_XGLOG") != nullptr && n++ < 16 && a[0] != 0) {
+        const auto* d = a.Ptr<uint32_t>(0);
+        UT_INFO("xg: XGComputeTexture2DLayout desc: %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x", d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], d[10], d[11], d[12], d[13], d[14], d[15]);
+    }
+    return ~0ull;   // run the original
+}
+
 const Hook kHooks[] = {
     {"combase.dll", "RoGetActivationFactory", RoGetActivationFactory, 5},
     {"bcrypt.dll", "BCryptGenRandom", BCryptGenRandom, 0},
@@ -179,6 +195,7 @@ const Hook kHooks[] = {
     {"d3d11_x.dll", "D3DFreeGraphicsMemory", D3DFreeGraphicsMemory, 0},
     {"d3d11_x.dll", "D3DConfigureVirtualMemory", ReturnOk, 0},
     {"d3d11_x.dll", "D3DMapEsramMemory", ReturnOk, 0},
+    {"xg_x.dll", "XGComputeTexture2DLayout", XgLayoutLog, 6},
     {"d3d11_x.dll", "DXGIXPresentArray", d3d::PresentArray, 0},
     {"d3d11_x.dll", "DXGIXSetVLineNotification", SignalOnVblank, 0},
     {"d3d11_x.dll", "DXGIXSetFrameNotification", SignalOnVblank, 0},
@@ -196,6 +213,7 @@ constexpr uint32_t kHleBase = 0xFFFF8000u;  // below winrt::Runtime::kBase's spa
 } // namespace
 
 void Kernel::ApplyHleHooks(const std::string& image, uint64_t base) {
+    xg::NoteImage(image, base);
     const auto exports = ListExports(base);
     bool any = false;
     for (size_t i = 0; i < sizeof(kHooks) / sizeof(kHooks[0]); ++i) {
