@@ -147,7 +147,7 @@ private:
     std::vector<std::unique_ptr<Iface>> ifaces_;
     std::vector<std::pair<Iface*, uint32_t>> method_table_;   // global id -> (iface, slot)
     std::map<uint64_t, std::unique_ptr<Obj>> objects_;
-    uint64_t next_id_ {1};
+    std::atomic<uint64_t> next_id_ {1};   // objects are created on several threads
     struct ClassDef { std::function<Obj*(Runtime&)> create; Iface* statics {nullptr}; std::vector<Iface*> more_statics; Obj* factory {nullptr}; };
     std::map<std::string, ClassDef> classes_;
     Iface* activation_factory_ {nullptr};

@@ -3,6 +3,7 @@
 // lands in Kernel::Dispatch like any other syscall; the host function's result is rax.
 #include <atomic>
 #include "nt/d3d.h"
+#include "nt/winsock.h"
 #include "nt/xg.h"
 #include "nt/hle_classes.h"
 #include "nt/kernel.h"
@@ -195,6 +196,35 @@ const Hook kHooks[] = {
     {"d3d11_x.dll", "D3DFreeGraphicsMemory", D3DFreeGraphicsMemory, 0},
     {"d3d11_x.dll", "D3DConfigureVirtualMemory", ReturnOk, 0},
     {"d3d11_x.dll", "D3DMapEsramMemory", ReturnOk, 0},
+    {"ws2_32.dll", "WSAStartup", winsock::WSAStartup, 0},
+    {"ws2_32.dll", "WSACleanup", winsock::WSACleanup, 0},
+    {"ws2_32.dll", "WSAGetLastError", winsock::WSAGetLastError, 0},
+    {"ws2_32.dll", "socket", winsock::socket, 0},
+    {"ws2_32.dll", "WSASocketW", winsock::WSASocketW, 0},
+    {"ws2_32.dll", "closesocket", winsock::closesocket, 0},
+    {"ws2_32.dll", "shutdown", winsock::shutdown, 0},
+    {"ws2_32.dll", "bind", winsock::bind, 0},
+    {"ws2_32.dll", "connect", winsock::connect, 0},
+    {"ws2_32.dll", "listen", winsock::listen, 0},
+    {"ws2_32.dll", "accept", winsock::accept, 0},
+    {"ws2_32.dll", "ioctlsocket", winsock::ioctlsocket, 0},
+    {"ws2_32.dll", "setsockopt", winsock::setsockopt, 0},
+    {"ws2_32.dll", "getsockopt", winsock::getsockopt, 0},
+    {"ws2_32.dll", "getsockname", winsock::getsockname, 0},
+    {"ws2_32.dll", "getpeername", winsock::getpeername, 0},
+    {"ws2_32.dll", "send", winsock::send, 0},
+    {"ws2_32.dll", "recv", winsock::recv, 0},
+    {"ws2_32.dll", "sendto", winsock::sendto, 0},
+    {"ws2_32.dll", "recvfrom", winsock::recvfrom, 0},
+    {"ws2_32.dll", "WSASendTo", winsock::WSASendTo, 0},
+    {"ws2_32.dll", "WSARecvFrom", winsock::WSARecvFrom, 0},
+    {"ws2_32.dll", "select", winsock::select, 0},
+    {"ws2_32.dll", "gethostname", winsock::gethostname, 0},
+    {"ws2_32.dll", "gethostbyname", winsock::gethostbyname, 0},
+    {"ws2_32.dll", "gethostbyaddr", winsock::gethostbyaddr, 0},
+    {"ws2_32.dll", "getaddrinfo", winsock::getaddrinfo, 0},
+    {"ws2_32.dll", "WSAStringToAddressW", winsock::WSAStringToAddressW, 0},
+    {"ws2_32.dll", "WSAAddressToStringW", winsock::WSAAddressToStringW, 0},
     {"xg_x.dll", "XGComputeTexture2DLayout", XgLayoutLog, 6},
     {"d3d11_x.dll", "DXGIXPresentArray", d3d::PresentArray, 0},
     {"d3d11_x.dll", "DXGIXSetVLineNotification", SignalOnVblank, 0},

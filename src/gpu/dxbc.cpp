@@ -344,6 +344,8 @@ std::vector<SignatureElement> ParseSignature(const Chunk& c) {
         s.reg = reg;
         s.mask = masks & 0xF;
         s.system_value = sysval;
+        // Older compilers name the front-face input VFACE without marking it as a system value.
+        if (s.system_value == 0 && (s.semantic == "VFACE" || s.semantic == "SV_ISFRONTFACE")) s.system_value = 9;
         s.component_type = comp;
         out.push_back(s);
     }
@@ -387,7 +389,10 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
     result.stage = t.stage;
     if (t.stage != ShaderStage::Vertex && t.stage != ShaderStage::Pixel) { result.error = "only vertex and pixel shaders are translated"; return result; }
     const bool vs = t.stage == ShaderStage::Vertex;
-    for (const auto& e : in_sig) t.sig_in[e.reg].elements.push_back(&e);
+    for (const auto& e : in_sig) {
+        t.sig_in[e.reg].elements.push_back(&e);
+        if (!vs && e.system_value == 9) { t.input_sgv[e.reg] = 9; t.uses_front_face = true; }
+    }
     for (const auto& e : out_sig) t.sig_out[e.reg].elements.push_back(&e);
 
     const uint32_t total = std::min<uint32_t>(tokens[1], static_cast<uint32_t>(token_count));

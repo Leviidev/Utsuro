@@ -864,8 +864,10 @@ int Kernel::Run() {
                 {
                     UT_INFO("thread %llu %s: running (last syscall %s at %s)", (unsigned long long)t->tid_, t->name.c_str(), SyscallName(static_cast<uint32_t>(t->current_syscall)),
                             Describe(t->current_rip).c_str());
-                    const auto frames = Backtrace(t->stack_rip, t->stack_regs, 14);   // where it was when it last made a system call
-                    for (size_t i = 0; i < frames.size(); ++i) UT_INFO("    #%zu %s", i, Describe(frames[i]).c_str());
+                    if (std::getenv("UTSURO_STACKS_RUNNING") != nullptr && vm_->Contains(t->stack_regs[4], 0x100)) {   // where it was when it last made a system call
+                        const auto frames = Backtrace(t->stack_rip, t->stack_regs, 14);
+                        for (size_t i = 0; i < frames.size(); ++i) UT_INFO("    #%zu %s", i, Describe(frames[i]).c_str());
+                    }
                 }
             }
         }

@@ -100,6 +100,7 @@ void Runtime::Materialize(Iface& iface) {
     iface.first_id = static_cast<uint32_t>(method_table_.size());
     for (size_t s = 0; s < slots; ++s) {
         method_table_.emplace_back(&iface, static_cast<uint32_t>(s));
+        if (std::getenv("UTSURO_DUMPMETHODS") != nullptr) UT_INFO("winrt method %#x = %s slot %zu %s", kBase + iface.first_id + static_cast<uint32_t>(s), iface.name.c_str(), s, s >= static_cast<size_t>(iface.base_slots) && s - iface.base_slots < iface.methods.size() ? iface.methods[s - iface.base_slots].name.c_str() : "");
         const uint64_t stub = AllocGuest(16, 16);
         auto* p = reinterpret_cast<uint8_t*>(stub);
         p[0] = 0x4C; p[1] = 0x8B; p[2] = 0xD1;                 // mov r10, rcx
