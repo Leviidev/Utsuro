@@ -322,6 +322,7 @@ public:
     /// Link time of the console OS's ntdll: tells which OS build (and so which D3D11.X ABI) the dump has.
     uint32_t NtdllTimestamp() const { return ntdll_image_ ? ntdll_image_->timestamp : 0; }
     uint64_t ImageBase() const { return exe_base_; }
+    uint64_t FindLoadedImage(const std::string& name) const;
     uint64_t KusdAddress() const { return kusd_; }
 
     // Waiting
@@ -374,7 +375,7 @@ public:
     bool Tracing() const { return options_.trace; }
 
     std::map<uint64_t, std::string> image_names;  ///< Loaded image base -> name, for traces.
-    std::mutex image_mutex;
+    mutable std::mutex image_mutex;
 
     // Wake-ups for APCs and timers
     void QueueApc(NtThread& target, const PendingApc& apc);

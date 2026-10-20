@@ -81,18 +81,28 @@ void Define(Runtime& rt) {
         }));
         device.push_back(M("OpenPropertyStore", [](Call& c) -> uint32_t { if (auto* p = c.Ptr<uint64_t>(1)) *p = 0; return 0x80004001u; }));
         device.push_back(M("GetId", [](Call& c) -> uint32_t {
-            // The caller frees the string with CoTaskMemFree, so it comes from the process heap, allocated by the guest's own RtlAllocateHeap.
+            // The caller frees the string with CoTaskMemFree. If combase.dll is loaded, call CoTaskMemAlloc.
             static const char16_t id[] = u"{0.0.0.00000000}.{utsuro-render}";
             auto* out = c.Ptr<uint64_t>(0);
             if (out == nullptr) return 0x80004003u;
             Kernel& k = c.kernel;
-            const uint64_t heap = *reinterpret_cast<const uint64_t*>(k.PebAddress() + 0x30);
-            const uint64_t alloc = FindExport(k.NtdllBase(), "RtlAllocateHeap");
-            c.thread.CallGuest(GuestStep::Call(alloc, {heap, 0, sizeof id}, [out](NtThread&, uint64_t text) -> GuestStep {
-                if (text != 0) std::memcpy(reinterpret_cast<void*>(text), id, sizeof id);
-                *out = text;
-                return GuestStep::Return(text != 0 ? 0 : 0x8007000Eu);
-            }));
+            const uint64_t combase = k.FindLoadedImage("combase.dll");
+            const uint64_t co_alloc = combase ? FindExport(combase, "CoTaskMemAlloc") : 0;
+            if (co_alloc != 0) {
+                c.thread.CallGuest(GuestStep::Call(co_alloc, {sizeof id}, [out](NtThread&, uint64_t text) -> GuestStep {
+                    if (text != 0) std::memcpy(reinterpret_cast<void*>(text), id, sizeof id);
+                    *out = text;
+                    return GuestStep::Return(text != 0 ? 0 : 0x8007000Eu);
+                }));
+            } else {
+                const uint64_t heap = *reinterpret_cast<const uint64_t*>(k.PebAddress() + 0x30);
+                const uint64_t alloc = FindExport(k.NtdllBase(), "RtlAllocateHeap");
+                c.thread.CallGuest(GuestStep::Call(alloc, {heap, 0, sizeof id}, [out](NtThread&, uint64_t text) -> GuestStep {
+                    if (text != 0) std::memcpy(reinterpret_cast<void*>(text), id, sizeof id);
+                    *out = text;
+                    return GuestStep::Return(text != 0 ? 0 : 0x8007000Eu);
+                }));
+            }
             return kSOk;
         }));
         device.push_back(M("GetState", [](Call& c) -> uint32_t { if (auto* p = c.Ptr<uint32_t>(0)) *p = 1; return kSOk; }));   // DEVICE_STATE_ACTIVE

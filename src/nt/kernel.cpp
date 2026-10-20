@@ -156,7 +156,11 @@ Kernel::Kernel(KernelOptions options) : options_ {std::move(options)} {
     if (sysctlbyname("hw.logicalcpu", &n, &len, nullptr, 0) == 0) nprocs_ = static_cast<uint32_t>(std::clamp(n, 2, 8));
 }
 
-Kernel::~Kernel() = default;
+Kernel::~Kernel() {
+    exiting = true;
+    wait_cv_.notify_all();
+    if (timer_thread_.joinable()) timer_thread_.join();
+}
 
 HANDLE Kernel::AddHandle(std::shared_ptr<Object> object) {
     std::scoped_lock lock {handle_mutex_};
@@ -711,6 +715,16 @@ NTSTATUS Kernel::MapImageSection(SectionObject& section, uint64_t* base_io, uint
     *size_io = AlignUpPage(pe.size_of_image);
     if (base != pe.image_base) return STATUS_IMAGE_NOT_AT_BASE;
     return STATUS_SUCCESS;
+}
+
+uint64_t Kernel::FindLoadedImage(const std::string& name) const {
+    std::scoped_lock lock {image_mutex};
+    for (const auto& [base, path] : image_names) {
+        auto pos = path.rfind('\\');
+        std::string filename = (pos != std::string::npos) ? path.substr(pos + 1) : path;
+        if (strcasecmp(filename.c_str(), name.c_str()) == 0) return base;
+    }
+    return 0;
 }
 
 } // namespace utsuro::nt

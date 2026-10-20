@@ -741,7 +741,11 @@ void Kernel::TimerThreadMain() {
         const int64_t now_ns = MonotonicNs();
         int64_t wait_ns = 15000000;
         if (earliest >= 0) wait_ns = std::min<int64_t>(wait_ns, std::max<int64_t>(earliest - now_ns, 100000));
-        wait_cv_.wait_for(lock, std::chrono::nanoseconds(wait_ns));
+        try {
+            wait_cv_.wait_for(lock, std::chrono::nanoseconds(std::max<int64_t>(wait_ns, 1000)));
+        } catch (...) {
+            break;
+        }
     }
 }
 
