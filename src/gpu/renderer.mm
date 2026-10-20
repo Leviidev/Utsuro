@@ -1045,8 +1045,11 @@ void Draw(const DrawState& st, const DrawArgs& args) {
         }
         [e setBlendColorRed:st.blend_factor[0] green:st.blend_factor[1] blue:st.blend_factor[2] alpha:st.blend_factor[3]];
         MTLViewport vp;
-        if (st.num_viewports > 0) vp = {st.viewports[0].x, st.viewports[0].y, st.viewports[0].w, st.viewports[0].h, st.viewports[0].min_depth, st.viewports[0].max_depth};
-        else vp = {0, 0, (double)width, (double)height, 0, 1};
+        if (st.num_viewports > 0 && st.viewports[0].w > 0.0f && st.viewports[0].h > 0.0f) {
+            vp = {st.viewports[0].x, st.viewports[0].y, st.viewports[0].w, st.viewports[0].h, st.viewports[0].min_depth, st.viewports[0].max_depth};
+        } else {
+            vp = {0, 0, (double)width, (double)height, 0, 1};
+        }
         [e setViewport:vp];
         MTLScissorRect sc = {0, 0, (NSUInteger)width, (NSUInteger)height};
         const bool scissor_on = !st.raster.empty() && Rd<uint32_t>(st.raster.bytes, 28) != 0;

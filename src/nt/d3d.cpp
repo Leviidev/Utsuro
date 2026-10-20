@@ -401,9 +401,9 @@ static void Setup(Runtime& rt, uint32_t os_timestamp, bool old_abi) {
                 return 0;
             }
             if (std::getenv("UTSURO_SRVLOG") != nullptr) {
-                static std::atomic<int> shown {0};
-                if (shown++ < 12) UT_INFO("d3d: SetShaderResources stage %d: args %#llx %#llx %#llx %#llx %#llx", st, (unsigned long long)c.Arg(0), (unsigned long long)c.Arg(1), (unsigned long long)c.Arg(2), (unsigned long long)c.Arg(3), (unsigned long long)c.Arg(4));
-                if (shown <= 3) for (int a : {0, 4}) { const uint64_t* q = c.Ptr<uint64_t>(a); char t[256]; std::snprintf(t, sizeof t, "arg%d -> %llx %llx %llx %llx %llx %llx", a, (unsigned long long)q[0], (unsigned long long)q[1], (unsigned long long)q[2], (unsigned long long)q[3], (unsigned long long)q[4], (unsigned long long)q[5]); UT_INFO("d3d:   %s", t); }
+                static std::atomic<int> shown[6] {};
+                if (shown[st]++ < 20) UT_INFO("d3d: SetShaderResources stage %d: args %#llx %#llx %#llx %#llx %#llx", st, (unsigned long long)c.Arg(0), (unsigned long long)c.Arg(1), (unsigned long long)c.Arg(2), (unsigned long long)c.Arg(3), (unsigned long long)c.Arg(4));
+                if (shown[st] <= 3) for (int a : {0, 4}) { const uint64_t* q = c.Ptr<uint64_t>(a); char t[256]; std::snprintf(t, sizeof t, "arg%d -> %llx %llx %llx %llx %llx %llx", a, (unsigned long long)q[0], (unsigned long long)q[1], (unsigned long long)q[2], (unsigned long long)q[3], (unsigned long long)q[4], (unsigned long long)q[5]); UT_INFO("d3d:   %s", t); }
             }
             for (uint64_t i = 0; i < c.Arg(1) && c.Arg(0) + i < 128; ++i) s.srv[st][c.Arg(0) + i] = c.Arg(2) ? c.Ptr<uint64_t>(2)[i] : 0;
             return 0;
@@ -434,6 +434,40 @@ static void Setup(Runtime& rt, uint32_t os_timestamp, bool old_abi) {
             return 0;
         });
     }
+    OverrideAll("SetFastResources_Debug", [](Call& c) -> uint32_t {
+        auto& s = StateOf(c.obj);
+        const uint32_t* p = c.Ptr<uint32_t>(0);
+        if (!p) return 0;
+        uint32_t header = p[0];
+        uint32_t type = (header >> 28) & 0xF;
+        uint32_t stage_code = (header >> 16) & 0xF;
+        uint32_t slot = (header >> 8) & 0xFF;
+        uint64_t ptr = 0;
+        std::memcpy(&ptr, reinterpret_cast<const uint8_t*>(p) + 4, 8);
+        int st = -1;
+        if (stage_code == 3) st = 0; // VS
+        else if (stage_code == 4) st = 4; // PS
+        else if (stage_code == 5) st = 5; // CS
+        if (std::getenv("UTSURO_SRVLOG") != nullptr) {
+            static std::atomic<int> srv_shown {0};
+            if (srv_shown++ < 20) {
+                UT_INFO("d3d: SetFastResources_Debug header=%08x (type=%x stage_code=%x -> st=%d slot=%u) ptr=%#llx",
+                    header, type, stage_code, st, (unsigned)slot, (unsigned long long)ptr);
+            }
+        }
+        if (st >= 0) {
+            if (type == 8) { // SRV
+                if (slot < 128) s.srv[st][slot] = ptr;
+            } else if (type == 9 || type == 10) { // Sampler
+                if (slot < 16) s.sampler[st][slot] = ptr;
+            }
+        }
+        return 0;
+    });
+    OverrideAll("SetFastResourcesFromBatch_Debug", [](Call& c) -> uint32_t {
+        UT_INFO("d3d: SetFastResourcesFromBatch_Debug");
+        return 0;
+    });
     OverrideAll("OMSetRenderTargets", [](Call& c) -> uint32_t {
         auto& s = StateOf(c.obj);
         for (uint64_t i = 0; i < 8; ++i) s.rtv[i] = (i < c.Arg(0) && c.Arg(1)) ? c.Ptr<uint64_t>(1)[i] : 0;
@@ -488,6 +522,13 @@ static void Setup(Runtime& rt, uint32_t os_timestamp, bool old_abi) {
         auto& s = StateOf(c.obj);
         s.num_viewports = static_cast<uint32_t>(std::min<uint64_t>(c.Arg(0), 16));
         if (c.Arg(1)) std::memcpy(s.viewports, c.Ptr<void>(1), s.num_viewports * sizeof(Viewport));
+        if (std::getenv("UTSURO_SRVLOG") != nullptr) {
+            static std::atomic<int> vp_shown {0};
+            if (vp_shown++ < 20) {
+                const auto* vp = c.Ptr<Viewport>(1);
+                UT_INFO("d3d: RSSetViewports count %llu ptr %#llx (w=%g, h=%g)", (unsigned long long)c.Arg(0), (unsigned long long)c.Arg(1), vp ? vp->w : -1.0f, vp ? vp->h : -1.0f);
+            }
+        }
         return 0;
     });
     OverrideAll("RSGetViewports", [](Call& c) -> uint32_t {
