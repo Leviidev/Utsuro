@@ -35,17 +35,34 @@ enum Op : uint32_t {
     OP_DCL_INDEXABLE_TEMP = 105, OP_DCL_GLOBAL_FLAGS = 106,
     OP_RCP = 129,   // SM5
     OP_EVAL_SAMPLE_INDEX = 204,
-    OP_SAMPLE_INFO = 111, OP_GATHER4 = 109,
+    OP_SAMPLEPOS = 110, OP_SAMPLE_INFO = 111, OP_GATHER4 = 109,
     OP_DERIV_RTX_COARSE = 122, OP_DERIV_RTX_FINE = 123, OP_DERIV_RTY_COARSE = 124, OP_DERIV_RTY_FINE = 125,
+    OP_GATHER4_ALT = 108, OP_GATHER4_C = 126,
+    OP_F32TO16 = 130, OP_F16TOF32 = 131,
     OP_COUNTBITS = 134, OP_FIRSTBIT_HI = 135, OP_FIRSTBIT_LO = 136, OP_FIRSTBIT_SHI = 137,
     OP_UBFE = 138, OP_IBFE = 139, OP_BFI = 140, OP_BFREV = 141, OP_SWAPC = 142,
+    OP_DCL_THREAD_GROUP = 155,
+    OP_DCL_UAV_TYPED = 156, OP_DCL_UAV_RAW = 157, OP_DCL_UAV_STRUCTURED = 158,
+    OP_DCL_TGSM_STRUCTURED = 160,
+    OP_SYNC = 190,
+    OP_DCL_RESOURCE_RAW = 161, OP_DCL_RESOURCE_STRUCTURED = 162,
+    OP_LD_UAV_TYPED = 163, OP_STORE_UAV_TYPED = 164, OP_LD_RAW = 165, OP_STORE_RAW = 166,
+    OP_LD_STRUCTURED = 167, OP_STORE_STRUCTURED = 168,
+    OP_ATOMIC_AND = 169, OP_ATOMIC_OR = 170, OP_ATOMIC_XOR = 171, OP_ATOMIC_CMP_STORE = 172,
+    OP_ATOMIC_IADD = 173, OP_ATOMIC_IMAX = 174, OP_ATOMIC_IMIN = 175, OP_ATOMIC_UMAX = 176, OP_ATOMIC_UMIN = 177,
+    OP_IMM_ATOMIC_ALLOC = 178, OP_IMM_ATOMIC_CONSUME = 179,
+    OP_IMM_ATOMIC_IADD = 180, OP_IMM_ATOMIC_AND = 181, OP_IMM_ATOMIC_OR = 182, OP_IMM_ATOMIC_XOR = 183,
+    OP_IMM_ATOMIC_EXCH = 184, OP_IMM_ATOMIC_CMP_EXCH = 185, OP_IMM_ATOMIC_IMAX = 186, OP_IMM_ATOMIC_IMIN = 187,
+    OP_IMM_ATOMIC_UMAX = 188, OP_IMM_ATOMIC_UMIN = 189,
     OP_SAMPLE_CLAMP_FEEDBACK = 230,   // D3D11.2 tiled-resource sample with a minimum LOD; the feedback status is not tracked
 };
 
 enum OperandType : uint32_t {
     T_TEMP = 0, T_INPUT = 1, T_OUTPUT = 2, T_INDEXABLE_TEMP = 3, T_IMM32 = 4, T_IMM64 = 5, T_SAMPLER = 6, T_RESOURCE = 7,
     T_CONSTANT_BUFFER = 8, T_ICB = 9, T_LABEL = 10, T_INPUT_PRIMITIVE_ID = 11, T_OUTPUT_DEPTH = 12, T_NULL = 13,
-    T_RASTERIZER = 14, T_OUTPUT_COVERAGE = 15, T_INPUT_COVERAGE_MASK = 35,
+    T_RASTERIZER = 14, T_OUTPUT_COVERAGE = 15, T_UAV = 30, T_TGSM = 31,
+    T_INPUT_THREAD_ID = 32, T_INPUT_THREAD_GROUP_ID = 33, T_INPUT_THREAD_ID_IN_GROUP = 34,
+    T_INPUT_COVERAGE_MASK = 35, T_INPUT_THREAD_ID_IN_GROUP_FLATTENED = 36,
 };
 
 struct Operand;
@@ -129,6 +146,11 @@ struct Translator {
     uint32_t temps {0};
     std::map<uint32_t, std::pair<uint32_t, uint32_t>> indexable;   // reg -> (size, components)
     std::map<uint32_t, uint32_t> resource_dim;                      // t# -> dimension
+    std::map<uint32_t, uint32_t> resource_stride;                   // t# -> byte stride
+    std::map<uint32_t, uint32_t> tgsm_stride, tgsm_count;
+    std::map<uint32_t, uint32_t> uav_stride;
+    std::map<uint32_t, uint32_t> uav_dim;
+    bool uses_structured {false}, uses_f32to16 {false}, uses_f16tof32 {false};
     std::map<uint32_t, uint32_t> input_sgv;                          // register -> sysval
     std::map<uint32_t, uint32_t> output_sgv;
     std::set<uint32_t> input_regs, output_regs;
@@ -175,6 +197,7 @@ struct Translator {
         case T_INPUT: std::snprintf(buf, sizeof buf, "v%u", o.index[0]); return buf;
         case T_OUTPUT: std::snprintf(buf, sizeof buf, "o%u", o.index[0]); return buf;
         case T_OUTPUT_DEPTH: return "float4(oDepth)";
+        case T_UAV: std::snprintf(buf, sizeof buf, "u%u", o.index[0]); return buf;
         case T_INDEXABLE_TEMP: {
             std::snprintf(buf, sizeof buf, "x%u", o.index[0]);
             std::string s = buf;
@@ -187,6 +210,10 @@ struct Translator {
             return std::string(buf) + "[" + idx + "]";
         }
         case T_INPUT_COVERAGE_MASK: return "as_type<float4>(uint4(0xFFFFFFFFu))";   // every sample covered
+        case T_INPUT_THREAD_ID: return "as_type<float4>(uint4(ut_tid, 0u))";
+        case T_INPUT_THREAD_GROUP_ID: return "as_type<float4>(uint4(ut_gid, 0u))";
+        case T_INPUT_THREAD_ID_IN_GROUP: return "as_type<float4>(uint4(ut_gtid, 0u))";
+        case T_INPUT_THREAD_ID_IN_GROUP_FLATTENED: return "as_type<float4>(uint4(ut_gidx, 0u, 0u, 0u))";
         case T_ICB: {
             std::string idx = o.relative[0] ? "(" + RelIndex(*o.relative[0]) + " + " + std::to_string(o.index[0]) + ")" : std::to_string(o.index[0]);
             return "icb[" + idx + "]";
@@ -227,12 +254,13 @@ struct Translator {
         return e;
     }
     std::string Scalar(const Operand& o) { Operand c = o; return SrcF(c) + ".x"; }
+    std::string SrcU(const Operand& o) { return SrcI(o, true); }
 
     // ---- destinations ------------------------------------------------------------------
     struct Dest { std::string reg; std::string mask; bool valid {false}; };
     Dest DestOf(const Operand& o) {
         Dest d;
-        if (o.type == T_NULL || o.type == T_OUTPUT_COVERAGE) return d;   // oMask is not modelled
+        if (o.type == T_NULL || o.type == T_OUTPUT_COVERAGE || o.type == T_UAV) return d;   // oMask and UAV writes not modelled directly
         d.valid = true;
         if (o.type == T_OUTPUT_DEPTH) { d.reg = "oDepth"; d.mask = ""; return d; }
         d.reg = RegisterBase(o);
@@ -387,7 +415,7 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
     default: t.stage = ShaderStage::Unknown;
     }
     result.stage = t.stage;
-    if (t.stage != ShaderStage::Vertex && t.stage != ShaderStage::Pixel) { result.error = "only vertex and pixel shaders are translated"; return result; }
+    if (t.stage != ShaderStage::Vertex && t.stage != ShaderStage::Pixel && t.stage != ShaderStage::Compute) { result.error = "only vertex, pixel, and compute shaders are translated"; return result; }
     const bool vs = t.stage == ShaderStage::Vertex;
     for (const auto& e : in_sig) {
         t.sig_in[e.reg].elements.push_back(&e);
@@ -397,7 +425,7 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
 
     const uint32_t total = std::min<uint32_t>(tokens[1], static_cast<uint32_t>(token_count));
     Decoder dec {tokens + 2, tokens + total};
-    std::vector<std::string> const_buffer_decls, resource_decls, sampler_decls;
+    std::vector<std::string> const_buffer_decls, resource_decls, sampler_decls, uav_decls;
 
     auto sample_args_for = [&](uint32_t resource_reg) { return t.resource_dim.count(resource_reg) ? t.resource_dim[resource_reg] : 3u; };
 
@@ -455,7 +483,7 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
         }
         case OP_DCL_SAMPLER: { auto o = operand(); t.refl.samplers |= 1u << o->index[0]; sampler_decls.push_back("sampler s" + std::to_string(o->index[0]) + " [[sampler(" + std::to_string(o->index[0]) + ")]]"); break; }
         case OP_DCL_RESOURCE: {
-            const uint32_t dim = (tok >> 11) & 0x1F;
+            const uint32_t dim = (tok >> 11) & 0x1F; (void)dim;
             auto o = operand();
             dec.Next();   // return type
             const uint32_t slot = o->index[0];
@@ -463,6 +491,66 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
             if (slot < 32) t.refl.textures |= 1u << slot;
             if (slot < 128) t.refl.texture_dimension[slot] = dim;
             resource_decls.push_back(t.TextureType(dim) + " t" + std::to_string(slot) + " [[texture(" + std::to_string(slot) + ")]]");
+            break;
+        }
+        case OP_DCL_RESOURCE_STRUCTURED: {
+            auto o = operand();
+            const uint32_t stride = dec.Next(); (void)stride;
+            const uint32_t slot = o->index[0];
+            t.resource_dim[slot] = 12;
+            t.resource_stride[slot] = stride;
+            if (slot < 32) t.refl.textures |= 1u << slot;
+            if (slot < 128) t.refl.texture_dimension[slot] = 12;
+            const uint32_t buf_slot = (t.stage == ShaderStage::Vertex) ? (24 + slot) : (14 + slot);
+            resource_decls.push_back("device const uint* t" + std::to_string(slot) + " [[buffer(" + std::to_string(buf_slot) + ")]]");
+            break;
+        }
+        case OP_DCL_UAV_TYPED: {
+            const uint32_t dim = (tok >> 11) & 0x1F;
+            auto o = operand();
+            dec.Next();   // return type
+            const uint32_t slot = o->index[0];
+            t.refl.uavs |= (1u << slot);
+            t.uav_dim[slot] = dim;
+            std::string type = (dim == 8) ? "texture2d_array<float, access::read_write>" :
+                               (dim == 5) ? "texture3d<float, access::read_write>" :
+                               "texture2d<float, access::read_write>";
+            uav_decls.push_back(type + " u" + std::to_string(slot) + " [[texture(" + std::to_string(64 + slot) + ")]]");
+            break;
+        }
+        case OP_DCL_UAV_STRUCTURED: {
+            auto o = operand();
+            const uint32_t stride = dec.Next();
+            const uint32_t slot = o->index[0];
+            t.refl.uavs |= (1u << slot);
+            t.uav_stride[slot] = stride;
+            uav_decls.push_back("device uint* u" + std::to_string(slot) + " [[buffer(" + std::to_string(20 + slot) + ")]]");
+            break;
+        }
+        case OP_DCL_UAV_RAW: {
+            auto o = operand();
+            const uint32_t slot = o->index[0];
+            t.refl.uavs |= (1u << slot);
+            uav_decls.push_back("device uint* u" + std::to_string(slot) + " [[buffer(" + std::to_string(20 + slot) + ")]]");
+            break;
+        }
+        case OP_DCL_TGSM_STRUCTURED: {
+            auto o = operand();
+            const uint32_t stride = dec.Next();
+            const uint32_t count = dec.Next();
+            const uint32_t slot = o->index[0];
+            t.tgsm_stride[slot] = stride;
+            t.tgsm_count[slot] = count;
+            break;
+        }
+        case OP_DCL_THREAD_GROUP: {
+            t.refl.thread_group_size[0] = dec.Next();
+            t.refl.thread_group_size[1] = dec.Next();
+            t.refl.thread_group_size[2] = dec.Next();
+            break;
+        }
+        case OP_DCL_RESOURCE_RAW: {
+            auto o = operand();
             break;
         }
         case OP_DCL_INPUT: case OP_DCL_INPUT_PS: {
@@ -613,6 +701,10 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
             break;
         }
         case OP_BFREV: { auto d = operand(); auto a = operand(); t.WriteBits(*d, "reverse_bits(" + t.SrcI(*a, true) + ")"); break; }
+        case OP_SYNC: {
+            t.body << "    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);\n";
+            break;
+        }
         case OP_COUNTBITS: { auto d = operand(); auto a = operand(); t.WriteBits(*d, "popcount(" + t.SrcI(*a, true) + ")"); break; }
         case OP_FIRSTBIT_HI: case OP_FIRSTBIT_LO: case OP_FIRSTBIT_SHI: {
             auto d = operand(); auto a = operand();
@@ -686,7 +778,7 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
             t.Write(*d, saturate, "t" + std::to_string(slot) + ".sample(" + args + ")." + Translator::Swizzle(*res));
             break;
         }
-        case OP_GATHER4: {
+        case OP_GATHER4: case OP_GATHER4_ALT: {
             auto d = operand(); auto coord = operand(); auto res = operand(); auto smp = operand();
             const uint32_t slot = res->index[0];
             const uint32_t dim = sample_args_for(slot);
@@ -699,11 +791,26 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
             t.Write(*d, saturate, "t" + std::to_string(slot) + ".gather(" + args + ")." + Translator::Swizzle(*res));
             break;
         }
+        case OP_GATHER4_C: {
+            auto d = operand(); auto coord = operand(); auto res = operand(); auto smp = operand(); auto ref = operand();
+            const uint32_t slot = res->index[0];
+            const uint32_t dim = sample_args_for(slot);
+            std::string c = t.SrcF(*coord);
+            std::string args = "s" + std::to_string(smp->index[0]) + ", " + t.Coord(dim, c) + t.ArraySlice(dim, c);
+            if (has_offset && (dim == 3 || dim == 8)) args += ", int2(" + std::to_string(offset[0]) + ", " + std::to_string(offset[1]) + ")";
+            t.Write(*d, saturate, "float4(float4(" + t.Scalar(*ref) + ") <= float4(t" + std::to_string(slot) + ".gather(" + args + ")))");
+            break;
+        }
         case OP_LD_MS: {
             auto d = operand(); auto coord = operand(); auto res = operand(); auto idx = operand();
             const uint32_t slot = res->index[0];
             const std::string c = t.SrcI(*coord, true);
             t.Write(*d, false, "t" + std::to_string(slot) + ".read(uint2((" + c + ").xy), " + t.SrcI(*idx, true) + ".x)." + Translator::Swizzle(*res));
+            break;
+        }
+        case OP_SAMPLEPOS: {
+            auto dst = operand(); auto src = operand(); auto sample_idx = operand();
+            t.Write(*dst, false, "float4(0.5f, 0.5f, 0.0f, 0.0f)");
             break;
         }
         case OP_SAMPLE_INFO: {
@@ -767,6 +874,165 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
             t.Line("if (as_type<uint>(" + t.Scalar(*a) + (nonzero ? ") != 0u) " : ") == 0u) ") + "discard_fragment();");
             break;
         }
+        case OP_LD_STRUCTURED: {
+            auto dst = operand();
+            auto s_idx = operand();
+            auto byte_off = operand();
+            auto res = operand();
+            if (res->type == T_TGSM) {
+                const uint32_t slot = res->index[0];
+                const uint32_t stride = t.tgsm_stride.count(slot) ? t.tgsm_stride[slot] : 4u;
+                t.Line("{");
+                t.Line("    uint s_idx = " + t.SrcU(*s_idx) + ".x;");
+                t.Line("    uint b_off = " + t.SrcU(*byte_off) + ".x;");
+                t.Line("    uint w_idx = (s_idx * " + std::to_string(stride) + "u + b_off) / 4u;");
+                t.Line("    uint4 raw = uint4(tgsm_g" + std::to_string(slot) + "[w_idx], tgsm_g" + std::to_string(slot) + "[w_idx + 1], tgsm_g" + std::to_string(slot) + "[w_idx + 2], tgsm_g" + std::to_string(slot) + "[w_idx + 3]);");
+                t.Write(*dst, false, "as_type<float4>(raw)");
+                t.Line("}");
+            } else if (res->type == T_RESOURCE) {
+                t.uses_structured = true;
+                const uint32_t slot = res->index[0];
+                const uint32_t stride = t.resource_stride.count(slot) ? t.resource_stride[slot] : 0u;
+                const std::string call = "ut_ld_structured(t" + std::to_string(slot) + ", "
+                    + "as_type<uint>(" + t.Scalar(*s_idx) + "), "
+                    + std::to_string(stride) + "u, "
+                    + "as_type<uint>(" + t.Scalar(*byte_off) + "))";
+                t.Write(*dst, false, call + "." + Translator::Swizzle(*res));
+            } else if (res->type == T_UAV) {
+                t.uses_structured = true;
+                const uint32_t slot = res->index[0];
+                const uint32_t stride = t.uav_stride.count(slot) ? t.uav_stride[slot] : 0u;
+                const std::string call = "ut_ld_structured(u" + std::to_string(slot) + ", "
+                    + "as_type<uint>(" + t.Scalar(*s_idx) + "), "
+                    + std::to_string(stride) + "u, "
+                    + "as_type<uint>(" + t.Scalar(*byte_off) + "))";
+                t.Write(*dst, false, call + "." + Translator::Swizzle(*res));
+            }
+            break;
+        }
+        case OP_STORE_STRUCTURED: {
+            auto dst = operand(); auto idx = operand(); auto off = operand(); auto val = operand();
+            if (dst->type == T_TGSM) {
+                const uint32_t slot = dst->index[0];
+                const uint32_t stride = t.tgsm_stride.count(slot) ? t.tgsm_stride[slot] : 4u;
+                t.Line("{");
+                t.Line("    uint s_idx = " + t.SrcU(*idx) + ".x;");
+                t.Line("    uint b_off = " + t.SrcU(*off) + ".x;");
+                t.Line("    uint w_idx = (s_idx * " + std::to_string(stride) + "u + b_off) / 4u;");
+                t.Line("    uint4 raw = " + t.SrcU(*val) + ";");
+                for (int comp = 0; comp < 4; ++comp) {
+                    if (dst->bits & (1u << comp)) {
+                        t.Line("    tgsm_g" + std::to_string(slot) + "[w_idx + " + std::to_string(comp) + "] = raw[" + std::to_string(comp) + "];");
+                    }
+                }
+                t.Line("}");
+            } else if (dst->type == T_UAV) {
+                const uint32_t slot = dst->index[0];
+                const uint32_t stride = t.uav_stride.count(slot) ? t.uav_stride[slot] : 4u;
+                t.Line("{");
+                t.Line("    uint s_idx = " + t.SrcU(*idx) + ".x;");
+                t.Line("    uint b_off = " + t.SrcU(*off) + ".x;");
+                t.Line("    uint w_idx = (s_idx * " + std::to_string(stride) + "u + b_off) / 4u;");
+                t.Line("    uint4 raw = " + t.SrcU(*val) + ";");
+                for (int comp = 0; comp < 4; ++comp) {
+                    if (dst->bits & (1u << comp)) {
+                        t.Line("    u" + std::to_string(slot) + "[w_idx + " + std::to_string(comp) + "] = raw[" + std::to_string(comp) + "];");
+                    }
+                }
+                t.Line("}");
+            }
+            break;
+        }
+        case OP_STORE_RAW: {
+            auto dst = operand(); auto off = operand(); auto val = operand();
+            break;
+        }
+        case OP_STORE_UAV_TYPED: {
+            auto dst = operand(); auto coord = operand(); auto val = operand();
+            const uint32_t slot = dst->index[0];
+            if (t.uav_dim[slot] == 8) {
+                t.Line("u" + std::to_string(slot) + ".write(" + t.SrcF(*val) + ", uint2(" + t.SrcU(*coord) + ".xy), " + t.SrcU(*coord) + ".z);");
+            } else if (t.uav_dim[slot] == 5) {
+                t.Line("u" + std::to_string(slot) + ".write(" + t.SrcF(*val) + ", uint3(" + t.SrcU(*coord) + ".xyz));");
+            } else {
+                t.Line("u" + std::to_string(slot) + ".write(" + t.SrcF(*val) + ", uint2(" + t.SrcU(*coord) + ".xy));");
+            }
+            break;
+        }
+        case OP_IMM_ATOMIC_ALLOC: case OP_IMM_ATOMIC_CONSUME: {
+            auto dst = operand(); auto uav = operand();
+            t.Write(*dst, false, "as_type<float4>(uint4(0u))");
+            break;
+        }
+        case OP_IMM_ATOMIC_IADD: case OP_IMM_ATOMIC_AND: case OP_IMM_ATOMIC_OR: case OP_IMM_ATOMIC_XOR:
+        case OP_IMM_ATOMIC_EXCH: case OP_IMM_ATOMIC_CMP_EXCH: case OP_IMM_ATOMIC_IMAX: case OP_IMM_ATOMIC_IMIN:
+        case OP_IMM_ATOMIC_UMAX: case OP_IMM_ATOMIC_UMIN: {
+            auto dst = operand(); auto uav = operand(); auto addr = operand(); auto val = operand();
+            t.Write(*dst, false, "as_type<float4>(uint4(0u))");
+            break;
+        }
+        case OP_ATOMIC_IADD: {
+            auto uav = operand(); auto addr = operand(); auto val = operand();
+            const uint32_t slot = uav->index[0];
+            t.Line("atomic_fetch_add_explicit((device atomic_uint*)&u" + std::to_string(slot) + "[" + t.SrcU(*addr) + ".x / 4u], " + t.SrcU(*val) + ".x, memory_order_relaxed);");
+            break;
+        }
+        case OP_ATOMIC_AND: case OP_ATOMIC_OR: case OP_ATOMIC_XOR: case OP_ATOMIC_CMP_STORE:
+        case OP_ATOMIC_IMAX: case OP_ATOMIC_IMIN: case OP_ATOMIC_UMAX: case OP_ATOMIC_UMIN: {
+            auto uav = operand(); auto addr = operand(); auto val = operand();
+            break;
+        }
+        case OP_LD_UAV_TYPED: {
+            auto dst = operand(); auto coord = operand(); auto uav = operand();
+            const uint32_t slot = uav->index[0];
+            if (t.uav_dim[slot] == 8) {
+                t.Write(*dst, false, "u" + std::to_string(slot) + ".read(uint2(" + t.SrcU(*coord) + ".xy), " + t.SrcU(*coord) + ".z)");
+            } else if (t.uav_dim[slot] == 5) {
+                t.Write(*dst, false, "u" + std::to_string(slot) + ".read(uint3(" + t.SrcU(*coord) + ".xyz))");
+            } else {
+                t.Write(*dst, false, "u" + std::to_string(slot) + ".read(uint2(" + t.SrcU(*coord) + ".xy))");
+            }
+            break;
+        }
+        case OP_LD_RAW: {
+            auto dst = operand(); auto off = operand(); auto src = operand();
+            t.Write(*dst, false, "as_type<float4>(uint4(0u))");
+            break;
+        }
+        case OP_F32TO16: {
+            auto d = operand(); auto a = operand();
+            t.uses_f32to16 = true;
+            t.WriteBits(*d, "as_type<int4>(ut_f32to16(" + t.SrcF(*a) + "))");
+            break;
+        }
+        case OP_F16TOF32: {
+            auto d = operand(); auto a = operand();
+            t.uses_f16tof32 = true;
+            t.Write(*d, false, "ut_f16tof32(" + t.SrcI(*a, true) + ")");
+            break;
+        }
+        case OP_SWITCH: {
+            auto a = operand();
+            t.Line("switch (" + t.SrcI(*a, true) + ".x) {");
+            break;
+        }
+        case OP_CASE: {
+            auto a = operand();
+            if (a->type == T_IMM32) {
+                t.Line("case " + std::to_string(a->imm[0]) + "u:");
+            } else {
+                t.Line("case " + t.SrcI(*a, true) + ".x:");
+            }
+            break;
+        }
+        case OP_DEFAULT: {
+            t.Line("default:");
+            break;
+        }
+        case OP_ENDSWITCH: {
+            t.Line("}");
+            break;
+        }
         case OP_RET: ended = (t.indent == 1); if (!ended) t.Line("@RET@"); break;
         case OP_RETC: {
             auto a = operand();
@@ -812,6 +1078,35 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
            "    uint4 mag = b & uint4(0x7fffffffu);\n"
            "    float4 r = select(v, as_type<float4>((b & uint4(0x80000000u)) | uint4(0x477fe000u)), mag == uint4(0x7f800000u));\n"
            "    return select(r, float4(0.0f), mag > uint4(0x7f800000u));\n}\n\n";
+    if (t.uses_structured) {
+        src << "static inline float4 ut_ld_structured(device const uint* buf, uint struct_idx, uint stride, uint byte_offset) {\n"
+               "    if (!buf) return float4(0.0f);\n"
+               "    uint idx = (struct_idx * stride + byte_offset) / 4;\n"
+               "    return float4(as_type<float>(buf[idx]),\n"
+               "                  as_type<float>(buf[idx + 1]),\n"
+               "                  as_type<float>(buf[idx + 2]),\n"
+               "                  as_type<float>(buf[idx + 3]));\n"
+               "}\n"
+               "static inline float4 ut_ld_structured(device uint* buf, uint struct_idx, uint stride, uint byte_offset) {\n"
+               "    return ut_ld_structured((device const uint*)buf, struct_idx, stride, byte_offset);\n"
+               "}\n\n";
+    }
+    if (t.uses_f32to16) {
+        src << "static inline uint4 ut_f32to16(float4 v) {\n"
+               "    return uint4(as_type<ushort>(half(v.x)),\n"
+               "                 as_type<ushort>(half(v.y)),\n"
+               "                 as_type<ushort>(half(v.z)),\n"
+               "                 as_type<ushort>(half(v.w)));\n"
+               "}\n\n";
+    }
+    if (t.uses_f16tof32) {
+        src << "static inline float4 ut_f16tof32(uint4 u) {\n"
+               "    return float4(float(as_type<half>(ushort(u.x & 0xffffu))),\n"
+               "                 float(as_type<half>(ushort(u.y & 0xffffu))),\n"
+               "                 float(as_type<half>(ushort(u.z & 0xffffu))),\n"
+               "                 float(as_type<half>(ushort(u.w & 0xffffu))));\n"
+               "}\n\n";
+    }
     if (!t.icb.empty()) {
         src << "constant float4 icb[" << t.icb.size() / 4 << "] = {\n";
         for (size_t i = 0; i + 3 < t.icb.size(); i += 4) {
@@ -820,9 +1115,12 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
         src << "};\n\n";
     }
 
+    const bool cs = t.stage == ShaderStage::Compute;
     // Inputs.
     std::string stage_in_struct, output_struct, params;
-    if (vs) {
+    if (cs) {
+        // Compute shaders do not use stage_in
+    } else if (vs) {
         src << "struct VSIn {\n";
         for (uint32_t reg : t.input_regs) {
             if (t.input_sgv.count(reg) && (t.input_sgv[reg] == 6 || t.input_sgv[reg] == 8)) continue;
@@ -857,15 +1155,34 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
     }
 
     // Entry.
-    src << (vs ? "vertex VSOut main0(VSIn in [[stage_in]]" : "fragment PSOut main0(PSIn in [[stage_in]]");
-    if (!vs && t.uses_front_face) src << ", bool front_facing [[front_facing]]";
-    if (vs && t.uses_vertex_id) src << ", uint vertex_id [[vertex_id]]";
-    if (vs && t.uses_instance_id) src << ", uint instance_id [[instance_id]]";
-    for (uint32_t b = 0; b < 16; ++b)
-        if (t.refl.constant_buffers & (1u << b)) src << ", device const float4* cb" << b << " [[buffer(" << b << ")]]";
-    for (auto& r : resource_decls) src << ", " << r;
-    for (auto& s : sampler_decls) src << ", " << s;
-    src << ") {\n";
+    if (cs) {
+        src << "kernel void main0(\n"
+            << "    uint3 ut_tid [[thread_position_in_grid]],\n"
+            << "    uint3 ut_gid [[threadgroup_position_in_grid]],\n"
+            << "    uint3 ut_gtid [[thread_position_in_threadgroup]],\n"
+            << "    uint ut_gidx [[thread_index_in_threadgroup]]";
+        for (uint32_t b = 0; b < 16; ++b)
+            if (t.refl.constant_buffers & (1u << b)) src << ",\n    device const float4* cb" << b << " [[buffer(" << b << ")]]";
+        for (auto& r : resource_decls) src << ",\n    " << r;
+        for (auto& u : uav_decls) src << ",\n    " << u;
+        for (auto& s : sampler_decls) src << ",\n    " << s;
+        src << ")\n{\n";
+        for (auto& [slot, count] : t.tgsm_count) {
+            uint32_t stride = t.tgsm_stride[slot];
+            uint32_t words = (count * stride + 3) / 4;
+            src << "    threadgroup uint tgsm_g" << slot << "[" << words << "];\n";
+        }
+    } else {
+        src << (vs ? "vertex VSOut main0(VSIn in [[stage_in]]" : "fragment PSOut main0(PSIn in [[stage_in]]");
+        if (!vs && t.uses_front_face) src << ", bool front_facing [[front_facing]]";
+        if (vs && t.uses_vertex_id) src << ", uint vertex_id [[vertex_id]]";
+        if (vs && t.uses_instance_id) src << ", uint instance_id [[instance_id]]";
+        for (uint32_t b = 0; b < 16; ++b)
+            if (t.refl.constant_buffers & (1u << b)) src << ", device const float4* cb" << b << " [[buffer(" << b << ")]]";
+        for (auto& r : resource_decls) src << ", " << r;
+        for (auto& s : sampler_decls) src << ", " << s;
+        src << ") {\n";
+    }
 
     for (uint32_t i = 0; i < t.temps; ++i) src << "    float4 r" << i << " = float4(0.0f);\n";
     for (auto& [reg, spec] : t.indexable) src << "    float4 x" << reg << "[" << spec.first << "];\n    for (int i_ = 0; i_ < " << spec.first << "; ++i_) x" << reg << "[i_] = float4(0.0f);\n";
@@ -891,7 +1208,9 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
         }
     }
     std::ostringstream epilogue;
-    if (vs) {
+    if (cs) {
+        epilogue << "    return;\n";
+    } else if (vs) {
         epilogue << "    VSOut out;\n    out.position = float4(0.0f, 0.0f, 0.0f, 1.0f);\n";
         for (const auto& e : out_sig) {
             if (e.system_value == 1) { epilogue << "    out.position = o" << e.reg << ";\n"; continue; }

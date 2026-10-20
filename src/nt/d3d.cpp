@@ -147,7 +147,7 @@ struct Viewport { float x, y, w, h, min_depth, max_depth; };
 struct RecordedDraw { gpu::DrawState state; gpu::DrawArgs args; };
 struct CtxState {
     uint64_t cb[6][16] {}, srv[6][128] {}, sampler[6][16] {}, shader[6] {};
-    uint64_t rtv[8] {}, dsv {};
+    uint64_t rtv[8] {}, dsv {}, uav[64] {};
     uint64_t blend {}, depth_stencil {}, raster {};
     float blend_factor[4] {1, 1, 1, 1};
     uint32_t sample_mask {0xFFFFFFFF}, stencil_ref {0};
@@ -215,7 +215,7 @@ uint32_t Fallback(Call& c) {
                     if (m.name.find("View") != std::string::npos) o->u64["resource"] = c.Arg(0);
                 }
                 if (const char* dump_dir = std::getenv("UTSURO_DUMPSHADERS");
-                    dump_dir != nullptr && m.name.size() > 12 && m.name.compare(0, 6, "Create") == 0 && m.name.find("Shader") != std::string::npos && c.Arg(0) && c.Arg(1)) {
+                    dump_dir != nullptr && m.name.size() > 12 && m.name.compare(0, 6, "Create") == 0 && m.name.find("Shader") != std::string::npos && m.name.find("View") == std::string::npos && c.Arg(0) && c.Arg(1)) {
                     static int n = 0;
                     char path[512];
                     std::snprintf(path, sizeof path, "%s/%s_%03d.bin", dump_dir, m.name.c_str(), n++);
@@ -688,6 +688,18 @@ static void Setup(Runtime& rt, uint32_t os_timestamp, bool old_abi) {
 uint64_t PresentArray(Kernel&, NtThread&, SyscallArgs& a) {
     const uint32_t sync = static_cast<uint32_t>(a[0]), count = static_cast<uint32_t>(a[3]);
     const auto* chains = a.Ptr<uint64_t>(4);
+    static uint64_t pa_calls = 0;
+    if (++pa_calls <= 10 || (pa_calls % 120) == 0) {
+        UT_INFO("PresentArray #%llu: sync=%u a1=%#llx a2=%#llx count=%u chains_ptr=%p a5=%#llx", (unsigned long long)pa_calls, sync, (unsigned long long)a[1], (unsigned long long)a[2], count, chains, (unsigned long long)a[5]);
+        if (a[5] != 0) {
+            const auto* p5 = a.Ptr<uint32_t>(5);
+            UT_INFO("  PresentArray a5: %08x %08x %08x %08x %08x %08x %08x %08x", p5[0], p5[1], p5[2], p5[3], p5[4], p5[5], p5[6], p5[7]);
+        }
+        for (uint32_t i = 0; chains != nullptr && i < count; ++i) {
+            Obj* o = Runtime::Get().FromPointer(chains[i]);
+            UT_INFO("  chains[%u]=%#llx obj=%p has_user=%d tex=%p", i, (unsigned long long)chains[i], o, o ? (o->user != nullptr) : 0, (o && o->user) ? static_cast<Res*>(o->user.get())->texture.get() : nullptr);
+        }
+    }
     for (uint32_t i = 0; chains != nullptr && i < count; ++i) {
         Obj* o = Runtime::Get().FromPointer(chains[i]);
         if (o == nullptr || !o->user) continue;

@@ -545,6 +545,23 @@ bool Kernel::BuildProcess(std::string& error) {
     // The process heap table and its lock are ntdll's to create.
     PutU64(peb_, peb::kProcessParameters, BuildProcessParameters());
 
+    if (options_.exe_name.find("forza") != std::string::npos) {
+        // Forza Horizon 2: Render thread stalls at 0x140f74c2e waiting for update thread queue,
+        // while update thread waits for car background assets. Bypass the wait so the render thread
+        // enters the frame tick/render loop.
+        const uint64_t patch_va = exe_base_ + 0xf74c17;
+        uint8_t* p = reinterpret_cast<uint8_t*>(patch_va);
+        if (p[0] == 0x74 && p[1] == 0x1c) {
+            uint64_t page = patch_va & ~0xFFFull, page_sz = 0x1000;
+            uint32_t old_prot = 0;
+            vm_->Protect(&page, &page_sz, PAGE_EXECUTE_READWRITE, &old_prot);
+            p[0] = 0xeb;
+            p[1] = 0x40;
+            space_->NotifyContentsReplaced(patch_va, patch_va + 2);
+            UT_INFO("Applied FH2 render sync bypass patch at %#llx", (unsigned long long)patch_va);
+        }
+    }
+
     // The first thread.
     const uint64_t stack = std::max<uint64_t>(exe_image_->stack_reserve, 0x800000);
     auto thread = NewThread(stack, exe_image_->stack_commit, e);

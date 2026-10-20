@@ -235,7 +235,8 @@ NTSTATUS NtDelayExecution(Kernel& k, NtThread& t, SyscallArgs& a) {
 
 NTSTATUS NtYieldExecution(Kernel&, NtThread&, SyscallArgs&) {
     sched_yield();
-    return STATUS_NO_YIELD_PERFORMED;
+    std::this_thread::sleep_for(std::chrono::microseconds(50));
+    return STATUS_SUCCESS;
 }
 
 // Events ------------------------------------------------------------------------------

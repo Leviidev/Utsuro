@@ -48,7 +48,13 @@ void RegisterInput(Runtime& rt) {
     // A guessed interface adopts whichever IID a title asks for next (see Runtime QueryInterface); titles built later call methods well past
     // the two known ones, so the vtable is padded with logged no-ops instead of garbage.
     for (int i = 0; i < 40; ++i) navigation.methods.push_back(fn(("slot" + std::to_string(6 + navigation.methods.size())).c_str(), [](Call& c) -> uint32_t {
-        UT_INFO("winrt: %s::%s called (%#llx, %#llx, %#llx)", c.iface.name.c_str(), c.iface.methods[c.slot].name.c_str(), (unsigned long long)c.Arg(0), (unsigned long long)c.Arg(1), (unsigned long long)c.Arg(2));
+        static uint64_t seen = 0;
+        if (!(seen & (1ull << (c.slot & 63)))) {
+            seen |= (1ull << (c.slot & 63));
+            UT_INFO("winrt: %s::%s called (%#llx, %#llx, %#llx) from %s", c.iface.name.c_str(), c.iface.methods[c.slot].name.c_str(),
+                    (unsigned long long)c.Arg(0), (unsigned long long)c.Arg(1), (unsigned long long)c.Arg(2),
+                    c.args.rsp != 0 ? c.kernel.Describe(*reinterpret_cast<uint64_t*>(c.args.rsp)).c_str() : "?");
+        }
         return 0;
     }));
 

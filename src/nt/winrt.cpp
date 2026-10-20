@@ -334,7 +334,7 @@ uint32_t Runtime::GetActivationFactory(const std::string& name, const Guid& iid,
     auto it = classes_.find(name);
     if (it == classes_.end()) {
         // The Xbox system classes the host does not model yet answer as ghosts, so the title carries on.
-        if (name.rfind("Windows.Xbox.", 0) != 0 && name.rfind("Windows.Kinect.", 0) != 0) return kRegdbClassNotReg;
+        if (name.rfind("Windows.Xbox.", 0) != 0 && name.rfind("Windows.Kinect.", 0) != 0 && name.rfind("Microsoft.Xbox.", 0) != 0) return kRegdbClassNotReg;
         UT_INFO("winrt: %s is a ghost class", name.c_str());
         Obj* factory = NewGhost(name);
         std::string captured = name;
@@ -350,10 +350,17 @@ uint32_t Runtime::GetActivationFactory(const std::string& name, const Guid& iid,
     }
     uint64_t p = QueryInterface(*def.factory, iid);
     if (p == 0 && def.statics != nullptr && def.more_statics.empty()) {
-        UT_INFO("winrt: %s adopts %s for %s", def.statics->name.c_str(), iid.ToString().c_str(), name.c_str());
-        def.statics->iid = iid;
-        def.statics->guessed = false;
-        p = QueryInterface(*def.factory, iid);
+        static const Guid kIEquatable = Guid::Parse("de0cbaec-e077-4e92-84be-c6d48dca3006");
+        static const Guid kIComparable = Guid::Parse("4bd682dd-7554-40e9-9b9a-6582627ede4e");
+        if (iid != kIEquatable && iid != kIComparable) {
+            UT_INFO("winrt: %s adopts %s for %s", def.statics->name.c_str(), iid.ToString().c_str(), name.c_str());
+            def.statics->iid = iid;
+            def.statics->guessed = false;
+            p = QueryInterface(*def.factory, iid);
+        }
+    }
+    if (p == 0 && def.factory->ghost) {
+        p = AddGhostInterface(*def.factory, iid);
     }
     if (p == 0) {
         UT_WARN("winrt: factory of %s does not implement %s", name.c_str(), iid.ToString().c_str());
@@ -410,13 +417,17 @@ bool Runtime::Dispatch(NtThread& thread, uint32_t number, SyscallArgs& args, uin
         const Guid iid = *reinterpret_cast<const Guid*>(args[1]);
         uint64_t p = QueryInterface(*obj, iid);
         if (p == 0) {
-            for (Iface* f : obj->ifaces) {
-                if (f->guessed && f != activation_factory_) {
-                    UT_INFO("winrt: %s adopts %s for %s", f->name.c_str(), iid.ToString().c_str(), obj->class_name.c_str());
-                    f->iid = iid;
-                    f->guessed = false;
-                    p = QueryInterface(*obj, iid);
-                    break;
+            static const Guid kIEquatable = Guid::Parse("de0cbaec-e077-4e92-84be-c6d48dca3006");
+            static const Guid kIComparable = Guid::Parse("4bd682dd-7554-40e9-9b9a-6582627ede4e");
+            if (iid != kIEquatable && iid != kIComparable) {
+                for (Iface* f : obj->ifaces) {
+                    if (f->guessed && f != activation_factory_) {
+                        UT_INFO("winrt: %s adopts %s for %s", f->name.c_str(), iid.ToString().c_str(), obj->class_name.c_str());
+                        f->iid = iid;
+                        f->guessed = false;
+                        p = QueryInterface(*obj, iid);
+                        break;
+                    }
                 }
             }
         }

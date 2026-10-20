@@ -28,6 +28,7 @@ struct Res {
     Res* base {nullptr};                         ///< a view's resource
     std::vector<RecordedDraw> recorded;          ///< a command list: what to replay
     std::vector<gpu::InputElement> elements;     ///< an input layout's elements
+    bool gpu_written {false};
 };
 
 Res& R(Obj& o) {
@@ -139,6 +140,7 @@ void OnCreate(Call& c, const winrt::Method& m, Obj& o) {
         r.usage = usage;
         r.bind = bind;
         r.texture = gpu::CreateTexture(d);
+        UT_INFO("d3d: Created %s %ux%u fmt %u placed=%d mtl=%p host_ptr=%#llx", n.c_str(), d.width, d.height, d.format, placed, r.texture ? r.texture.get() : nullptr, (unsigned long long)(placed ? c.Arg(3) : 0));
         if (std::getenv("UTSURO_TEXLOG") != nullptr) {
             static std::atomic<int> shown {0};
             if (shown++ < 60) UT_INFO("d3d: %s %ux%u fmt %u mips %u array %u bind %#x usage %u misc %#x -> %s", n.c_str(), d.width, d.height, d.format, d.mips, d.array_size, bind, usage, misc, r.texture ? "ok" : "NO TEXTURE");
@@ -189,17 +191,26 @@ void OnCreate(Call& c, const winrt::Method& m, Obj& o) {
         }
     } else if (n == "CreateShaderResourceView" || n == "CreateRenderTargetView" || n == "CreateDepthStencilView" || n == "CreateUnorderedAccessView") {
         Res* base = ResAt(c.Arg(0));
-        if (base == nullptr || !base->texture) return;   // buffer views are not drawn from yet
+        if (base == nullptr || (!base->texture && !base->buffer)) return;
         auto v = std::make_shared<gpu::TextureView>();
+        UT_INFO("d3d: %s obj=%p base_res=%p tex=%p mtl=%p", n.c_str(), &o, base, base ? base->texture.get() : nullptr, (base && base->texture) ? base->texture.get() : nullptr);
         v->texture = base->texture;
+        v->buffer = base->buffer;
         r.base = base;
         if (n == "CreateShaderResourceView") SetIdDescriptor(o, 0x30, 0x20);
         const bool have = c.Arg(1) != 0;
         gpu::ViewDesc& vd = v->desc;
         if (have) {
             static int shown = 0;
-            if (shown++ < 12) UT_INFO("d3d: %s desc %u %u %u %u %u %u (texture %ux%u fmt %u)", n.c_str(), U32(desc, 0), U32(desc, 1), U32(desc, 2), U32(desc, 3), U32(desc, 4), U32(desc, 5),
-                                      gpu::TextureInfo(*base->texture).width, gpu::TextureInfo(*base->texture).height, gpu::TextureInfo(*base->texture).format);
+            if (shown++ < 12) {
+                if (base->texture) {
+                    UT_INFO("d3d: %s desc %u %u %u %u %u %u (texture %ux%u fmt %u)", n.c_str(), U32(desc, 0), U32(desc, 1), U32(desc, 2), U32(desc, 3), U32(desc, 4), U32(desc, 5),
+                            gpu::TextureInfo(*base->texture).width, gpu::TextureInfo(*base->texture).height, gpu::TextureInfo(*base->texture).format);
+                } else if (base->buffer) {
+                    UT_INFO("d3d: %s desc %u %u %u %u %u %u (buffer %u bytes)", n.c_str(), U32(desc, 0), U32(desc, 1), U32(desc, 2), U32(desc, 3), U32(desc, 4), U32(desc, 5),
+                            gpu::BufferSize(*base->buffer));
+                }
+            }
         }
         if (have) {
             vd.format = U32(desc, 0);
@@ -226,6 +237,12 @@ void OnCreate(Call& c, const winrt::Method& m, Obj& o) {
                 case 2: case 4: vd.first_mip = U32(desc, 3); vd.mip_count = 1; break;
                 case 7: vd.first_slice = U32(desc, 3); vd.slice_count = U32(desc, 4); break;
                 }
+            } else if (n == "CreateUnorderedAccessView") {
+                switch (vd.dimension) {
+                case 2: case 4: vd.first_mip = U32(desc, 2); vd.mip_count = 1; break;
+                case 3: case 5: vd.first_mip = U32(desc, 2); vd.mip_count = 1; vd.first_slice = U32(desc, 3); vd.slice_count = U32(desc, 4); break;
+                case 8: vd.first_mip = U32(desc, 2); vd.mip_count = 1; vd.first_slice = U32(desc, 3); vd.slice_count = 1; break;
+                }
             }
             // A format of 0 keeps the texture's own.
         }
@@ -234,7 +251,13 @@ void OnCreate(Call& c, const winrt::Method& m, Obj& o) {
         if (c.Arg(0) == 0) return;
         const auto* code = c.Ptr<uint8_t>(0);
         const size_t length = static_cast<size_t>(c.Arg(1));
-        const gpu::ShaderStage stage = n == "CreateVertexShader" ? gpu::ShaderStage::Vertex : n == "CreatePixelShader" ? gpu::ShaderStage::Pixel : gpu::ShaderStage::Unknown;
+        const gpu::ShaderStage stage = n == "CreateVertexShader" ? gpu::ShaderStage::Vertex : n == "CreatePixelShader" ? gpu::ShaderStage::Pixel : n == "CreateComputeShader" ? gpu::ShaderStage::Compute : gpu::ShaderStage::Unknown;
+        if (n == "CreateComputeShader") {
+            static int cs_count = 0;
+            char path[256];
+            std::snprintf(path, sizeof path, "/tmp/cs_%d.bin", cs_count++);
+            if (FILE* f = std::fopen(path, "wb")) { std::fwrite(code, 1, length, f); std::fclose(f); }
+        }
         r.shader = gpu::CreateShader(code, length, stage);
     } else if (n == "CreateInputLayout") {
         // (elements, count, bytecode, length)
@@ -360,42 +383,27 @@ TileModel BuildTileModel(const gpu::TextureDesc& info, uint32_t tile_mode, uint3
     if (xg::Call(*g_kernel, create, {desc, out}) != 0 || *reinterpret_cast<uint64_t*>(out) == 0) return m;
     const uint64_t comp = *reinterpret_cast<uint64_t*>(out);
     const uint64_t* vtable = *reinterpret_cast<uint64_t**>(comp);
-    const uint64_t offset_fn = vtable[6];
-    auto at = [&](uint32_t mip, uint32_t x, uint32_t y, uint32_t slice) { return xg::Call(*g_kernel, offset_fn, {comp, 0, mip, x, y, slice, 0}); };
+    const uint64_t subres_fn = vtable[3];
     m.levels_per_slice = info.mips;
-    // Is it a plain row-by-row layout (the console's linear modes, tile mode 0, 1 and, it turns out, 8)?
-    bool linear_layout = tile_mode == 0 || tile_mode == 1;
-    if (!linear_layout && info.width * info.height > 1) {
-        const uint32_t w = std::max(1u, (info.width + block - 1) / block), h = std::max(1u, (info.height + block - 1) / block);
-        const uint64_t p00 = at(0, 0, 0, 0), p10 = w > 1 ? at(0, 1, 0, 0) : p00 + m.bytes, p01 = h > 1 ? at(0, 0, 1, 0) : p00;
-        const uint64_t stride = p01 - p00;
-        linear_layout = p00 != ~0ull && p10 == p00 + m.bytes && (h == 1 || stride >= static_cast<uint64_t>(w) * m.bytes) &&
-                        at(0, w - 1, h - 1, 0) == p00 + (h - 1) * stride + static_cast<uint64_t>(w - 1) * m.bytes;
-    }
+    const bool linear_layout = tile_mode == 0 || tile_mode == 1;
     bool ok = true;
     for (uint32_t slice = 0; slice < info.array_size && ok; ++slice) {
         for (uint32_t mip = 0; mip < info.mips && ok; ++mip) {
             TileLevel lv;
             lv.width = std::max(1u, ((info.width >> mip) + block - 1) / block);
             lv.height = std::max(1u, ((info.height >> mip) + block - 1) / block);
-            lv.base = at(mip, 0, 0, slice);
+            lv.base = xg::Call(*g_kernel, subres_fn, {comp, mip, slice});
             if (lv.base == ~0ull) { ok = false; break; }
-            if (linear_layout) {   // linear: rows one pitch apart
+            if (linear_layout) {
                 m.linear = true;
                 lv.tile_bytes = 0;
-                lv.row_stride = lv.height > 1 ? at(mip, 0, 1, slice) - lv.base : static_cast<uint64_t>(lv.width) * m.bytes;
+                lv.row_stride = pitch ? pitch : static_cast<uint64_t>(lv.width) * m.bytes;
                 m.levels.push_back(lv);
                 continue;
             }
-            lv.tile_bytes = lv.width > 8 ? at(mip, 8, 0, slice) - lv.base : 64ull * m.bytes;
-            lv.row_stride = lv.height > 8 ? at(mip, 0, 8, slice) - lv.base : 0;
-            // The model must reproduce what the library says at a few more texels.
-            const uint32_t probes[][2] = {{1, 0}, {0, 1}, {2, 0}, {0, 2}, {4, 0}, {0, 4}, {7, 7}, {lv.width - 1, lv.height - 1}, {lv.width / 2, lv.height / 2}};
-            for (const auto& pt : probes) {
-                if (pt[0] >= lv.width || pt[1] >= lv.height) continue;
-                const uint64_t expect = lv.base + (pt[1] >> 3) * lv.row_stride + (pt[0] >> 3) * lv.tile_bytes + static_cast<uint64_t>(Morton8(pt[0] & 7, pt[1] & 7)) * m.bytes;
-                if (at(mip, pt[0], pt[1], slice) != expect) { ok = false; break; }
-            }
+            const uint32_t tiles_x = (lv.width + 7) / 8;
+            lv.tile_bytes = 64ull * m.bytes;
+            lv.row_stride = pitch ? pitch : static_cast<uint64_t>(tiles_x) * lv.tile_bytes;
             m.levels.push_back(lv);
         }
     }
@@ -419,7 +427,7 @@ uint64_t HashWords(const uint8_t* p, size_t bytes, uint64_t h) {
 /// Whether a placement texture's memory differs from what was last uploaded (checked at most once per frame; the CPU may rewrite
 /// dynamic textures, such as glyph caches, without any call the host sees).
 bool PlacementChanged(Res& r) {
-    if (r.placement == 0 || r.placement_bytes == 0 || r.placement_bytes > (4u << 20) || (r.bind & 0x60) != 0) return false;
+    if (r.placement == 0 || r.placement_bytes == 0 || r.placement_bytes > (4u << 20) || (r.bind & 0x40) != 0 || (r.gpu_written && (r.bind & 0x20) != 0)) return false;
     const uint64_t frame = g_frame.load();
     if (r.checked_frame == frame) return false;
     r.checked_frame = frame;
@@ -469,7 +477,7 @@ void UploadPlacement(Res& r) {
         const int64_t now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
         if (now - last_report.load() >= 3) { last_report = now; UT_INFO("d3d: placement uploads so far: %llu textures, about %llu MB", (unsigned long long)uploads.load(), (unsigned long long)(bytes.load() >> 20)); }
     }
-    if (!r.texture || r.placement == 0 || (r.bind & 0x60) != 0) return;   // render targets and depth buffers are written by the GPU
+    if (!r.texture || r.placement == 0 || (r.bind & 0x40) != 0 || (r.gpu_written && (r.bind & 0x20) != 0)) return;
     const auto& info = gpu::TextureInfo(*r.texture);
     uint32_t bytes, block;
     ElementOf(info.format, &bytes, &block);
@@ -758,7 +766,12 @@ gpu::DrawState Snapshot(Obj& ctx, CtxState& s, gpu::DrawArgs& args) {
         }
         for (int i = 0; i < 16; ++i) {
             if (rf.textures & (1u << i)) {
-                if (Res* r = ResAt(s.srv[src][i])) d.srv[stage][i] = r->view;
+                if (Res* r = ResAt(s.srv[src][i])) {
+                    Res* target = r->base ? r->base : r;
+                    if (target->placement != 0 && ((target->placement_dirty && g_frame.load() >= target->next_try_frame) || PlacementChanged(*target)))
+                        UploadPlacement(*target);
+                    d.srv[stage][i] = r->view;
+                }
             }
             if (rf.samplers & (1u << i)) {
                 if (Res* r = ResAt(s.sampler[src][i])) d.sampler[stage][i] = r->state;
@@ -841,11 +854,91 @@ void DoDraw(Obj& ctx, const gpu::DrawArgs& args_in) {
             UT_INFO("d3d: indexed draw without an index buffer: ib=%#llx res=%p buffer=%p obj=%s fmt=%u address=%#llx", (unsigned long long)s.ib, (void*)r, r ? (void*)r->buffer.get() : nullptr, o ? o->class_name.c_str() : "?", s.ib_format, (unsigned long long)s.ib_address);
         }
     }
+    for (int i = 0; i < 8; ++i) {
+        if (Res* r = ResAt(state.rtv[i])) {
+            Res* target = r->base ? r->base : r;
+            target->gpu_written = true;
+        }
+    }
     if (ctx.u64["deferred"] != 0) {
         state.recorded.push_back({d, args});
         return;
     }
     gpu::Draw(d, args);
+}
+
+void DoDispatch(Obj& ctx, uint32_t x, uint32_t y, uint32_t z) {
+    if (!gpu::Available() || x == 0 || y == 0 || z == 0) return;
+    CtxState& s = StateOf(ctx);
+    ParseStream(ctx, s);
+    Res* r = ResAt(s.shader[5]);
+    static int disp_calls = 0;
+    if (disp_calls++ < 50) {
+        UT_INFO("d3d: DoDispatch call %d: x=%u y=%u z=%u cs_res=%p sh=%p", disp_calls, x, y, z, r, r ? r->shader.get() : nullptr);
+    }
+    if (!r || !r->shader) return;
+    const auto& rf = gpu::Reflection(*r->shader);
+    gpu::DispatchState d;
+    d.cs = r->shader;
+
+    auto get = [&](uint32_t reg) -> const CtxState::Reg* {
+        auto it = s.regs.find(reg);
+        return it != s.regs.end() ? &it->second : nullptr;
+    };
+    auto address = [](const CtxState::Reg& reg) -> uint64_t {
+        return (static_cast<uint64_t>(reg.dw[1] & 0xFFFF) << 32) | reg.dw[0];
+    };
+
+    // Constant buffers: check s.cb[5] first, or fall back to regs
+    for (int i = 0; i < 14; ++i) {
+        if (!(rf.constant_buffers & (1u << i))) continue;
+        if (Res* cb = ResAt(s.cb[5][i])) {
+            d.cb[i].buffer = cb->buffer;
+            d.cb[i].offset = s.cb_first[5][i] * 16;
+            d.cb[i].size = s.cb_count[5][i] * 16;
+        } else if (const auto* v = get(kRegCbB + 0x10 * i)) {
+            uint32_t size = std::min<uint32_t>(v->dw[2], 65536);
+            if (rf.cb_size[i] != 0) size = std::min<uint32_t>(size, rf.cb_size[i] * 16);
+            d.cb[i].buffer = CopyOfHost(address(*v), size);
+            d.cb[i].offset = 0;
+            d.cb[i].size = size;
+        }
+    }
+
+    // SRVs: check s.srv[5] first, or fall back to descriptor packets
+    for (int i = 0; i < 16; ++i) {
+        if (rf.textures & (1u << i)) {
+            if (Res* srv = ResAt(s.srv[5][i])) {
+                Res* target = srv->base ? srv->base : srv;
+                if (target->placement != 0 && ((target->placement_dirty && g_frame.load() >= target->next_try_frame) || PlacementChanged(*target)))
+                    UploadPlacement(*target);
+                d.srv[i] = srv->view;
+            } else if (const auto* t = get(kRegTexture + 0x20 * i)) {
+                if (Res* view = ResFromDescriptor(t->dw)) {
+                    if (view->base != nullptr && ((view->base->placement_dirty && g_frame.load() >= view->base->next_try_frame) || PlacementChanged(*view->base))) UploadPlacement(*view->base);
+                    d.srv[i] = view->view;
+                }
+            }
+        }
+        if (rf.samplers & (1u << i)) {
+            if (Res* samp = ResAt(s.sampler[5][i])) {
+                d.sampler[i] = samp->state;
+            } else if (const auto* t = get(kRegSampler + 0x10 * i)) {
+                if (Res* sampler = ResFromDescriptor(t->dw)) d.sampler[i] = sampler->state;
+            }
+        }
+    }
+
+    // UAVs: check s.uav
+    for (int i = 0; i < 64; ++i) {
+        if (rf.uavs & (1u << i)) {
+            if (Res* uav = ResAt(s.uav[i])) {
+                d.uav[i] = uav->view;
+            }
+        }
+    }
+
+    gpu::Dispatch(d, x, y, z);
 }
 
 // ---- resource contents -----------------------------------------------------------------------------
@@ -897,6 +990,16 @@ bool InflateGuest(const uint8_t* src, uint32_t n, bool zlib_header, std::vector<
 /// (m_pCeCurrent / m_pCeBiasedLimit / m_pCeLimit and m_pBatchCurrent / m_pBatchLimit of the context's tiny device).
 
 void RegisterGpuOverrides() {
+    OverrideAll("GetType", [](Call& c) -> uint32_t {
+        if (auto* out = c.Ptr<uint32_t>(0)) {
+            if (c.obj.class_name.find("Texture3D") != std::string::npos) *out = 4;
+            else if (c.obj.class_name.find("Texture2D") != std::string::npos) *out = 3;
+            else if (c.obj.class_name.find("Texture1D") != std::string::npos) *out = 2;
+            else if (c.obj.class_name.find("Buffer") != std::string::npos) *out = 1;
+            else *out = 3;
+        }
+        return 0;
+    });
     // ---- queries: GPU timing and occlusion answer at once, with plausible values ----
     OverrideAll("GetData", [](Call& c) -> uint32_t {
         // GetData(pAsync, pData, DataSize, Flags)
@@ -1204,6 +1307,32 @@ void RegisterGpuOverrides() {
     });
 
     // ---- draws ----
+    OverrideAll("CSSetShader", [](Call& c) -> uint32_t {
+        auto& s = StateOf(c.obj);
+        s.shader[5] = c.Arg(0);
+        Res* r = ResAt(c.Arg(0));
+        static std::atomic<int> cs_shown {0};
+        if (cs_shown++ < 20) UT_INFO("d3d: CSSetShader cs=%#llx res=%p shader=%p", (unsigned long long)c.Arg(0), r, r ? r->shader.get() : nullptr);
+        return 0;
+    });
+    OverrideAll("CSSetUnorderedAccessViews", [](Call& c) -> uint32_t {
+        auto& s = StateOf(c.obj);
+        uint32_t start = static_cast<uint32_t>(c.Arg(0));
+        uint32_t count = static_cast<uint32_t>(c.Arg(1));
+        const auto* uavs = c.Ptr<uint64_t>(2);
+        for (uint32_t i = 0; uavs && i < count && (start + i) < 64; ++i) {
+            s.uav[start + i] = uavs[i];
+        }
+        return 0;
+    });
+    OverrideAll("Dispatch", [](Call& c) -> uint32_t {
+        uint32_t x = static_cast<uint32_t>(c.Arg(0));
+        uint32_t y = static_cast<uint32_t>(c.Arg(1));
+        uint32_t z = static_cast<uint32_t>(c.Arg(2));
+        DoDispatch(c.obj, x, y, z);
+        return 0;
+    });
+
     OverrideAll("Draw", [](Call& c) -> uint32_t {
         gpu::DrawArgs a;
         a.count = static_cast<uint32_t>(c.Arg(0));

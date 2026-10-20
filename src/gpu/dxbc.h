@@ -29,6 +29,8 @@ struct ShaderReflection {
     uint32_t texture_dimension[128] {};   ///< D3D10_SB_RESOURCE_DIMENSION per declared slot.
     bool writes_depth {false};
     uint32_t outputs_written {0};    ///< SV_Target mask for pixel shaders.
+    uint32_t uavs {0};
+    uint32_t thread_group_size[3] {1, 1, 1};
 };
 
 struct TranslatedShader {

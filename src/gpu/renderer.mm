@@ -94,6 +94,7 @@ struct Globals {
     dispatch_semaphore_t frames_in_flight {nullptr};
 
     std::unordered_map<std::string, id<MTLRenderPipelineState>> pipelines;
+    std::unordered_map<std::string, id<MTLComputePipelineState>> compute_pipelines;
     std::unordered_map<std::string, id<MTLDepthStencilState>> depth_states;
     std::unordered_map<std::string, id<MTLSamplerState>> samplers;
     std::map<uint32_t, id<MTLTexture>> dummy_textures;
@@ -199,6 +200,80 @@ bool IsDepth(MTLPixelFormat f) {
     return f == MTLPixelFormatDepth32Float || f == MTLPixelFormatDepth16Unorm || f == MTLPixelFormatDepth32Float_Stencil8;
 }
 bool HasStencil(MTLPixelFormat f) { return f == MTLPixelFormatDepth32Float_Stencil8; }
+
+static size_t PixelFormatBytes(MTLPixelFormat f) {
+    switch (f) {
+    case MTLPixelFormatA8Unorm:
+    case MTLPixelFormatR8Unorm:
+    case MTLPixelFormatR8Snorm:
+    case MTLPixelFormatR8Uint:
+    case MTLPixelFormatR8Sint:
+        return 1;
+    case MTLPixelFormatR16Unorm:
+    case MTLPixelFormatR16Snorm:
+    case MTLPixelFormatR16Uint:
+    case MTLPixelFormatR16Sint:
+    case MTLPixelFormatR16Float:
+    case MTLPixelFormatRG8Unorm:
+    case MTLPixelFormatRG8Snorm:
+    case MTLPixelFormatRG8Uint:
+    case MTLPixelFormatRG8Sint:
+    case MTLPixelFormatDepth16Unorm:
+        return 2;
+    case MTLPixelFormatR32Uint:
+    case MTLPixelFormatR32Sint:
+    case MTLPixelFormatR32Float:
+    case MTLPixelFormatRG16Unorm:
+    case MTLPixelFormatRG16Snorm:
+    case MTLPixelFormatRG16Uint:
+    case MTLPixelFormatRG16Sint:
+    case MTLPixelFormatRG16Float:
+    case MTLPixelFormatRGBA8Unorm:
+    case MTLPixelFormatRGBA8Unorm_sRGB:
+    case MTLPixelFormatRGBA8Snorm:
+    case MTLPixelFormatRGBA8Uint:
+    case MTLPixelFormatRGBA8Sint:
+    case MTLPixelFormatBGRA8Unorm:
+    case MTLPixelFormatBGRA8Unorm_sRGB:
+    case MTLPixelFormatRGB10A2Unorm:
+    case MTLPixelFormatRGB10A2Uint:
+    case MTLPixelFormatRG11B10Float:
+    case MTLPixelFormatRGB9E5Float:
+    case MTLPixelFormatDepth32Float:
+    case MTLPixelFormatDepth24Unorm_Stencil8:
+    case MTLPixelFormatDepth32Float_Stencil8:
+        return 4;
+    case MTLPixelFormatRG32Uint:
+    case MTLPixelFormatRG32Sint:
+    case MTLPixelFormatRG32Float:
+    case MTLPixelFormatRGBA16Unorm:
+    case MTLPixelFormatRGBA16Snorm:
+    case MTLPixelFormatRGBA16Uint:
+    case MTLPixelFormatRGBA16Sint:
+    case MTLPixelFormatRGBA16Float:
+    case MTLPixelFormatBC1_RGBA:
+    case MTLPixelFormatBC1_RGBA_sRGB:
+    case MTLPixelFormatBC4_RUnorm:
+    case MTLPixelFormatBC4_RSnorm:
+        return 8;
+    case MTLPixelFormatRGBA32Uint:
+    case MTLPixelFormatRGBA32Sint:
+    case MTLPixelFormatRGBA32Float:
+    case MTLPixelFormatBC2_RGBA:
+    case MTLPixelFormatBC2_RGBA_sRGB:
+    case MTLPixelFormatBC3_RGBA:
+    case MTLPixelFormatBC3_RGBA_sRGB:
+    case MTLPixelFormatBC5_RGUnorm:
+    case MTLPixelFormatBC5_RGSnorm:
+    case MTLPixelFormatBC6H_RGBFloat:
+    case MTLPixelFormatBC6H_RGBUfloat:
+    case MTLPixelFormatBC7_RGBAUnorm:
+    case MTLPixelFormatBC7_RGBAUnorm_sRGB:
+        return 16;
+    default:
+        return 0;
+    }
+}
 
 MTLVertexFormat VertexFormat(uint32_t f) {
     switch (f) {
@@ -342,10 +417,13 @@ id<MTLCommandBuffer> Command() {
 }
 
 id<MTLTexture> ViewOf(Texture& t, const ViewDesc& v, bool as_render_target) {
+
     MTLPixelFormat fmt = v.format != 0 ? PixelFormat(v.format) : t.pixel_format;
     if (fmt == MTLPixelFormatInvalid) fmt = t.pixel_format;
-    // A view of a depth/stencil texture keeps the texture's own format.
-    if (IsDepth(t.pixel_format)) fmt = t.pixel_format;
+    // A view must match the parent's bytes-per-pixel and depth classification.
+    if (PixelFormatBytes(fmt) != PixelFormatBytes(t.mtl.pixelFormat) || IsDepth(t.mtl.pixelFormat) || IsDepth(fmt)) {
+        fmt = t.mtl.pixelFormat;
+    }
     MTLTextureType type = t.mtl.textureType;
     uint32_t dim = v.dimension;
     if (dim != 0) {
@@ -384,7 +462,7 @@ id<MTLTexture> ViewOf(Texture& t, const ViewDesc& v, bool as_render_target) {
         if (t.mtl.textureType == MTLTextureTypeCube) { first_slice = 0; slice_count = 6; }
         if (type == MTLTextureTypeCube) slice_count = 6;
     }
-    if (t.mtl.textureType == MTLTextureType3D) { first_slice = 0; slice_count = 1; type = MTLTextureType3D; }
+    if (t.mtl.textureType == MTLTextureType3D) return t.mtl;
     if (type == MTLTextureType2D || type == MTLTextureType1D || type == MTLTextureType3D || type == MTLTextureType2DMultisample) slice_count = 1;
     const bool whole = fmt == t.mtl.pixelFormat && type == t.mtl.textureType && first_mip == 0 && mip_count == total_mips && first_slice == 0 && slice_count == total_slices;
     if (whole) return t.mtl;
@@ -392,7 +470,7 @@ id<MTLTexture> ViewOf(Texture& t, const ViewDesc& v, bool as_render_target) {
     std::snprintf(key, sizeof key, "%lu/%lu/%u/%u/%u/%u%s", (unsigned long)fmt, (unsigned long)type, first_mip, mip_count, first_slice, slice_count, as_render_target ? "r" : "s");
     auto it = t.views.find(key);
     if (it != t.views.end()) return it->second;
-    id<MTLTexture> view = [t.mtl newTextureViewWithPixelFormat:fmt textureType:type levels:NSMakeRange(first_mip, mip_count) slices:NSMakeRange(first_slice, slice_count)];
+        id<MTLTexture> view = [t.mtl newTextureViewWithPixelFormat:fmt textureType:type levels:NSMakeRange(first_mip, mip_count) slices:NSMakeRange(first_slice, slice_count)];
     t.views[key] = view;
     return view;
 }
@@ -403,7 +481,7 @@ id<MTLTexture> DummyTexture(uint32_t dim) {
     MTLTextureDescriptor* d = [MTLTextureDescriptor new];
     d.pixelFormat = MTLPixelFormatRGBA8Unorm;
     d.width = d.height = 1;
-    d.usage = MTLTextureUsageShaderRead;
+    d.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
     d.storageMode = MTLStorageModeShared;
     switch (dim) {
     case 2: d.textureType = MTLTextureType1D; break;
@@ -826,8 +904,9 @@ std::shared_ptr<Texture> CreateTexture(const TextureDesc& desc) {
     // Not every GPU does 8x (or any) multisampling: take the largest count the device has.
     while (d.sampleCount > 1 && ![g->device supportsTextureSampleCount:d.sampleCount]) d.sampleCount >>= 1;
     d.usage = MTLTextureUsagePixelFormatView;
-    if (desc.shader_resource) d.usage |= MTLTextureUsageShaderRead;
+    if (desc.shader_resource || !desc.depth_stencil) d.usage |= MTLTextureUsageShaderRead;
     if (desc.render_target || desc.depth_stencil) d.usage |= MTLTextureUsageRenderTarget;
+    if (!desc.depth_stencil) d.usage |= MTLTextureUsageShaderWrite;
     if (desc.depth > 1) {
         d.textureType = MTLTextureType3D;
         d.depth = desc.depth;
@@ -1077,6 +1156,15 @@ void Draw(const DrawState& st, const DrawArgs& args) {
             }
             for (int i = 0; i < 16; ++i) {
                 if (!(rf.textures & (1u << i))) continue;
+                if (rf.texture_dimension[i] == 12) {
+                    id<MTLBuffer> buf = (st.srv[stage][i] && st.srv[stage][i]->buffer) ? st.srv[stage][i]->buffer->mtl : g->zero_cb;
+                    NSUInteger off = (st.srv[stage][i] && st.srv[stage][i]->buffer) ? st.srv[stage][i]->buffer->offset : 0;
+                    if (buf == nil) { if (g->zero_cb == nil) { g->zero_cb = NewBuffer(65536); std::memset(g->zero_cb.contents, 0, 65536); } buf = g->zero_cb; off = 0; }
+                    const uint32_t buf_idx = (stage == 0) ? (24 + i) : (14 + i);
+                    if (stage == 0) [e setVertexBuffer:buf offset:off atIndex:buf_idx];
+                    else [e setFragmentBuffer:buf offset:off atIndex:buf_idx];
+                    continue;
+                }
                 id<MTLTexture> tex = nil;
                 if (st.srv[stage][i] && st.srv[stage][i]->texture) {
                     Texture& tx = *st.srv[stage][i]->texture;
@@ -1228,23 +1316,131 @@ void Draw(const DrawState& st, const DrawArgs& args) {
             SavePng(*st.rtv[0]->texture, path);
             g_png_alpha = false;
         }
-        if (false) {
-            // Debug: how much of the render target is lit after this draw?
-            id<MTLTexture> rt0 = st.rtv[0] && st.rtv[0]->texture ? ViewOf(*st.rtv[0]->texture, st.rtv[0]->desc, true) : nil;
+        if (g->frame_count == g->trace_frame && st.rtv[0] && st.rtv[0]->texture) {
             EndEncoder();
             [Command() commit];
             [g->command waitUntilCompleted];
             g->command = nil;
+            id<MTLTexture> rt0 = ViewOf(*st.rtv[0]->texture, st.rtv[0]->desc, true);
             if (rt0 != nil && (rt0.pixelFormat == MTLPixelFormatRGBA8Unorm || rt0.pixelFormat == MTLPixelFormatBGRA8Unorm)) {
                 std::vector<uint8_t> px(rt0.width * rt0.height * 4);
                 [rt0 getBytes:px.data() bytesPerRow:rt0.width * 4 fromRegion:MTLRegionMake2D(0, 0, rt0.width, rt0.height) mipmapLevel:0];
                 size_t lit = 0;
                 for (size_t i = 0; i < px.size(); i += 4) lit += (px[i] | px[i + 1] | px[i + 2]) != 0;
-                UT_INFO("gpu: after draw %d: %zu lit pixels", g->trace_draws, lit);
+                UT_INFO("gpu: after draw %d: rt0 [%p] %ux%u: %zu lit pixels", g->trace_draws, (__bridge void*)rt0, (unsigned)rt0.width, (unsigned)rt0.height, lit);
+            }
+            if (g->dump_dir != nullptr) {
+                char dpath[512];
+                std::snprintf(dpath, sizeof dpath, "%s/draw_%02u_rt0_%ux%u_fmt%lu.png", g->dump_dir, g->trace_draws, (unsigned)st.rtv[0]->texture->mtl.width, (unsigned)st.rtv[0]->texture->mtl.height, (unsigned long)st.rtv[0]->texture->mtl.pixelFormat);
+                SavePng(*st.rtv[0]->texture, dpath);
             }
         }
     }
 }
+
+void Dispatch(const DispatchState& st, uint32_t x, uint32_t y, uint32_t z) {
+    std::scoped_lock lock {g->mutex};
+    if (!st.cs || x == 0 || y == 0 || z == 0) return;
+    static int disp_count = 0;
+    if (disp_count++ < 20 || g->frame_count == g->trace_frame) {
+        UT_INFO("gpu: Dispatch call %d (frame %llu): x=%u y=%u z=%u cs=%p", disp_count, (unsigned long long)g->frame_count, x, y, z, st.cs.get());
+    }
+    @autoreleasepool {
+        EndEncoder();
+        if (!CompileShader(*st.cs)) return;
+        id<MTLComputePipelineState> pso = nil;
+        auto it = g->compute_pipelines.find(st.cs->translated.msl);
+        if (it != g->compute_pipelines.end()) {
+            pso = it->second;
+        } else {
+            NSError* err = nil;
+            pso = [g->device newComputePipelineStateWithFunction:st.cs->function error:&err];
+            if (pso == nil) {
+                UT_ERROR("gpu: compute pipeline failed: %s", [[err localizedDescription] UTF8String]);
+                return;
+            }
+            g->compute_pipelines[st.cs->translated.msl] = pso;
+        }
+
+        id<MTLComputeCommandEncoder> ce = [Command() computeCommandEncoder];
+        if (ce == nil) return;
+        [ce setComputePipelineState:pso];
+
+        const ShaderReflection& rf = st.cs->translated.reflection;
+
+        // Constant buffers 0..13
+        for (int i = 0; i < 14; ++i) {
+            if (!(rf.constant_buffers & (1u << i))) continue;
+            const BufferBinding& b = st.cb[i];
+            id<MTLBuffer> buf = b.buffer ? b.buffer->mtl : g->zero_cb;
+            NSUInteger off = b.buffer ? b.buffer->offset + b.offset : 0;
+            if (buf == nil) {
+                if (g->zero_cb == nil) { g->zero_cb = NewBuffer(65536); std::memset(g->zero_cb.contents, 0, 65536); }
+                buf = g->zero_cb; off = 0;
+            }
+            [ce setBuffer:buf offset:off atIndex:i];
+        }
+
+        // SRVs: textures at 0..15, structured buffers at 14..29
+        for (int i = 0; i < 16; ++i) {
+            if (!(rf.textures & (1u << i))) continue;
+            if (rf.texture_dimension[i] == 12) {
+                id<MTLBuffer> buf = (st.srv[i] && st.srv[i]->buffer) ? st.srv[i]->buffer->mtl : g->zero_cb;
+                NSUInteger off = (st.srv[i] && st.srv[i]->buffer) ? st.srv[i]->buffer->offset : 0;
+                if (buf == nil) {
+                    if (g->zero_cb == nil) { g->zero_cb = NewBuffer(65536); std::memset(g->zero_cb.contents, 0, 65536); }
+                    buf = g->zero_cb; off = 0;
+                }
+                [ce setBuffer:buf offset:off atIndex:14 + i];
+                continue;
+            }
+            id<MTLTexture> tex = nil;
+            if (st.srv[i] && st.srv[i]->texture) {
+                Texture& tx = *st.srv[i]->texture;
+                tex = IsDepth(tx.pixel_format) && tx.depth_copy != nil ? tx.depth_copy : ViewOf(tx, st.srv[i]->desc, false);
+            }
+            if (tex == nil) tex = DummyTexture(rf.texture_dimension[i]);
+            [ce setTexture:tex atIndex:i];
+        }
+
+        // Samplers
+        for (int i = 0; i < 16; ++i) {
+            if (!(rf.samplers & (1u << i))) continue;
+            id<MTLSamplerState> s = SamplerFor(st.sampler[i]);
+            [ce setSamplerState:s atIndex:i];
+        }
+
+        // UAVs: buffers at 20..83, textures at 64..127
+        for (int i = 0; i < 64; ++i) {
+            if (!(rf.uavs & (1u << i))) continue;
+            if (st.uav[i]) {
+                if (st.uav[i]->buffer) {
+                    id<MTLBuffer> buf = st.uav[i]->buffer->mtl;
+                    NSUInteger off = st.uav[i]->buffer->offset;
+                    [ce setBuffer:buf offset:off atIndex:20 + i];
+                } else if (st.uav[i]->texture) {
+                    Texture& tx = *st.uav[i]->texture;
+                    id<MTLTexture> tex = ViewOf(tx, st.uav[i]->desc, false);
+                    [ce setTexture:tex atIndex:64 + i];
+                }
+            } else {
+                if (g->zero_cb == nil) { g->zero_cb = NewBuffer(65536); std::memset(g->zero_cb.contents, 0, 65536); }
+                [ce setBuffer:g->zero_cb offset:0 atIndex:20 + i];
+                [ce setTexture:DummyTexture(3) atIndex:64 + i];
+            }
+        }
+
+        MTLSize threadgroups = MTLSizeMake(x, y, z);
+        MTLSize threadsPerThreadgroup = MTLSizeMake(
+            std::max(1u, rf.thread_group_size[0]),
+            std::max(1u, rf.thread_group_size[1]),
+            std::max(1u, rf.thread_group_size[2])
+        );
+        [ce dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerThreadgroup];
+        [ce endEncoding];
+    }
+}
+
 
 void ClearRenderTarget(const TextureView& view, const float color[4]) {
     std::scoped_lock lock {g->mutex};
@@ -1412,6 +1608,7 @@ void Present(const std::shared_ptr<Texture>& back, uint32_t sync_interval) {
         EndEncoder();
         g->draws_in_command = 0;
         const uint64_t index = ++g->frame_count;
+        if (index % 120 == 1) UT_INFO("gpu: Present back=%p mtl=%p", back.get(), back ? (__bridge void*)back->mtl : nullptr);
         if (index % 120 == 1) {
             static auto last_report = std::chrono::steady_clock::now();
             static uint64_t last_index = 0;
@@ -1471,8 +1668,9 @@ void Present(const std::shared_ptr<Texture>& back, uint32_t sync_interval) {
         g->frame = (g->frame + 1) % kRingFrames;
         EvictRing(g->frame);
     }
-    // Pace to the display like a vsynced Present would.
-    const auto period = std::chrono::microseconds(sync_interval == 0 ? 0 : 16667 * sync_interval);
+    // Pace to the display like a vsynced Present would (clamp sync_interval to 1 to unlock 60 FPS).
+    const uint32_t interval = (sync_interval > 1) ? 1 : sync_interval;
+    const auto period = std::chrono::microseconds(interval == 0 ? 0 : 16667 * interval);
     if (period.count() > 0) {
         const auto due = g->last_present + period;
         const auto now = std::chrono::steady_clock::now();

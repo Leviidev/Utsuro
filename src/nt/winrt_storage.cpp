@@ -470,7 +470,12 @@ void RegisterStorage(Runtime& rt) {
         c.thread.CallGuest(EachOf(c.Arg(0), IterableOfString(), s, [=](uint64_t name, Cont next) {
             const std::string n = Utf16ToUtf8(Runtime::ReadHString(name));
             std::vector<uint8_t> data;
-            const bool found = ReadFile(BlobPath(container, n), &data);
+            bool found = ReadFile(BlobPath(container, n), &data);
+            if (!found && n == "VersionFlags") {
+                data.assign(16, 0);
+                WriteFile(BlobPath(container, n), data.data(), data.size());
+                found = true;
+            }
             UT_INFO("storage: get %s/%s -> %s (%zu bytes)", container.c_str(), n.c_str(), found ? "found" : "missing", data.size());
             if (found) {
                 items->push_back(Runtime::Get().MakeHString(Utf8ToUtf16(n)));

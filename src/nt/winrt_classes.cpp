@@ -87,6 +87,39 @@ void RegisterClasses(Runtime& rt) {
     RegisterAsync(rt);
     RegisterStorage(rt);
     RegisterAppData(rt);
+    // Windows.Xbox.Achievements.AchievementNotifier
+    {
+        Iface* notifier_if = &rt.DefineInterface("IAchievementNotifier", "00000000-0000-0000-0000-000000000000", {});
+        notifier_if->methods.push_back(Method {"add_AchievementEarned", Out::Ptr, 1, false, false, [](Call& c) -> uint32_t {
+            *c.Ptr<uint64_t>(1) = 1;
+            return 0;
+        }});
+        Iface* statics_if = &rt.DefineInterface("IAchievementNotifierStatics", "82ca180b-30e2-4ea0-a62e-b61697a2f334", {});
+        statics_if->methods.push_back(Method {"get_Notifier", Out::Ptr, 0, false, false, [notifier_if](Call& c) -> uint32_t {
+            Runtime& r = Runtime::Get();
+            static Obj* notifier = nullptr;
+            if (notifier == nullptr) notifier = r.NewObject("Windows.Xbox.Achievements.AchievementNotifier", {notifier_if});
+            ++notifier->refs;
+            *c.Ptr<uint64_t>(0) = r.Pointer(*notifier, *notifier_if);
+            return 0;
+        }});
+        rt.DefineClass("Windows.Xbox.Achievements.AchievementNotifier", [notifier_if](Runtime& r) -> Obj* {
+            return r.NewObject("Windows.Xbox.Achievements.AchievementNotifier", {notifier_if});
+        }, statics_if);
+    }
+    // Microsoft.Xbox.Services.XboxLiveContext
+    {
+        Iface* factory_if = &rt.DefineInterface("IXboxLiveContextFactory", "bedc781e-a29e-3333-9d97-7af19812192d", {});
+        factory_if->methods.push_back(Method {"CreateXboxLiveContext", Out::Ptr, 1, false, false, [](Call& c) -> uint32_t {
+            Runtime& r = Runtime::Get();
+            Obj* ctx = r.NewGhost("Microsoft.Xbox.Services.XboxLiveContext");
+            *c.Ptr<uint64_t>(1) = ctx->blocks[0];
+            return 0;
+        }});
+        rt.DefineClass("Microsoft.Xbox.Services.XboxLiveContext", [](Runtime& r) -> Obj* {
+            return r.NewGhost("Microsoft.Xbox.Services.XboxLiveContext");
+        }, factory_if);
+    }
     // One signed-in user, id 1, who plays on the one pad.
     {
         rt.Override("IUserStatics", "get_Users", [](Call& c) -> uint32_t {

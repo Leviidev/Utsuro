@@ -475,11 +475,11 @@ bool WildMatch(const std::u16string& pattern, const std::u16string& name) {
     auto lower = [](char16_t c) { return (c >= u'A' && c <= u'Z') ? static_cast<char16_t>(c + 32) : c; };
     while (n < name.size()) {
         if (p < pattern.size() && (pattern[p] == u'*' || pattern[p] == u'<')) { star = p++; mark = n; continue; }
-        if (p < pattern.size() && (pattern[p] == u'?' || pattern[p] == u'>' || lower(pattern[p]) == lower(name[n]))) { ++p; ++n; continue; }
+        if (p < pattern.size() && (pattern[p] == u'?' || pattern[p] == u'>' || (pattern[p] == u'"' && name[n] == u'.') || lower(pattern[p]) == lower(name[n]))) { ++p; ++n; continue; }
         if (star != std::u16string::npos) { p = star + 1; n = ++mark; continue; }
         return false;
     }
-    while (p < pattern.size() && (pattern[p] == u'*' || pattern[p] == u'<')) ++p;
+    while (p < pattern.size() && (pattern[p] == u'*' || pattern[p] == u'<' || pattern[p] == u'"')) ++p;
     return p == pattern.size();
 }
 
@@ -576,9 +576,11 @@ NTSTATUS NtQueryDirectoryFile(Kernel& k, NtThread&, SyscallArgs& a) {
     }
     if (!wrote) {
         SetIosb(iosb, STATUS_NO_MORE_FILES, 0);
+        PostCompletion(k, a, iosb, 1, 2);
         return STATUS_NO_MORE_FILES;
     }
     SetIosb(iosb, STATUS_SUCCESS, used);
+    PostCompletion(k, a, iosb, 1, 2);
     return STATUS_SUCCESS;
 }
 

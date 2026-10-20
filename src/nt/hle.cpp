@@ -110,6 +110,25 @@ uint64_t D3DFreeGraphicsMemory(Kernel& k, NtThread&, SyscallArgs& a) {
 
 uint64_t ReturnOk(Kernel&, NtThread&, SyscallArgs&) { return 0; }
 
+uint64_t XMemAlloc(Kernel& k, NtThread&, SyscallArgs& a) {
+    const uint64_t size = a[0];
+    if (size == 0) return 0;
+    uint64_t out = 0;
+    if (!AllocAligned(k, size, 64, 0, &out)) return 0;
+    return out;
+}
+
+uint64_t XMemFree(Kernel& k, NtThread&, SyscallArgs& a) {
+    if (a[0] == 0) return 0;
+    std::scoped_lock lock {g_graphics_mutex};
+    auto it = g_graphics.find(a[0]);
+    if (it == g_graphics.end()) return 0;
+    uint64_t base = it->second.base, len = 0;
+    k.Vm().Free(&base, &len, MEM_RELEASE);
+    g_graphics.erase(it);
+    return 0;
+}
+
 
 std::string HstringToUtf8(uint64_t h) {
     if (h == 0) return {};
@@ -237,6 +256,8 @@ const Hook kHooks[] = {
     {"acphal.dll", "ApuMapVirtualAddress", ApuMapVirtualAddress, 0},
     {"acphal.dll", "ApuIsVirtualAddressValid", ApuIsVirtualAddressValid, 0},
     {"xaudio2_9.dll", "CreateXAudio2Object", xaudio2::CreateXAudio2Object, 0},
+    {"kernelx.dll", "XMemAllocDefault", XMemAlloc, 0},
+    {"kernelx.dll", "XMemFreeDefault", XMemFree, 0},
 };
 
 constexpr uint32_t kHleBase = 0xFFFF8000u;  // below winrt::Runtime::kBase's span ends here
