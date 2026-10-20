@@ -262,6 +262,12 @@ bool Kernel::ResolvePath(const std::string& nt_in, std::string* host_path, bool*
         while (base.size() > 1 && base.back() == '/') base.pop_back();
         root = base.substr(0, base.rfind('/')) + "/AppData";
         mkdir(root.c_str(), 0755);
+    } else if (starts("\\??\\T:\\") || starts("\\DosDevices\\T:\\") || starts("T:\\")) {
+        const char* e = std::getenv("UTSURO_SAVES");
+        std::string base = e != nullptr ? std::string(e) : std::string(std::getenv("HOME")) + "/Library/Application Support/Utsuro/saves";
+        while (base.size() > 1 && base.back() == '/') base.pop_back();
+        root = base.substr(0, base.rfind('/')) + "/Temp";
+        mkdir(root.c_str(), 0755);
     } else if (starts("\\??\\C:\\") || starts("\\DosDevices\\C:\\") || starts("C:\\") || starts("\\??\\Volume{c}\\")) {
         root = xvd_root;
     } else if (starts("\\SystemRoot\\") || starts("\\??\\SystemRoot\\")) {
@@ -321,6 +327,12 @@ std::string Kernel::NtPathFromHost(const std::string& host) const {
     };
     std::string s = conv(options_.title_root, "G:");
     if (s.empty()) s = conv(xvd_root, "C:");
+    if (s.empty()) {
+        const char* e = std::getenv("UTSURO_SAVES");
+        std::string base = e != nullptr ? std::string(e) : std::string(std::getenv("HOME")) + "/Library/Application Support/Utsuro/saves";
+        while (base.size() > 1 && base.back() == '/') base.pop_back();
+        s = conv(base.substr(0, base.rfind('/')) + "/Temp", "T:");
+    }
     return s;
 }
 

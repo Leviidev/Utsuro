@@ -12,6 +12,8 @@
 #include <sys/statvfs.h>
 #include <unistd.h>
 
+#include <filesystem>
+
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
@@ -162,7 +164,9 @@ NTSTATUS DoCreate(Kernel& k, NtThread&, HANDLE* out, uint32_t access, const OBJE
 
     if (!present) {
         if ((options & FILE_DIRECTORY_FILE) != 0) {
-            if (mkdir(host.c_str(), 0755) != 0) return FromErrno(errno);
+            std::error_code ec;
+            std::filesystem::create_directories(host, ec);
+            if (ec) return FromErrno(ec.value());
             file->is_dir = true;
             file->fd = open(host.c_str(), O_RDONLY);
         } else {
