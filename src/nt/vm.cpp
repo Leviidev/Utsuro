@@ -109,6 +109,16 @@ NTSTATUS VirtualMemory::Allocate(uint64_t* base_io, uint64_t* size_io, uint32_t 
     const bool commit = (type & MEM_COMMIT) != 0;
     const uint32_t nt_prot = protect == 0 ? PAGE_READWRITE : protect;
 
+    // A reservation at a fixed address that is outside the arena can never be given. Titles ask for the console's own
+    // addresses (Forza Horizon 2: 0x800000000.. and 0x60000000000..) and only need the memory, so it goes anywhere.
+    // Only for the console's own allocation types (MEM_LARGE_PAGES / MEM_64K_PAGES / MEM_4MB_PAGES style bits): plain VirtualAlloc callers
+    // treat a refused fixed address as a signal to try another one.
+    if (base != 0 && reserve && (type & 0x70000000u) != 0 && (base >= arena_end_ || base + size <= arena_base_)) {
+        UT_DEBUG("vm: fixed reservation %#llx+%#llx is outside the arena; placed freely", (unsigned long long)base, (unsigned long long)size);
+        base = 0;
+        *base_io = 0;
+    }
+
     if (base == 0 || reserve) {
         // A new region.
         uint64_t start = base;

@@ -1,0 +1,1 @@
+A 1ef2 8  ; test byte ptr [0x7ffe02d4], 1

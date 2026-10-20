@@ -528,7 +528,19 @@ NTSTATUS Kernel::Dispatch(NtThread& thread, uint32_t number, SyscallArgs& args) 
                 id < tracepoints.size() ? tracepoints[id].name.c_str() : "?", (unsigned long long)args.rsp + 32, (unsigned long long)args.reg[0],
                 (unsigned long long)args.reg[1], (unsigned long long)args.reg[2], (unsigned long long)args.reg[3],
                 Describe(ret).c_str());
-        DumpRequestedMemory("UTSURO_TPDUMP");
+        // UTSURO_TPDUMP=rcx|rdx|r8|r9|rsp[+off]:len also dumps guest memory around an argument register of the tracepoint.
+        if (const char* td = std::getenv("UTSURO_TPDUMP"); td != nullptr && (td[0] == 'r')) {
+            const std::string t = td;
+            const auto colon = t.find(':');
+            const std::string r = t.substr(0, t.find_first_of("+:"));
+            const uint64_t base_v = r == "rcx" ? args.reg[0] : r == "rdx" ? args.reg[1] : r == "r8" ? args.reg[2] : r == "r9" ? args.reg[3] : args.rsp + 32;
+            const auto plus = t.find('+');
+            const uint64_t off = plus != std::string::npos ? std::strtoull(t.c_str() + plus + 1, nullptr, 0) : 0;
+            const size_t len = colon != std::string::npos ? std::strtoull(t.c_str() + colon + 1, nullptr, 0) : 32;
+            if (base_v != 0)
+                for (size_t o = 0; o < len; o += 16)
+                    UT_WARN("    %#llx: %016llx %016llx", (unsigned long long)(base_v + off + o), (unsigned long long)*reinterpret_cast<uint64_t*>(base_v + off + o), (unsigned long long)*reinterpret_cast<uint64_t*>(base_v + off + o + 8));
+        } else DumpRequestedMemory("UTSURO_TPDUMP");
         if (id < tracepoints.size() && tracepoints[id].log_return && tp_return_stub_ != 0 && args.rsp != 0) {
             auto* slot = reinterpret_cast<uint64_t*>(args.rsp + 32);
             thread.tp_returns.emplace_back(*slot, static_cast<int>(id));

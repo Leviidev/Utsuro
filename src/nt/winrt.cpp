@@ -89,6 +89,32 @@ void Runtime::Init(Kernel& kernel) {
     }});
     Materialize(*activation_factory_);
     RegisterClasses(*this);
+    // IWeakReferenceSource / IWeakReference: C++/CX (Platform::Details::GetWeakReference) asks every object it holds for them, so every host object answers.
+    {
+        Method get_weak; get_weak.name = "GetWeakReference"; get_weak.params = 1;
+        get_weak.fn = [](Call& c) -> uint32_t {
+            Runtime& r = Runtime::Get();
+            Iface* wr = r.FindInterface("IWeakReference");
+            Obj* weak = r.NewObject("WeakReference", {wr});
+            weak->u64["target"] = r.Pointer(c.obj, *c.obj.ifaces[0]);
+            ++weak->refs;
+            *c.Ptr<uint64_t>(0) = r.Pointer(*weak, *wr);
+            return kSOk;
+        };
+        DefineComInterface("IWeakReferenceSource", "00000038-0000-0000-C000-000000000046", {get_weak}, [](Call&) -> uint32_t { return kENoInterface; });
+        Method resolve; resolve.name = "Resolve"; resolve.params = 2;
+        resolve.fn = [](Call& c) -> uint32_t {
+            Runtime& r = Runtime::Get();
+            Obj* target = r.FromPointer(c.obj.u64["target"]);
+            auto* out = c.Ptr<uint64_t>(1);
+            if (target == nullptr || out == nullptr) { if (out) *out = 0; return kSOk; }
+            const uint64_t p = r.QueryInterface(*target, *reinterpret_cast<const Guid*>(c.Arg(0)));
+            if (p != 0) ++target->refs;
+            *out = p;
+            return p != 0 ? kSOk : kENoInterface;
+        };
+        DefineComInterface("IWeakReference", "00000037-0000-0000-C000-000000000046", {resolve}, [](Call&) -> uint32_t { return kENoInterface; });
+    }
     d3d::Register(*this, kernel.NtdllTimestamp());
     xaudio2::Register(*this);
     UT_INFO("winrt: %zu classes, %zu interfaces", classes_.size(), ifaces_.size());
@@ -395,6 +421,17 @@ bool Runtime::Dispatch(NtThread& thread, uint32_t number, SyscallArgs& args, uin
             }
         }
         if (p == 0 && obj->ghost) p = AddGhostInterface(*obj, iid);
+        if (p == 0 && iid == Guid::Parse("00000038-0000-0000-C000-000000000046")) {
+            Iface* src = FindInterface("IWeakReferenceSource");
+            if (src->vtable == 0) Materialize(*src);
+            const uint64_t block = AllocGuest(32, 16);
+            reinterpret_cast<uint64_t*>(block)[0] = src->vtable;
+            reinterpret_cast<uint64_t*>(block)[1] = obj->id;
+            reinterpret_cast<uint64_t*>(block)[2] = obj->ifaces.size();
+            obj->ifaces.push_back(src);
+            obj->blocks.push_back(block);
+            p = block;
+        }
         if (p == 0) {
             UT_INFO("winrt: %s does not implement %s", obj->class_name.c_str(), iid.ToString().c_str());
             *reinterpret_cast<uint64_t*>(args[2]) = 0;

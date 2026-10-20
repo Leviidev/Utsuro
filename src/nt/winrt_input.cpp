@@ -7,6 +7,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <string>
 
 namespace utsuro::nt::winrt {
 
@@ -44,6 +45,12 @@ void RegisterInput(Runtime& rt) {
         fn("GetNavigationReading", [](Call& c) -> uint32_t { *c.Ptr<uint64_t>(0) = 0; return 0; }),
         fn("GetRawNavigationReading", [](Call& c) -> uint32_t { std::memset(c.Ptr<void>(0), 0, 16); return 0; }),
     }, true);
+    // A guessed interface adopts whichever IID a title asks for next (see Runtime QueryInterface); titles built later call methods well past
+    // the two known ones, so the vtable is padded with logged no-ops instead of garbage.
+    for (int i = 0; i < 40; ++i) navigation.methods.push_back(fn(("slot" + std::to_string(6 + navigation.methods.size())).c_str(), [](Call& c) -> uint32_t {
+        UT_INFO("winrt: %s::%s called (%#llx, %#llx, %#llx)", c.iface.name.c_str(), c.iface.methods[c.slot].name.c_str(), (unsigned long long)c.Arg(0), (unsigned long long)c.Arg(1), (unsigned long long)c.Arg(2));
+        return 0;
+    }));
 
     Iface* gamepad = rt.FindInterface("IGamepad");
     if (gamepad == nullptr) { UT_ERROR("winrt: IGamepad missing"); return; }

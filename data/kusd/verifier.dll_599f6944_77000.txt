@@ -1,0 +1,4 @@
+A 9a00 8  ; movzx eax, byte ptr [0x7ffe03a0]
+A e0b0 8  ; cmp byte ptr [0x7ffe02d4], bpl
+E 22969 8  ; mov qword ptr [rsp], 0x7ffe0320
+F 22982 6 rax  ; add rax, 0x7ffe0000

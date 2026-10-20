@@ -237,9 +237,11 @@ uint32_t Fallback(Call& c) {
 
 } // namespace
 
-void Register(Runtime& rt, uint32_t os_timestamp) {
+static void Setup(Runtime& rt, uint32_t os_timestamp, bool old_abi) {
     // Console OS builds from September 2015 on (6.2.13xxx) lay the D3D11.X vtables out differently from the 2014 ones (6.2.11396).
-    const bool newer = os_timestamp >= 0x55e00000u;
+    // A title built against the first XDK ABI (Forza Horizon 2 passes version 0x1000b to D3D11XCreateDeviceX) uses the 2014 layouts
+    // whatever OS it was packaged with: the console runs the title's own runtime.
+    const bool newer = os_timestamp >= 0x55e00000u && !old_abi;
     UT_INFO("d3d: interface layouts of OS build %s", newer ? "6.2.13332" : "6.2.11396");
     // The 6.2.13332 context vtables have two more entries after FlushGpuCacheRange than WinDurango's headers list (found from the
     // title's call sites: Begin..GetData and MakeCeSpace both land on the shifted offsets, and BlockUntilGPUIdle calls the
@@ -304,6 +306,8 @@ void Register(Runtime& rt, uint32_t os_timestamp) {
             iface->aliases.push_back(it->second->iid);
             t = g_defs[t]->base;
         }
+        // IGraphicsUnknown: C++/CX code (Platform::Details::GetWeakReference) asks every D3D object for it.
+        iface->aliases.push_back(Guid::Parse("9FDAC92A-1876-48C3-AFAD-25B94F84A9B6"));
     }
 
     // IDXGIOutput is missing from the headers the tables come from: the PC layout, after IDXGIObject.
@@ -653,10 +657,27 @@ uint64_t PresentArray(Kernel&, NtThread&, SyscallArgs& a) {
     return 0;
 }
 
+
+namespace {
+Runtime* g_setup_rt = nullptr;
+uint32_t g_setup_ts = 0;
+std::once_flag g_setup_once;
+/// The interface tables are built when the first device is made: only then is the ABI the title was built against known.
+void EnsureSetup(bool old_abi) {
+    std::call_once(g_setup_once, [&] { if (g_setup_rt != nullptr) Setup(*g_setup_rt, g_setup_ts, old_abi); });
+}
+}
+
+void Register(Runtime& rt, uint32_t os_timestamp) {
+    g_setup_rt = &rt;
+    g_setup_ts = os_timestamp;
+}
+
 namespace {
 /// The device and immediate context every creation entry point hands out.
 uint32_t MakeDevice(uint64_t* out_device, uint64_t* out_context) {
     Runtime& rt = Runtime::Get();
+    EnsureSetup(false);
     gpu::Init();
     Obj* device = New("ID3D11DeviceX");
     Obj* context = New("ID3D11DeviceContextX");
@@ -677,7 +698,9 @@ uint32_t MakeDevice(uint64_t* out_device, uint64_t* out_context) {
 /// D3D11XCreateDeviceX(pParameters, ppDevice, ppImmediateContext): the Xbox-only entry point Unity titles use.
 uint64_t CreateDeviceX(Kernel& kernel, NtThread&, SyscallArgs& a) {
     g_kernel = &kernel;
-    UT_INFO("d3d: D3D11XCreateDeviceX");
+    const uint32_t version = a[0] != 0 ? *a.Ptr<uint32_t>(0) : 0;
+    UT_INFO("d3d: D3D11XCreateDeviceX, ABI version %#x", version);
+    EnsureSetup(version != 0 && version < 0x20000);
     return MakeDevice(a[1] != 0 ? a.Ptr<uint64_t>(1) : nullptr, a[2] != 0 ? a.Ptr<uint64_t>(2) : nullptr);
 }
 
@@ -704,6 +727,7 @@ uint64_t CreateDevice(Kernel& kernel, NtThread&, SyscallArgs& a) {
         }).detach();
     }
     // D3D11CreateDevice(adapter, driverType, software, flags, levels, nlevels, sdk, ppDevice, pLevel, ppContext)
+    EnsureSetup(false);
     gpu::Init();
     Obj* device = New("ID3D11DeviceX");
     Obj* context = New("ID3D11DeviceContextX");

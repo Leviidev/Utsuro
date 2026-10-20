@@ -214,6 +214,15 @@ void RegisterClasses(Runtime& rt) {
         rt.Override("IPackageTransferManager", "get_TransferStatus", [](Call& c) -> uint32_t { *c.Ptr<uint32_t>(0) = 0; return 0; });
     }
 
+    // PackageTransferWatcher.Create: a watcher that never reports anything (the title waits for chunks that are all installed).
+    rt.OverrideAllNamed("IPackageTransferWatcherStatics", "Create", [](Call& c) -> uint32_t {
+        Runtime& r = Runtime::Get();
+        Iface* main = r.FindInterface("IPackageTransferWatcher");
+        Obj* watcher = r.NewObject("Windows.Xbox.Management.Deployment.PackageTransferWatcher", {main, r.FindInterface("IPackageTransferWatcherTransferInfo")});
+        *c.Ptr<uint64_t>(c.iface.methods[c.slot].ret_arg) = r.Pointer(*watcher, *main);
+        return 0;
+    });
+
     // Windows.Media.Devices.MediaDevice: the default audio endpoints are named, nothing else is present.
     {
         auto text = [](const char16_t* value) { return [value](Call& c) -> uint32_t { *c.Ptr<uint64_t>(0) = Runtime::Get().MakeHString(value); return 0; }; };
