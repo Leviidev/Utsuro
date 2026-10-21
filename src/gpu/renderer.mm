@@ -1154,13 +1154,22 @@ void Draw(const DrawState& st, const DrawArgs& args) {
                 if (stage == 0) [e setVertexBuffer:buf offset:off atIndex:i];
                 else [e setFragmentBuffer:buf offset:off atIndex:i];
             }
+            if (stage == 1 && rf.uavs != 0) {
+                // Pixel-shader UAVs: placeholders so the pipeline binds; what the shader writes there is not kept yet.
+                if (g->zero_cb == nil) { g->zero_cb = NewBuffer(65536); std::memset(g->zero_cb.contents, 0, 65536); }
+                for (int i = 0; i < 64; ++i) {
+                    if (!(rf.uavs & (1u << i))) continue;
+                    if (rf.uav_index[i] != 0) [e setFragmentBuffer:g->zero_cb offset:0 atIndex:rf.uav_index[i]];
+                    else [e setFragmentTexture:DummyTexture(3) atIndex:64 + i];
+                }
+            }
             for (int i = 0; i < 16; ++i) {
                 if (!(rf.textures & (1u << i))) continue;
                 if (rf.texture_dimension[i] == 12) {
                     id<MTLBuffer> buf = (st.srv[stage][i] && st.srv[stage][i]->buffer) ? st.srv[stage][i]->buffer->mtl : g->zero_cb;
                     NSUInteger off = (st.srv[stage][i] && st.srv[stage][i]->buffer) ? st.srv[stage][i]->buffer->offset : 0;
                     if (buf == nil) { if (g->zero_cb == nil) { g->zero_cb = NewBuffer(65536); std::memset(g->zero_cb.contents, 0, 65536); } buf = g->zero_cb; off = 0; }
-                    const uint32_t buf_idx = (stage == 0) ? (24 + i) : (14 + i);
+                    const uint32_t buf_idx = rf.buffer_index[i] != 0 ? rf.buffer_index[i] : ((stage == 0) ? (24 + i) : (14 + i));
                     if (stage == 0) [e setVertexBuffer:buf offset:off atIndex:buf_idx];
                     else [e setFragmentBuffer:buf offset:off atIndex:buf_idx];
                     continue;
@@ -1391,7 +1400,7 @@ void Dispatch(const DispatchState& st, uint32_t x, uint32_t y, uint32_t z) {
                     if (g->zero_cb == nil) { g->zero_cb = NewBuffer(65536); std::memset(g->zero_cb.contents, 0, 65536); }
                     buf = g->zero_cb; off = 0;
                 }
-                [ce setBuffer:buf offset:off atIndex:14 + i];
+                [ce setBuffer:buf offset:off atIndex:(rf.buffer_index[i] != 0 ? rf.buffer_index[i] : 14 + i)];
                 continue;
             }
             id<MTLTexture> tex = nil;
@@ -1417,7 +1426,7 @@ void Dispatch(const DispatchState& st, uint32_t x, uint32_t y, uint32_t z) {
                 if (st.uav[i]->buffer) {
                     id<MTLBuffer> buf = st.uav[i]->buffer->mtl;
                     NSUInteger off = st.uav[i]->buffer->offset;
-                    [ce setBuffer:buf offset:off atIndex:20 + i];
+                    [ce setBuffer:buf offset:off atIndex:(rf.uav_index[i] != 0 ? rf.uav_index[i] : 20 + i)];
                 } else if (st.uav[i]->texture) {
                     Texture& tx = *st.uav[i]->texture;
                     id<MTLTexture> tex = ViewOf(tx, st.uav[i]->desc, false);
@@ -1425,7 +1434,7 @@ void Dispatch(const DispatchState& st, uint32_t x, uint32_t y, uint32_t z) {
                 }
             } else {
                 if (g->zero_cb == nil) { g->zero_cb = NewBuffer(65536); std::memset(g->zero_cb.contents, 0, 65536); }
-                [ce setBuffer:g->zero_cb offset:0 atIndex:20 + i];
+                [ce setBuffer:g->zero_cb offset:0 atIndex:(rf.uav_index[i] != 0 ? rf.uav_index[i] : 20 + i)];
                 [ce setTexture:DummyTexture(3) atIndex:64 + i];
             }
         }

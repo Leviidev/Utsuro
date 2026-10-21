@@ -43,7 +43,7 @@ enum Op : uint32_t {
     OP_UBFE = 138, OP_IBFE = 139, OP_BFI = 140, OP_BFREV = 141, OP_SWAPC = 142,
     OP_DCL_THREAD_GROUP = 155,
     OP_DCL_UAV_TYPED = 156, OP_DCL_UAV_RAW = 157, OP_DCL_UAV_STRUCTURED = 158,
-    OP_DCL_TGSM_STRUCTURED = 160,
+    OP_DCL_TGSM_RAW = 159, OP_DCL_TGSM_STRUCTURED = 160,
     OP_SYNC = 190,
     OP_DCL_RESOURCE_RAW = 161, OP_DCL_RESOURCE_STRUCTURED = 162,
     OP_LD_UAV_TYPED = 163, OP_STORE_UAV_TYPED = 164, OP_LD_RAW = 165, OP_STORE_RAW = 166,
@@ -135,6 +135,32 @@ struct SigRegister {
     // The signature elements packed into one register (each owns some components).
     std::vector<const SignatureElement*> elements;
 };
+
+// Metal gives a stage 31 buffer slots. Constant buffers take 0..13, the vertex stage's vertex buffers 15..23; buffer
+// SRVs (structured and raw) get the rest in declaration order, and the renderer binds them through
+// ShaderReflection::buffer_index. Compute keeps its fixed 14 + slot layout.
+template <typename T>
+uint32_t NextBufferIndex(T& t) {
+    const uint32_t first = t.stage == ShaderStage::Vertex ? 24u : 14u;
+    uint32_t used = 0;
+    for (int i = 0; i < 32; ++i) if (t.refl.buffer_index[i] != 0) ++used;
+    for (int i = 0; i < 64; ++i) if (t.refl.uav_index[i] != 0) ++used;
+    return std::min(first + used, 30u);
+}
+template <typename T>
+uint32_t BufferIndexFor(T& t, uint32_t slot) {
+    if (slot < 32 && t.refl.buffer_index[slot] != 0) return t.refl.buffer_index[slot];
+    const uint32_t index = NextBufferIndex(t);
+    if (slot < 32) t.refl.buffer_index[slot] = static_cast<uint8_t>(index);
+    return index;
+}
+template <typename T>
+uint32_t UavBufferIndexFor(T& t, uint32_t slot) {
+    if (slot < 64 && t.refl.uav_index[slot] != 0) return t.refl.uav_index[slot];
+    const uint32_t index = NextBufferIndex(t);
+    if (slot < 64) t.refl.uav_index[slot] = static_cast<uint8_t>(index);
+    return index;
+}
 
 struct Translator {
     ShaderStage stage {ShaderStage::Unknown};
@@ -501,7 +527,7 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
             t.resource_stride[slot] = stride;
             if (slot < 32) t.refl.textures |= 1u << slot;
             if (slot < 128) t.refl.texture_dimension[slot] = 12;
-            const uint32_t buf_slot = (t.stage == ShaderStage::Vertex) ? (24 + slot) : (14 + slot);
+            const uint32_t buf_slot = BufferIndexFor(t, slot);
             resource_decls.push_back("device const uint* t" + std::to_string(slot) + " [[buffer(" + std::to_string(buf_slot) + ")]]");
             break;
         }
@@ -524,14 +550,22 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
             const uint32_t slot = o->index[0];
             t.refl.uavs |= (1u << slot);
             t.uav_stride[slot] = stride;
-            uav_decls.push_back("device uint* u" + std::to_string(slot) + " [[buffer(" + std::to_string(20 + slot) + ")]]");
+            uav_decls.push_back("device uint* u" + std::to_string(slot) + " [[buffer(" + std::to_string(UavBufferIndexFor(t, slot)) + ")]]");
             break;
         }
         case OP_DCL_UAV_RAW: {
             auto o = operand();
             const uint32_t slot = o->index[0];
             t.refl.uavs |= (1u << slot);
-            uav_decls.push_back("device uint* u" + std::to_string(slot) + " [[buffer(" + std::to_string(20 + slot) + ")]]");
+            uav_decls.push_back("device uint* u" + std::to_string(slot) + " [[buffer(" + std::to_string(UavBufferIndexFor(t, slot)) + ")]]");
+            break;
+        }
+        case OP_DCL_TGSM_RAW: {
+            auto o = operand();
+            const uint32_t bytes = dec.Next();
+            const uint32_t slot = o->index[0];
+            t.tgsm_stride[slot] = 4;
+            t.tgsm_count[slot] = (bytes + 3) / 4;
             break;
         }
         case OP_DCL_TGSM_STRUCTURED: {
@@ -551,6 +585,12 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
         }
         case OP_DCL_RESOURCE_RAW: {
             auto o = operand();
+            const uint32_t slot = o->index[0];
+            t.resource_dim[slot] = 12;
+            t.resource_stride[slot] = 0;
+            if (slot < 32) t.refl.textures |= 1u << slot;
+            if (slot < 128) t.refl.texture_dimension[slot] = 12;
+            resource_decls.push_back("device const uint* t" + std::to_string(slot) + " [[buffer(" + std::to_string(BufferIndexFor(t, slot)) + ")]]");
             break;
         }
         case OP_DCL_INPUT: case OP_DCL_INPUT_PS: {
@@ -945,6 +985,15 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
         }
         case OP_STORE_RAW: {
             auto dst = operand(); auto off = operand(); auto val = operand();
+            if (dst->type == T_TGSM || dst->type == T_UAV) {
+                const std::string g = (dst->type == T_TGSM ? "tgsm_g" : "u") + std::to_string(dst->index[0]);
+                t.Line("{");
+                t.Line("    uint w_idx = " + t.SrcU(*off) + ".x / 4u;");
+                t.Line("    uint4 raw = " + t.SrcU(*val) + ";");
+                for (int comp = 0; comp < 4; ++comp)
+                    if (dst->bits & (1u << comp)) t.Line("    " + g + "[w_idx + " + std::to_string(comp) + "] = raw[" + std::to_string(comp) + "];");
+                t.Line("}");
+            }
             break;
         }
         case OP_STORE_UAV_TYPED: {
@@ -996,7 +1045,21 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
         }
         case OP_LD_RAW: {
             auto dst = operand(); auto off = operand(); auto src = operand();
-            t.Write(*dst, false, "as_type<float4>(uint4(0u))");
+            const uint32_t slot = src->index[0];
+            if (src->type == T_TGSM) {
+                const std::string g = "tgsm_g" + std::to_string(slot);
+                t.Line("{");
+                t.Line("    uint w_idx = " + t.SrcU(*off) + ".x / 4u;");
+                t.Line("    uint4 raw = uint4(" + g + "[w_idx], " + g + "[w_idx + 1], " + g + "[w_idx + 2], " + g + "[w_idx + 3]);");
+                t.Write(*dst, false, "as_type<float4>(raw)." + Translator::Swizzle(*src));
+                t.Line("}");
+            } else if (src->type == T_RESOURCE || src->type == T_UAV) {
+                t.uses_structured = true;
+                const std::string call = "ut_ld_structured(" + std::string(src->type == T_UAV ? "u" : "t") + std::to_string(slot) + ", 0u, 0u, as_type<uint>(" + t.Scalar(*off) + "))";
+                t.Write(*dst, false, call + "." + Translator::Swizzle(*src));
+            } else {
+                t.Write(*dst, false, "as_type<float4>(uint4(0u))");
+            }
             break;
         }
         case OP_F32TO16: {
@@ -1180,6 +1243,7 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
         for (uint32_t b = 0; b < 16; ++b)
             if (t.refl.constant_buffers & (1u << b)) src << ", device const float4* cb" << b << " [[buffer(" << b << ")]]";
         for (auto& r : resource_decls) src << ", " << r;
+        if (!vs) for (auto& u : uav_decls) src << ", " << u;   // pixel-shader UAVs (bound by the renderer, writes unobserved for now)
         for (auto& s : sampler_decls) src << ", " << s;
         src << ") {\n";
     }

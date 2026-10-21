@@ -173,6 +173,11 @@ void InvalidateCompiledCode(uint64_t host_begin, uint64_t host_end);
 
 /// Called on a guest fault with the guest rip and rax..r15, to print more than the engine knows.
 void SetFaultReporter(std::function<void(uint64_t, const uint64_t*)> reporter);
+/// A line of context printed with every fault report (the host call in progress, say); may be empty.
+void SetFaultContext(std::function<std::string(uint64_t fault_address)> context);
+/// A hook that may make a faulting guest address accessible (commit a reserved page, say); returning true retries
+/// the access instead of ending the thread.
+void SetDemandCommit(std::function<bool(uint64_t fault_address)> hook);
 
 /// Appends the guest rip of every thread currently inside compiled code.
 void SampleGuestRips(std::vector<uint64_t>& out, std::vector<std::array<uint64_t, 16>>* regs_out = nullptr);

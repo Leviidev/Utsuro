@@ -8,6 +8,7 @@
 #include "nt/kernel.h"
 
 #include <initializer_list>
+#include <vector>
 
 namespace utsuro::nt::xg {
 
@@ -18,5 +19,6 @@ uint64_t Export(const char* name);
 
 /// Calls the guest function `fn` with the arguments on the helper thread and returns its rax; `~0` when the helper is not available.
 uint64_t Call(Kernel& kernel, uint64_t fn, std::initializer_list<uint64_t> args);
+uint64_t Call(Kernel& kernel, uint64_t fn, const std::vector<uint64_t>& args);
 
 } // namespace utsuro::nt::xg

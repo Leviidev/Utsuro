@@ -51,6 +51,7 @@ struct Iface {
     uint32_t first_id {0};
     bool guessed {false};              ///< The GUID is a placeholder; the first unknown IID asked for adopts it.
     int base_slots {6};                ///< 6 for WinRT (IUnknown + IInspectable), 3 for plain COM.
+    static constexpr int kTrapSlots = 24;   ///< extra vtable entries after the methods that only log and fail (see Materialize)
     HostFn fallback;                   ///< Runs for methods without their own `fn` (plain COM).
     uint32_t inline_table {0};         ///< Non-zero: the object embeds a copy of the vtable at this offset (Xbox device contexts).
     std::vector<Guid> aliases;         ///< Other IIDs answered with this interface's pointer (its bases).
@@ -117,6 +118,7 @@ public:
     uint32_t GetActivationFactory(const std::string& name, const Guid& iid, uint64_t* out);
     /// An already-completed IAsyncOperation<T> (or IAsyncAction when kind is None); returns its guest pointer.
     uint64_t NewAsync(Out kind, uint64_t value, uint32_t hr = 0);
+    static std::string CurrentCallDescription();   ///< "in the host's IFoo::Bar" while a host method runs on this thread, else empty.
     /// A read-only vector of interface pointers (IVectorView<T> for any T); returns the guest pointer.
     uint64_t NewVectorView(std::vector<uint64_t> items);
     /// A read-only String -> interface map; `key_value_pairs` is key HSTRING, value pointer, key, value...

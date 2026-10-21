@@ -80,6 +80,18 @@ NTSTATUS NtContinue(Kernel& k, NtThread& t, SyscallArgs& a) {
     GuestThreadControl* ctl = t.control;
     GuestCpuState st;
     if (ctl == nullptr || !ctl->CaptureCpuState(&st)) return STATUS_NOT_SUPPORTED;
+    if (static const bool log = std::getenv("UTSURO_THROWLOG") != nullptr; log) {
+        const uint64_t stack_base = *reinterpret_cast<uint64_t*>(t.teb + 8), stack_limit = *reinterpret_cast<uint64_t*>(t.teb + 0x10);
+        const bool sane = c->Rsp >= stack_limit && c->Rsp < stack_base;
+        UT_INFO("[%llu] NtContinue to %s rsp %#llx flags %#x%s (%zu host call frames)", (unsigned long long)t.tid_, k.Describe(c->Rip).c_str(), (unsigned long long)c->Rsp, c->ContextFlags,
+                sane ? "" : " -- RSP OUTSIDE THE THREAD'S STACK", t.guest_frames.size());
+        if (!sane) {
+            uint64_t regs[16];
+            for (int i = 0; i < 16; ++i) regs[i] = st.gregs[i];
+            const auto frames = k.Backtrace(st.rip, regs, 12);
+            for (size_t i = 0; i < frames.size(); ++i) UT_INFO("    #%zu %s", i, k.Describe(frames[i]).c_str());
+        }
+    }
     uint32_t flags = c->ContextFlags;
     if ((flags & CONTEXT_AMD64) == 0) flags = CONTEXT_FULL;
     ContextToState(c, &st, flags);
@@ -130,6 +142,17 @@ NTSTATUS NtRaiseException(Kernel& k, NtThread& t, SyscallArgs& a) {
         // rsp+0x4f0, and run it.
         GuestCpuState st;
         if (t.control == nullptr || !t.control->CaptureCpuState(&st)) return STATUS_NOT_SUPPORTED;
+        if (static const bool log = std::getenv("UTSURO_THROWLOG") != nullptr; log) {
+            UT_INFO("[%llu] exception %#x raised at %s, rsp %#llx, %zu host call frames on this thread%s", (unsigned long long)t.tid_, rec->ExceptionCode, k.Describe(reinterpret_cast<uint64_t>(rec->ExceptionAddress)).c_str(),
+                    (unsigned long long)ctx->Rsp, t.guest_frames.size(), rec->ExceptionCode == 0xE06D7363 && rec->NumberParameters >= 2 && rec->ExceptionInformation[1] > 0x10000 ? "" : " (not C++)");
+            if (rec->ExceptionCode == 0xE06D7363 && rec->NumberParameters >= 2 && rec->ExceptionInformation[1] > 0x10000) {
+                const auto* o = reinterpret_cast<const uint32_t*>(rec->ExceptionInformation[1]);
+                UT_INFO("    thrown object: %08x %08x %08x %08x", o[0], o[1], o[2], o[3]);
+            }
+            uint64_t regs[16] = {ctx->Rax, ctx->Rcx, ctx->Rdx, ctx->Rbx, ctx->Rsp, ctx->Rbp, ctx->Rsi, ctx->Rdi, ctx->R8, ctx->R9, ctx->R10, ctx->R11, ctx->R12, ctx->R13, ctx->R14, ctx->R15};
+            const auto frames = k.Backtrace(ctx->Rip, regs, 10);
+            for (size_t i = 0; i < frames.size(); ++i) UT_INFO("    #%zu %s", i, k.Describe(frames[i]).c_str());
+        }
         const uint64_t sp = (ctx->Rsp - 0x200 - 0x4f0 - sizeof(EXCEPTION_RECORD)) & ~0xFull;
         std::memcpy(reinterpret_cast<void*>(sp), ctx, sizeof(CONTEXT));
         std::memcpy(reinterpret_cast<void*>(sp + 0x4f0), rec, sizeof(EXCEPTION_RECORD));

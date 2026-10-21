@@ -2,6 +2,7 @@
 // order follow WinDurango's IDL notes; a method without a body uses the generic default
 // (getters write zero, setters succeed, events hand out tokens).
 #include "nt/winrt.h"
+#include "nt/safe_mem.h"
 #include "nt/kernel.h"
 #include <cstdio>
 #include <cstdlib>
@@ -107,13 +108,117 @@ void RegisterClasses(Runtime& rt) {
             return r.NewObject("Windows.Xbox.Achievements.AchievementNotifier", {notifier_if});
         }, statics_if);
     }
-    // Microsoft.Xbox.Services.XboxLiveContext
+    // Windows.Kinect.KinectSensor: a console without a Kinect still hands out a sensor object (IsAvailable false);
+    // titles deref it (Forza Horizon 2 uses it for voice). Its methods are unknown by slot: they log, bool/pointer
+    // results stay zero, and they succeed.
+    {
+        Iface* sensor_if = &rt.DefineInterface("ghost:IKinectSensor", "00000000-0000-0000-0000-000000000000", {});
+        for (int i = 0; i < 64; ++i) { Method m; m.name = "slot" + std::to_string(6 + i); sensor_if->methods.push_back(std::move(m)); }
+        sensor_if->fallback = [sensor_if](Call& c) -> uint32_t {
+            // Getter-shaped calls (one zeroed 8-byte local in the caller's frame as the result) get a nested ghost
+            // object, so the title can keep walking the sensor's sub-objects; IsOpen/IsAvailable (slots 10/11 in the
+            // Kinect v2 layout: events, Open, Close, then the bools) stay false; everything else just succeeds.
+            const uint32_t slot = c.slot + 6;
+            int out = -1;
+            for (int i = 0; i < 4; ++i) {
+                const uint64_t a = c.Arg(i);
+                uint64_t v = 0;
+                if (a >= c.args.rsp && a < c.args.rsp + 0x10000 && (a & 7) == 0 && SafeRead(a, &v, 8) && v == 0) { out = i; break; }
+            }
+            std::string what = "S_OK";
+            if (out >= 0 && c.obj.class_name == "Windows.Kinect.KinectSensor" && (slot == 10 || slot == 11)) {
+                *c.Ptr<uint8_t>(out) = 0; what = "false";
+            } else if (out >= 0 && out == 0) {
+                Runtime& r = Runtime::Get();
+                Obj* sub = r.NewObject(c.obj.class_name + "#" + std::to_string(slot), {sensor_if});
+                sub->ghost = true;
+                ++sub->refs;
+                *c.Ptr<uint64_t>(out) = r.Pointer(*sub, *sensor_if);
+                what = "ghost object";
+            }
+            static std::atomic<int> shown {0};
+            if (shown++ < 60) UT_INFO("kinect: %s slot %u (%#llx, %#llx, %#llx) -> %s", c.obj.class_name.c_str(), slot, (unsigned long long)c.Arg(0), (unsigned long long)c.Arg(1), (unsigned long long)c.Arg(2), what.c_str());
+            return 0;
+        };
+        Iface* statics_if = &rt.DefineInterface("IKinectSensorStatics", "00000000-0000-0000-0000-000000000001", {});
+        statics_if->guessed = true;
+        statics_if->methods.push_back(Method {"GetDefault", Out::Ptr, 0, false, false, [sensor_if](Call& c) -> uint32_t {
+            Runtime& r = Runtime::Get();
+            static Obj* sensor = nullptr;
+            if (sensor == nullptr) { sensor = r.NewObject("Windows.Kinect.KinectSensor", {sensor_if}); sensor->ghost = true; }
+            ++sensor->refs;
+            *c.Ptr<uint64_t>(0) = r.Pointer(*sensor, *sensor_if);
+            return 0;
+        }});
+        rt.DefineClass("Windows.Kinect.KinectSensor", [](Runtime&) -> Obj* { return nullptr; }, statics_if);
+    }
+    // Microsoft.Xbox.Services.XboxLiveContext: there is no Xbox Live here. The context's properties (all of them are
+    // service getters, in an order that depends on the XSAPI build the title shipped) hand out "service" objects whose
+    // every method fails with E_FAIL, the way a service call fails on a console without a connection; titles handle
+    // that. The title calls the context's methods on the pointer the factory returned without a QueryInterface, so that
+    // pointer's vtable must be the context's own.
     {
         Iface* factory_if = &rt.DefineInterface("IXboxLiveContextFactory", "bedc781e-a29e-3333-9d97-7af19812192d", {});
         factory_if->methods.push_back(Method {"CreateXboxLiveContext", Out::Ptr, 1, false, false, [](Call& c) -> uint32_t {
             Runtime& r = Runtime::Get();
-            Obj* ctx = r.NewGhost("Microsoft.Xbox.Services.XboxLiveContext");
-            *c.Ptr<uint64_t>(1) = ctx->blocks[0];
+            static Iface* context_if = nullptr;
+            static Iface* service_if = nullptr;
+            if (context_if == nullptr) {
+                service_if = &r.DefineInterface("ghost:XboxLiveService", "00000000-0000-0000-0000-000000000000", {});
+                for (int i = 0; i < 64; ++i) { Method m; m.name = "slot" + std::to_string(6 + i); service_if->methods.push_back(std::move(m)); }
+                service_if->fallback = [](Call& c) -> uint32_t {
+                    // Service methods return an async operation through their last parameter, a pointer into the
+                    // caller's stack frame; the arguments before it are strings and objects on the heap. The operation
+                    // is handed back already failed, which is what a service call comes to with no connection.
+                    std::string shown;
+                    int out = -1;
+                    for (int i = 0; i < 11; ++i) {
+                        const uint64_t a = c.Arg(i);
+                        char t[64];
+                        std::snprintf(t, sizeof t, "%s%#llx", i ? ", " : "", (unsigned long long)a);
+                        shown += t;
+                        // The result pointer: a zeroed local in the caller's frame (strings passed by reference sit
+                        // on the stack too, but hold their header, not zero).
+                        uint64_t head[3] = {0, 0, 0};   // anything can sit in the stack slots past the real arguments
+                        if (a >= c.args.rsp && a < c.args.rsp + 0x10000 && (a & 7) == 0 && SafeRead(a, head, 8) && head[0] == 0) out = i;
+                        else if (a > 0x10000 && (a & 3) == 0 && SafeRead(a, head, 24) && (head[0] & 0xFFFFFFFF) == 1 && (head[0] >> 32) < 256 && head[2] > 0x10000)
+                            shown += " \"" + Utf16ToUtf8(Runtime::ReadHString(a)) + "\"";
+                    }
+                    Runtime& rr = Runtime::Get();
+                    if (out >= 0) *c.Ptr<uint64_t>(out) = rr.NewAsync(Out::Ptr, 0, 0x80004005u);
+                    UT_INFO("xsapi: %s slot %u (%s) -> %s", c.obj.class_name.c_str(), c.slot + 6, shown.c_str(), out >= 0 ? "failed async operation" : "S_OK (no result pointer)");
+                    GuestCpuState st;
+                    if (c.thread.control != nullptr && c.thread.control->CaptureCpuState(&st)) {
+                        uint64_t regs[16];
+                        for (int i = 0; i < 16; ++i) regs[i] = st.gregs[i];
+                        const auto frames = c.kernel.Backtrace(st.rip, regs, 8);
+                        for (size_t i = 0; i < frames.size(); ++i) UT_INFO("    #%zu %s", i, c.kernel.Describe(frames[i]).c_str());
+                    }
+                    return 0;   // methods without a result (Activate, subscriptions) succeed quietly
+                };
+                context_if = &r.DefineInterface("ghost:IXboxLiveContext", "00000000-0000-0000-0000-000000000000", {});
+                for (int i = 0; i < 48; ++i) { Method m; m.name = "slot" + std::to_string(6 + i); context_if->methods.push_back(std::move(m)); }
+                context_if->fallback = [](Call& c) -> uint32_t {
+                    Runtime& rr = Runtime::Get();
+                    if (c.slot == 0) {   // get_User comes first in every XSAPI build
+                        *c.Ptr<uint64_t>(0) = CurrentUserPointer();
+                        return 0;
+                    }
+                    const std::string key = "service" + std::to_string(c.slot);
+                    if (c.obj.u64[key] == 0) {
+                        Obj* svc = rr.NewObject("Microsoft.Xbox.Services.Service#" + std::to_string(c.slot + 6), {service_if});
+                        ++svc->refs;
+                        c.obj.u64[key] = rr.Pointer(*svc, *service_if);
+                    }
+                    UT_INFO("xsapi: XboxLiveContext slot %u -> service object", c.slot + 6);
+                    *c.Ptr<uint64_t>(0) = c.obj.u64[key];
+                    return 0;
+                };
+            }
+            Obj* ctx = r.NewObject("Microsoft.Xbox.Services.XboxLiveContext", {context_if});
+            ctx->ghost = true;
+            ++ctx->refs;
+            *c.Ptr<uint64_t>(1) = r.Pointer(*ctx, *context_if);
             return 0;
         }});
         rt.DefineClass("Microsoft.Xbox.Services.XboxLiveContext", [](Runtime& r) -> Obj* {
@@ -122,6 +227,16 @@ void RegisterClasses(Runtime& rt) {
     }
     // One signed-in user, id 1, who plays on the one pad.
     {
+        // GetTokenAndSignatureAsync: a result whose strings are all empty (there is no Xbox Live to sign); titles
+        // deref the result before looking at it.
+        rt.OverrideAllNamed("IUser", "GetTokenAndSignatureAsync", [](Call& c) -> uint32_t {
+            Runtime& r = Runtime::Get();
+            Iface* result_if = r.FindInterface("IGetTokenAndSignatureResult");
+            Obj* res = r.NewObject("Windows.Xbox.System.GetTokenAndSignatureResult", {result_if});
+            ++res->refs;
+            *c.Ptr<uint64_t>(c.iface.methods[c.slot].ret_arg) = r.NewAsync(Out::Ptr, r.Pointer(*res, *result_if));
+            return 0;
+        });
         rt.Override("IUserStatics", "get_Users", [](Call& c) -> uint32_t {
             *c.Ptr<uint64_t>(0) = Runtime::Get().NewVectorView({CurrentUserPointer()});
             return 0;

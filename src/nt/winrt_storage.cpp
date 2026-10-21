@@ -467,6 +467,7 @@ void RegisterStorage(Runtime& rt) {
         uint64_t* out = c.Ptr<uint64_t>(OutIndex(c));
         const uint64_t s = TakeScratch();
         auto items = std::make_shared<std::vector<uint64_t>>();
+        auto missing = std::make_shared<bool>(false);
         c.thread.CallGuest(EachOf(c.Arg(0), IterableOfString(), s, [=](uint64_t name, Cont next) {
             const std::string n = Utf16ToUtf8(Runtime::ReadHString(name));
             std::vector<uint8_t> data;
@@ -480,11 +481,15 @@ void RegisterStorage(Runtime& rt) {
             if (found) {
                 items->push_back(Runtime::Get().MakeHString(Utf8ToUtf16(n)));
                 items->push_back(NewHostBuffer(data));
+            } else {
+                *missing = true;
             }
             return next(0);
         }, [=](uint64_t) {
             Runtime& rr = Runtime::Get();
-            *out = rr.NewAsync(Out::Ptr, rr.NewMapView(*items));
+            // The console fails the whole operation when a blob is absent; titles rely on that (Forza Horizon 2 reads
+            // `Current` of the result map without checking, and takes the "no profile yet" path from the exception).
+            *out = *missing ? rr.NewAsync(Out::Ptr, 0, 0x80070002u) : rr.NewAsync(Out::Ptr, rr.NewMapView(*items));
             GiveScratch(s);
             return GuestStep::Return(0);
         }));

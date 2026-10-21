@@ -1780,6 +1780,15 @@ static void RegisterGenerated(Runtime& rt) {
     // guessed GUID
         Get("get_Signature", Ptr),
         Get("get_Token", Ptr),
+        Get("get_XboxUserHash", Ptr),
+        Get("get_Gamertag", Ptr),
+        Get("get_AgeGroup", Ptr),
+        Get("get_Privileges", Ptr),
+        Get("get_WebAccountId", Ptr),
+        Get("get_Reserved", Ptr),
+        Get("slot14", Ptr), Get("slot15", Ptr), Get("slot16", Ptr), Get("slot17", Ptr), Get("slot18", Ptr), Get("slot19", Ptr),
+        Get("slot20", Ptr), Get("slot21", Ptr), Get("slot22", Ptr), Get("slot23", Ptr), Get("slot24", Ptr), Get("slot25", Ptr),
+        Get("slot26", Ptr), Get("slot27", Ptr), Get("slot28", Ptr), Get("slot29", Ptr),
     }, true);
         rt.DefineClass("Windows.Xbox.System.GetTokenAndSignatureResult", [&](Runtime& r) -> Obj* { return r.NewObject("Windows.Xbox.System.GetTokenAndSignatureResult", {&i_Windows_Xbox_System_GetTokenAndSignatureResult}); }, nullptr);
     }

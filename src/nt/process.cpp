@@ -78,6 +78,36 @@ bool Kernel::Boot(std::string& error) {
     winrt::Runtime::Get().Init(*this);
     InstallTracepointsFor("ntdll.dll", ntdll_base_);
     timer_thread_ = std::thread([this] { TimerThreadMain(); });
+    SetDemandCommit([this](uint64_t address) -> bool {
+        const auto info = vm_->Query(address);
+        if (info.state != MEM_RESERVE || info.type != MEM_PRIVATE) return false;
+        uint64_t base = AlignDown(address, 0x10000), size = 0x10000;
+        if (base < info.allocation_base) base = info.allocation_base;
+        const NTSTATUS rc = vm_->Allocate(&base, &size, MEM_COMMIT, PAGE_READWRITE);
+        static std::atomic<int> shown {0};
+        if (shown++ < 20 || (shown & 0x3FF) == 0) UT_WARN("vm: demand-committed %#llx (touched %#llx in the reservation at %#llx) -> %#x", (unsigned long long)base, (unsigned long long)address, (unsigned long long)info.allocation_base, (uint32_t)rc);
+        return rc == STATUS_SUCCESS;
+    });
+    SetFaultContext([this](uint64_t address) {
+        std::string out;
+        const std::string call = winrt::Runtime::CurrentCallDescription();
+        if (!call.empty()) out += "while " + call + "\n";
+        const auto info = vm_->Query(address);
+        char b[200];
+        std::snprintf(b, sizeof b, "the address is in a run at %#llx+%#llx (allocation base %#llx): state %#x protect %#x type %#x %s", (unsigned long long)info.base, (unsigned long long)info.size, (unsigned long long)info.allocation_base, info.state, info.protect, info.type, info.name.c_str());
+        out += b;
+        // The guest's own call chain, from the state saved at the system call this host code is serving.
+        if (auto t = CurrentThread(); t != nullptr && t->control != nullptr) {
+            GuestCpuState st;
+            if (t->control->CaptureCpuState(&st)) {
+                uint64_t regs[16];
+                for (int i = 0; i < 16; ++i) regs[i] = st.gregs[i];
+                const auto frames = Backtrace(st.rip, regs, 14);
+                for (size_t i = 0; i < frames.size(); ++i) out += "\n    guest #" + std::to_string(i) + " " + Describe(frames[i]);
+            }
+        }
+        return out;
+    });
     SetFaultReporter([this](uint64_t rip, const uint64_t* regs) {
         const auto frames = Backtrace(rip, regs, 24);
         for (size_t i = 0; i < frames.size(); ++i) UT_WARN("    #%zu %s", i, Describe(frames[i]).c_str());
@@ -94,8 +124,11 @@ bool Kernel::Boot(std::string& error) {
     if (const char* sm = std::getenv("UTSURO_SAMPLE")) {
         // Histogram of guest rips over `sm` seconds, printed once: where is the time going?
         const int seconds = std::max(1, std::atoi(sm));
-        std::thread([this, seconds] {
+        const char* colon = std::strchr(sm, ':');   // UTSURO_SAMPLE=secs[:delay]: start sampling after `delay` seconds
+        const int delay = colon ? std::atoi(colon + 1) : 0;
+        std::thread([this, seconds, delay] {
             pthread_setname_np("utsuro-sampler");
+            if (delay > 0) std::this_thread::sleep_for(std::chrono::seconds(delay));
             std::map<uint64_t, int> hist;
             std::map<std::string, int> pairs;
             std::map<std::string, int> chains;
@@ -111,8 +144,14 @@ bool Kernel::Boot(std::string& error) {
                         // The first few image-looking words on the stack, as a crude call chain.
                         std::string chain;
                         int got = 0;
+                        uint64_t mapped_page = 0;   // the stack word must be on a mapped page (rsp can sit near the top of the stack)
                         for (uint64_t w = 0; w < 400 && got < 7; ++w) {
-                            const uint64_t v = *reinterpret_cast<uint64_t*>(regs[i][4] + w * 8);
+                            const uint64_t addr = regs[i][4] + w * 8;
+                            if ((addr & ~0xFFFull) != mapped_page) {
+                                if (msync(reinterpret_cast<void*>(addr & ~0xFFFull), 0x1000, MS_ASYNC) != 0) break;
+                                mapped_page = addr & ~0xFFFull;
+                            }
+                            const uint64_t v = *reinterpret_cast<uint64_t*>(addr);
                             if (v < 0x1000000000ull) continue;
                             std::string d = Describe(v);
                             if (d.empty() || d[0] == '0' || d.find("+0x") == std::string::npos || d.find("+0x0") == 0) continue;

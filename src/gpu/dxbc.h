@@ -27,6 +27,8 @@ struct ShaderReflection {
     uint32_t textures {0};           ///< Bit i set: t i is declared (low 32 slots).
     uint32_t samplers {0};
     uint32_t texture_dimension[128] {};   ///< D3D10_SB_RESOURCE_DIMENSION per declared slot.
+    uint8_t buffer_index[32] {};          ///< Metal buffer index of a structured/raw buffer SRV in slot i (vertex and pixel stages; 0 = none).
+    uint8_t uav_index[64] {};             ///< Metal buffer index of a structured/raw buffer UAV in slot i (0 = none).
     bool writes_depth {false};
     uint32_t outputs_written {0};    ///< SV_Target mask for pixel shaders.
     uint32_t uavs {0};

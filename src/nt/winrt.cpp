@@ -1,5 +1,7 @@
 #include <atomic>
+#include <set>
 #include "nt/winrt.h"
+#include "nt/safe_mem.h"
 
 #include "nt/d3d.h"
 #include "nt/xaudio2.h"
@@ -121,7 +123,9 @@ void Runtime::Init(Kernel& kernel) {
 }
 
 void Runtime::Materialize(Iface& iface) {
-    const size_t slots = static_cast<size_t>(iface.base_slots) + iface.methods.size();
+    // Trap slots follow the real table: a title calling a method past the ones defined here lands in Dispatch (logged,
+    // E_NOTIMPL) instead of executing the bytes of the first stub as an address.
+    const size_t slots = static_cast<size_t>(iface.base_slots) + iface.methods.size() + Iface::kTrapSlots;
     iface.vtable = AllocGuest(slots * 8, 16);
     iface.first_id = static_cast<uint32_t>(method_table_.size());
     for (size_t s = 0; s < slots; ++s) {
@@ -226,7 +230,7 @@ Obj* Runtime::NewObject(const std::string& class_name, std::vector<Iface*> iface
     for (size_t i = 0; i < o->ifaces.size(); ++i) {
         Iface* f = o->ifaces[i];
         if (f->vtable == 0) Materialize(*f);
-        const size_t slots = static_cast<size_t>(f->base_slots) + f->methods.size();
+        const size_t slots = static_cast<size_t>(f->base_slots) + f->methods.size() + Iface::kTrapSlots;
         const size_t block_size = f->inline_table != 0 ? f->inline_table + slots * 8 + 64 : block_bytes;
         uint64_t block = 0;
         {
@@ -316,8 +320,22 @@ uint64_t Runtime::AddGhostInterface(Obj& obj, const Guid& iid) {
         f.methods.push_back(std::move(m));
     }
     f.fallback = [](Call& c) -> uint32_t {
-        UT_INFO("winrt ghost: %s %s slot %u (%#llx, %#llx, %#llx)", c.obj.class_name.c_str(), c.iface.iid.ToString().c_str(), c.slot + 6,
-                (unsigned long long)c.Arg(0), (unsigned long long)c.Arg(1), (unsigned long long)c.Arg(2));
+        // A getter-shaped call (the first argument is a zeroed 8-byte local in the caller's frame, where C++/CX keeps
+        // the hat pointer it is about to receive) gets a nested ghost object: titles deref what a getter returns
+        // (Minecraft: GameChat's ChatManager) and would not check it for null. Other results stay zero.
+        std::string what;
+        const uint64_t a = c.Arg(0);
+        uint64_t v = 1;
+        if (a >= c.args.rsp && a < c.args.rsp + 0x10000 && (a & 7) == 0 && SafeRead(a, &v, 8) && v == 0) {
+            Runtime& r = Runtime::Get();
+            Obj* sub = r.NewObject(c.obj.class_name + "#" + std::to_string(c.slot + 6), {r.activation_factory_});
+            sub->ghost = true;
+            ++sub->refs;
+            *c.Ptr<uint64_t>(0) = r.AddGhostInterface(*sub, c.iface.iid);
+            what = " -> ghost object";
+        }
+        UT_INFO("winrt ghost: %s %s slot %u (%#llx, %#llx, %#llx)%s", c.obj.class_name.c_str(), c.iface.iid.ToString().c_str(), c.slot + 6,
+                (unsigned long long)c.Arg(0), (unsigned long long)c.Arg(1), (unsigned long long)c.Arg(2), what.c_str());
         return 0;
     };
     Materialize(f);
@@ -393,6 +411,18 @@ std::string Runtime::NameOf(uint32_t number) const {
     const auto& [iface, slot] = method_table_[number - kBase];
     const uint32_t index = slot >= static_cast<uint32_t>(iface->base_slots) ? slot - iface->base_slots : slot;
     return index < iface->methods.size() ? iface->name + "::" + iface->methods[index].name : iface->name + "::#" + std::to_string(slot);
+}
+
+thread_local const Method* t_current_call = nullptr;   ///< The host method this thread is executing, for fault reports.
+thread_local const Iface* t_current_iface = nullptr;
+thread_local uint64_t t_current_caller = 0;             ///< The title's return address for that call.
+thread_local uint64_t t_current_args[4] = {};
+
+std::string Runtime::CurrentCallDescription() {
+    if (t_current_call == nullptr || t_current_iface == nullptr) return {};
+    char b[160];
+    std::snprintf(b, sizeof b, " (%#llx, %#llx, %#llx, %#llx) called from ", (unsigned long long)t_current_args[0], (unsigned long long)t_current_args[1], (unsigned long long)t_current_args[2], (unsigned long long)t_current_args[3]);
+    return "in the host's " + t_current_iface->name + "::" + t_current_call->name + b + Get().kernel_->Describe(t_current_caller);
 }
 
 bool Runtime::Dispatch(NtThread& thread, uint32_t number, SyscallArgs& args, uint64_t* result) {
@@ -474,6 +504,26 @@ bool Runtime::Dispatch(NtThread& thread, uint32_t number, SyscallArgs& args, uin
     default: break;
     }
 method:
+    if (slot - iface->base_slots >= iface->methods.size()) {
+        // A trap slot: the title's idea of this interface has more methods than ours.
+        static std::mutex seen_mutex;
+        static std::set<std::pair<const Iface*, uint32_t>> seen;
+        bool first = false;
+        { std::scoped_lock lock {seen_mutex}; first = seen.insert({iface, slot}).second; }
+        if (first) {
+            UT_WARN("winrt: %s (%s) has %zu methods but slot %u was called (method index %u) on a %s", iface->name.c_str(), iface->iid.ToString().c_str(), iface->methods.size(), slot,
+                    slot - iface->base_slots, obj->class_name.c_str());
+            GuestCpuState st;
+            if (thread.control != nullptr && thread.control->CaptureCpuState(&st)) {
+                uint64_t regs[16];
+                for (int i = 0; i < 16; ++i) regs[i] = st.gregs[i];
+                const auto frames = kernel_->Backtrace(st.rip, regs, 10);
+                for (size_t i = 0; i < frames.size(); ++i) UT_WARN("    #%zu %s", i, kernel_->Describe(frames[i]).c_str());
+            }
+        }
+        *result = 0x80004001u;   // E_NOTIMPL
+        return true;
+    }
     Method& m = iface->methods[slot - iface->base_slots];
     Call call {*kernel_, thread, args, *obj, *iface, slot - static_cast<uint32_t>(iface->base_slots)};
     UT_DEBUG("winrt: %s.%s::%s", obj->class_name.c_str(), iface->name.c_str(), m.name.c_str());
@@ -493,6 +543,11 @@ method:
             }
         }
     }
+    t_current_call = &m;
+    t_current_iface = iface;
+    t_current_caller = args.rsp != 0 ? *reinterpret_cast<const uint64_t*>(args.rsp) : 0;
+    for (int i = 0; i < 4; ++i) t_current_args[i] = args[i + 1];
+    struct Clear { ~Clear() { t_current_call = nullptr; } } clear_on_exit;
     if (m.fn) { const uint32_t hr = m.fn(call); *result = call.wide_set ? call.wide_result : hr; return true; }
     if (iface->fallback) { *result = iface->fallback(call); return true; }
     if (m.ctor) {

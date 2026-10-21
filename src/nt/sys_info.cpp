@@ -196,7 +196,27 @@ NTSTATUS NtQueryInformationProcess(Kernel& k, NtThread&, SyscallArgs& a) {
     }
 }
 
-NTSTATUS NtSetInformationProcess(Kernel&, NtThread&, SyscallArgs&) { return STATUS_SUCCESS; }
+// NtSetInformationProcess(Process, Class, Buffer, Length)
+NTSTATUS NtSetInformationProcess(Kernel& k, NtThread&, SyscallArgs& a) {
+    const uint32_t cls = static_cast<uint32_t>(a[1]);
+    auto* buf = a.Ptr<uint8_t>(2);
+    const uint32_t len = static_cast<uint32_t>(a[3]);
+    if (cls == 41 && buf != nullptr && (len == 0x28 || len == 0x18)) {
+        // ProcessThreadStackAllocation: RtlCreateUserStack (2012+ ntdll) has the kernel reserve a thread or fiber
+        // stack and hand back its base; it then commits the top itself. PROCESS_STACK_ALLOCATION_INFORMATION
+        // {ReserveSize, ZeroBits, StackBase}, in the _EX form after a 16-byte node preference header.
+        // Committed in full, like thread stacks (NewThread): there is no guard-page growth here, and the title's
+        // fibers run past the 128 KB the caller commits.
+        auto* info = reinterpret_cast<uint64_t*>(buf + (len == 0x28 ? 0x10 : 0));
+        uint64_t base = 0, size = info[0];
+        const NTSTATUS rc = k.Vm().Allocate(&base, &size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        UT_DEBUG("process: stack reservation of %#llx bytes -> %#x at %#llx", (unsigned long long)info[0], (uint32_t)rc, (unsigned long long)base);
+        if (rc != STATUS_SUCCESS) return rc;
+        info[2] = base;
+        return STATUS_SUCCESS;
+    }
+    return STATUS_SUCCESS;
+}
 
 // NtQuerySystemInformation(Class, Buffer, Length, PULONG Ret)
 NTSTATUS NtQuerySystemInformation(Kernel& k, NtThread&, SyscallArgs& a) {

@@ -7,6 +7,7 @@
 #include <cstring>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 namespace utsuro::nt::xg {
 namespace {
@@ -92,7 +93,9 @@ void NoteImage(const std::string& image, uint64_t base) {
 
 uint64_t Export(const char* name) { return g_base != 0 ? FindExport(g_base, name) : 0; }
 
-uint64_t Call(Kernel& k, uint64_t fn, std::initializer_list<uint64_t> args) {
+uint64_t Call(Kernel& k, uint64_t fn, std::initializer_list<uint64_t> args) { return Call(k, fn, std::vector<uint64_t>(args)); }
+
+uint64_t Call(Kernel& k, uint64_t fn, const std::vector<uint64_t>& args) {
     std::scoped_lock lock {g_mutex};
     if (!StartHelper(k) || fn == 0) return ~0ull;
     g_job->fn = fn;

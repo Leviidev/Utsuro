@@ -46,6 +46,9 @@ Res* ResAt(uint64_t pointer) {
         auto it = g_res_cache.find(pointer);
         if (it != g_res_cache.end()) return it->second;
     }
+    // Titles bind sentinels such as -1 now and then; a pointer that is not one must not be followed.
+    uint64_t probe = 0;
+    if ((pointer & 7) != 0 || pointer < 0x10000 || !SafeRead(pointer + 8, &probe, 8)) return nullptr;
     Obj* o = Runtime::Get().FromPointer(pointer);
     if (o == nullptr || !o->user) return nullptr;
     Res* r = static_cast<Res*>(o->user.get());
@@ -132,6 +135,13 @@ void OnCreate(Call& c, const winrt::Method& m, Obj& o) {
         } else {
             d.width = U32(desc, 0); d.height = U32(desc, 1); d.depth = std::max(1u, U32(desc, 2)); d.mips = MipCount(U32(desc, 3), d.width, d.height, d.depth);
             d.format = U32(desc, 4); usage = U32(desc, 5); bind = U32(desc, 6); misc = U32(desc, 8);
+        }
+        {
+            // MipLevels 0 asks for the whole chain; GetDesc must then report the chain's length, as D3D does (Forza
+            // Horizon 2 sizes a per-mip loop from it and a 0 runs that loop off the end of its arrays).
+            std::string& stored = o.str["desc"];
+            const size_t at = n == "CreateTexture1D" ? 4 : (n == "CreateTexture3D" ? 12 : 8);
+            if (stored.size() >= at + 4) std::memcpy(&stored[at], &d.mips, 4);
         }
         d.shader_resource = (bind & 0x8) != 0 || bind == 0;
         d.render_target = (bind & 0x20) != 0;
@@ -357,12 +367,15 @@ struct TileLevel { uint64_t base {0}, row_stride {0}, tile_bytes {0}; uint32_t w
 struct TileModel {
     bool ok {false};
     bool linear {false};           ///< rows (of elements) one pitch apart, rather than micro tiles
+    uint64_t computer {0};         ///< the XGTextureAddressComputer, kept for 2D tilings, whose CopyFromSubresource (vtable slot 6) detiles
+    uint64_t copy_fn {0};
     uint32_t bytes {0};            ///< per element
     uint32_t levels_per_slice {0};
     std::vector<TileLevel> levels; ///< [slice * levels_per_slice + mip]
 };
 std::mutex g_tile_mutex;
 std::map<std::string, TileModel> g_tile_models;
+uint64_t g_probe_dest = 0, g_probe_comp = 0, g_probe_pitch = 0, g_probe_vtable7 = 0; uint32_t g_probe_key = 0;   // UTSURO_XGPROBE
 
 uint32_t Morton8(uint32_t x, uint32_t y) {   // bit i of x and y interleaved: x0 y0 x1 y1 x2 y2
     return (x & 1) | ((y & 1) << 1) | ((x & 2) << 1) | ((y & 2) << 2) | ((x & 4) << 2) | ((y & 4) << 3);
@@ -383,6 +396,10 @@ TileModel BuildTileModel(const gpu::TextureDesc& info, uint32_t tile_mode, uint3
     if (xg::Call(*g_kernel, create, {desc, out}) != 0 || *reinterpret_cast<uint64_t*>(out) == 0) return m;
     const uint64_t comp = *reinterpret_cast<uint64_t*>(out);
     const uint64_t* vtable = *reinterpret_cast<uint64_t**>(comp);
+    if (static const bool probe = std::getenv("UTSURO_XGPROBE") != nullptr; probe) {
+        static std::once_flag once;
+        std::call_once(once, [&] { for (int i = 0; i < 16; ++i) UT_INFO("xg: computer vtable[%d] = %s", i, g_kernel->Describe(vtable[i]).c_str()); });
+    }
     const uint64_t subres_fn = vtable[3];
     m.levels_per_slice = info.mips;
     const bool linear_layout = tile_mode == 0 || tile_mode == 1;
@@ -407,7 +424,36 @@ TileModel BuildTileModel(const gpu::TextureDesc& info, uint32_t tile_mode, uint3
             m.levels.push_back(lv);
         }
     }
-    xg::Call(*g_kernel, vtable[1], {comp});   // Release
+    if (static const bool probe = std::getenv("UTSURO_XGPROBE") != nullptr; probe && ok && !linear_layout && info.width >= 64 && info.height >= 16 && info.array_size == 1) {
+        // Which slots are GetTexelElementOffsetBytes and CopyFromSubresource in this xg_x.dll: ask for a texel whose 1D
+        // thin-tiled offset is known, and copy mip 0 out and compare with our own detiling.
+        static std::once_flag once;
+        std::call_once(once, [&] {
+            const TileLevel& lv = m.levels[0];
+            const uint32_t x = 9, y = 3;
+            const uint64_t expect = lv.base + (y / 8) * lv.row_stride + (x / 8) * lv.tile_bytes + Morton8(x & 7, y & 7) * m.bytes;
+            const uint64_t bit = Runtime::Get().AllocGuest(16, 16);
+            for (int slot = 3; slot <= 6; ++slot) {
+                const uint64_t r = xg::Call(*g_kernel, vtable[slot], {comp, 0, 0, x, y, 0, 0, bit});
+                UT_INFO("xg probe: %ux%u fmt %u tile %u: slot %d (texel 9,3) -> %#llx, expected 1D offset %#llx", info.width, info.height, info.format, tile_mode, slot, (unsigned long long)r, (unsigned long long)expect);
+            }
+            const uint64_t pitch = static_cast<uint64_t>(lv.width) * m.bytes;
+            const uint64_t dest = Runtime::Get().AllocGuest(pitch * lv.height + 64, 64);
+            std::memset(reinterpret_cast<void*>(dest), 0xA5, pitch * lv.height);
+            // The texture memory itself is not known here; the caller's placement is: look it up from the first placed resource with this model later.
+            g_probe_dest = dest; g_probe_comp = comp; g_probe_pitch = pitch; g_probe_vtable7 = vtable[7]; g_probe_key = info.width * 1000003u + info.height * 1009u + info.format;
+            return;   // keep the computer alive for the copy probe
+        });
+        if (g_probe_comp == comp) { m.ok = ok; return m; }
+    }
+    if (!linear_layout && tile_mode >= 4) {
+        // 2D tilings (bank and pipe swizzled macro tiles): xg_x.dll copies them out itself. 1D thin tiling (mode 2) is
+        // the Morton layout above, which the host does faster.
+        m.computer = comp;
+        m.copy_fn = vtable[6];
+    } else {
+        xg::Call(*g_kernel, vtable[1], {comp});   // Release
+    }
     m.ok = ok;
     return m;
 }
@@ -504,6 +550,35 @@ void UploadPlacement(Res& r) {
         if (got == 0) { r.placement_dirty = true; r.next_try_frame = g_frame.load() + 20; return fail("not readable"); }
     }
     r.placement_bytes = raw.size();
+    if (g_probe_comp != 0 && g_probe_key == info.width * 1000003u + info.height * 1009u + info.format && !model->linear) {
+        static std::once_flag once;
+        std::call_once(once, [&] {
+            const TileLevel& lv = model->levels[0];
+            const uint64_t* vt = *reinterpret_cast<uint64_t**>(g_probe_comp);
+            const uint64_t slice = g_probe_pitch * lv.height;
+            const std::vector<std::pair<const char*, std::vector<uint64_t>>> variants = {
+                {"(dest,0,0,src,pitch,slice)", {g_probe_dest, 0, 0, r.placement, g_probe_pitch, slice}},
+                {"(dest,pitch,slice,0,0,src)", {g_probe_dest, g_probe_pitch, slice, 0, 0, r.placement}},
+                {"(dest,pitch,slice,0,src)", {g_probe_dest, g_probe_pitch, slice, 0, r.placement}},
+                {"(dest,0,src,pitch,slice)", {g_probe_dest, 0, r.placement, g_probe_pitch, slice}},
+            };
+            for (int slot = 6; slot <= 7; ++slot) for (const auto& [name, a] : variants) {
+                std::memset(reinterpret_cast<void*>(g_probe_dest), 0xA5, slice);
+                std::vector<uint64_t> args {g_probe_comp}; args.insert(args.end(), a.begin(), a.end());
+                const uint64_t hr = xg::Call(*g_kernel, vt[slot], args);
+                size_t same = 0, total = 0, nonfill = 0;
+                const auto* dst = reinterpret_cast<const uint8_t*>(g_probe_dest);
+                for (uint32_t y = 0; y < std::min<uint32_t>(lv.height, 32); ++y) for (uint32_t x = 0; x < std::min<uint32_t>(lv.width, 64); ++x) {
+                    const uint64_t src = lv.base + (y / 8) * lv.row_stride + (x / 8) * lv.tile_bytes + Morton8(x & 7, y & 7) * model->bytes;
+                    const uint8_t* d = dst + y * g_probe_pitch + x * model->bytes;
+                    ++total;
+                    if (d[0] != 0xA5) ++nonfill;
+                    if (src + model->bytes <= raw.size() && std::memcmp(raw.data() + src, d, model->bytes) == 0) ++same;
+                }
+                UT_INFO("xg probe: slot %d %s -> %#llx; %zu written, %zu of %zu match our 1D detile", slot, name, (unsigned long long)hr, nonfill, same, total);
+            }
+        });
+    }
     {
         uint64_t h = 0x84222325CBF29CE4ull;
         for (size_t at = 0; at < raw.size(); at += 64 << 10) h = HashWords(raw.data() + at, std::min<size_t>(64 << 10, raw.size() - at) & ~7ull, h);
@@ -523,6 +598,19 @@ void UploadPlacement(Res& r) {
             if (!level_present(lv)) { if (slice == 0 && mip + 1 > lowest_missing) lowest_missing = mip + 1; continue; }
             const uint32_t row_pitch = lv.width * bytes;
             linear.resize(static_cast<size_t>(row_pitch) * lv.height);
+            if (model->copy_fn != 0) {
+                // The console's own detiling, into a guest scratch buffer the helper thread can write.
+                static uint64_t scratch = 0, scratch_size = 0;
+                const uint64_t need = static_cast<uint64_t>(row_pitch) * lv.height + 64;
+                if (need > scratch_size) { scratch = Runtime::Get().AllocGuest(std::max<uint64_t>(need, 1u << 20), 64); scratch_size = std::max<uint64_t>(need, 1u << 20); }
+                const uint64_t hr = xg::Call(*g_kernel, model->copy_fn, {model->computer, scratch, 0, static_cast<uint64_t>(slice) * info.mips + mip, r.placement, row_pitch, static_cast<uint64_t>(row_pitch) * lv.height});
+                if (hr != 0) {
+                    static std::atomic<int> shown {0};
+                    if (shown++ < 10) UT_INFO("d3d: xg CopyFromSubresource failed (%#llx) for %ux%u fmt %u mip %u tile %u", (unsigned long long)hr, info.width, info.height, info.format, mip, r.tile_mode);
+                    continue;
+                }
+                std::memcpy(linear.data(), reinterpret_cast<const void*>(scratch), linear.size());
+            } else
             for (uint32_t y = 0; y < lv.height; ++y) {
                 if (model->linear) {
                     const uint64_t src = lv.base + static_cast<uint64_t>(y) * lv.row_stride;

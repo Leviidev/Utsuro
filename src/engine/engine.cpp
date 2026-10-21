@@ -237,6 +237,8 @@ std::atomic<uint64_t> g_alignment_fixups {0};
 /// The guest's arena, so that a signal handler can tell a guest address from any other.
 std::atomic<utsuro::GuestAddressSpace*> g_arena_space {nullptr};
 std::atomic<uint64_t> g_arena_begin {0};
+extern std::atomic<uint64_t> g_arena_end;
+std::function<bool(uint64_t)> g_demand_commit;   ///< SetDemandCommit: commits a reserved guest page a fault landed on.
 
 /// Declared here and defined below: the fault handler wants to name the guest process
 /// it is reporting on, and the definition sits with the rest of the syscall plumbing.
@@ -282,6 +284,14 @@ bool RecoverAlignmentFault(int signal, siginfo_t* info, void* raw_context) {
     }
     if (g_active.context == nullptr || g_active.thread == nullptr) {
         return false;
+    }
+    {
+        // Memory the guest reserved but never committed, touched anyway: the console kernel's page granularity and
+        // commit-on-touch allocators mean titles get away with it there; the kernel hook commits the page and the
+        // access is retried (from generated code or from a host handler reading guest memory alike).
+        const auto address = reinterpret_cast<uint64_t>(info->si_addr);
+        const uint64_t begin = g_arena_begin.load(std::memory_order_acquire), end = g_arena_end.load(std::memory_order_acquire);
+        if (address >= begin && address < end && g_demand_commit && g_demand_commit(address)) return true;
     }
     // The call/return stack ran off either end. Inside compiled code the host stack
     // pointer is FEXCore's call/return stack -- a cache of return addresses that a CALL
@@ -541,6 +551,7 @@ struct FaultRegs {
 };
 thread_local FaultRegs g_fault_regs;
 std::function<void(uint64_t, const uint64_t*)> g_fault_reporter;
+std::function<std::string(uint64_t)> g_fault_context;
 
 bool EndFaultedGuestThread(int signal, siginfo_t* info, void* raw_context) {
 #if defined(__aarch64__) && defined(__APPLE__)
@@ -635,6 +646,13 @@ bool EndFaultedGuestThread(int signal, siginfo_t* info, void* raw_context) {
         // The lock-free map only: this is a signal handler, and the range list's shared_mutex
         // blocks inside libc++ even when asked to try -- on a destroyed one it throws.
         auto* space = g_current_syscalls != nullptr ? g_current_syscalls->Space() : nullptr;
+        if (!in_generated_code && std::getenv("UTSURO_HOSTBT") != nullptr) {
+            // Not generated code: most often a host handler reading guest memory, so say which (not signal-safe).
+            void* frames[40];
+            const int n = backtrace(frames, 40);
+            backtrace_symbols_fd(frames, n, 2);
+        }
+        if (g_fault_context) { const std::string ctx = g_fault_context(address); if (!ctx.empty()) UT_WARN("%s", ctx.c_str()); }
         UT_WARN("guest fault at %#llx: %s", static_cast<unsigned long long>(address),
                     space != nullptr && space->MaybeCommitted(address) ? "inside memory the guest was given"
                                                                        : "nothing is mapped there");
@@ -1461,6 +1479,8 @@ GuestThread* FexEngine::Current() {
 }
 
 void SetFaultReporter(std::function<void(uint64_t, const uint64_t*)> reporter) { g_fault_reporter = std::move(reporter); }
+void SetFaultContext(std::function<std::string(uint64_t)> context) { g_fault_context = std::move(context); }
+void SetDemandCommit(std::function<bool(uint64_t)> hook) { g_demand_commit = std::move(hook); }
 
 void SampleGuestRips(std::vector<uint64_t>& out, std::vector<std::array<uint64_t, 16>>* regs_out) {
 #if defined(__aarch64__) && defined(__APPLE__)

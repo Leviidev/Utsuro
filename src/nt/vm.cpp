@@ -1,4 +1,5 @@
 #include "nt/vm.h"
+#include <cstdlib>
 
 #include "engine/log.h"
 
@@ -163,8 +164,11 @@ NTSTATUS VirtualMemory::Allocate(uint64_t* base_io, uint64_t* size_io, uint32_t 
         r.name = name;
         r.pages.assign(extent / kPage, 0);
         if (commit) {
+            // The whole 64 KB-rounded extent, not just the bytes asked for: the console's allocators hand out whole
+            // pages and titles use the rounding tail (Forza Horizon 2 keeps objects past the end of a graphics
+            // allocation that was requested with an odd size).
             const uint64_t first = (base == 0 ? 0 : (*base_io - start)) / kPage;
-            const uint64_t count = used / kPage - first;
+            const uint64_t count = extent / kPage - first;
             for (uint64_t i = 0; i < count; ++i) r.pages[first + i] = nt_prot;
             SyncArena(r, first, count);
         }
@@ -178,14 +182,24 @@ NTSTATUS VirtualMemory::Allocate(uint64_t* base_io, uint64_t* size_io, uint32_t 
     // Commit inside an existing reservation.
     Region* r = RegionAt(base);
     if (r == nullptr) return STATUS_ACCESS_DENIED;
+    if (r->kind == RegionKind::Image) {
+        // Windows refuses this; a title that gets here is usually committing at a garbage address (a stack whose
+        // reservation step was skipped, say) and quietly turning its own code into data would hide that.
+        UT_WARN("vm: commit of %#llx+%#llx lands inside the image %s; refused", (unsigned long long)base, (unsigned long long)size, r->name.c_str());
+        return STATUS_CONFLICTING_ADDRESSES;
+    }
     const uint64_t page_begin = AlignDown(base, kPage);
     const uint64_t page_end = AlignUp(base + size, kPage);
     if (page_end > r->base + r->size) return STATUS_CONFLICTING_ADDRESSES;
-    const uint64_t first = (page_begin - r->base) / kPage;
-    const uint64_t count = (page_end - page_begin) / kPage;
+    // The console's title pages are 64 KB: a commit takes whole 64 KB pages, and titles use the rounding (Forza
+    // Horizon 2's bump allocator commits odd sizes and places objects right past the end of what it asked for).
+    const uint64_t wide_begin = std::max(r->base, AlignDown(page_begin, kAllocGranularity));
+    const uint64_t wide_end = std::min(r->base + r->size, AlignUp(page_end, kAllocGranularity));
+    const uint64_t first = (wide_begin - r->base) / kPage;
+    const uint64_t count = (wide_end - wide_begin) / kPage;
     for (uint64_t i = 0; i < count; ++i) {
-        if (r->pages[first + i] == 0) r->pages[first + i] = nt_prot;
-        else r->pages[first + i] = nt_prot;
+        const uint64_t at = r->base + (first + i) * kPage;
+        if (r->pages[first + i] == 0 || (at >= page_begin && at < page_end)) r->pages[first + i] = nt_prot;
     }
     SyncArena(*r, first, count);
     *base_io = page_begin;
@@ -249,6 +263,11 @@ NTSTATUS VirtualMemory::Free(uint64_t* base_io, uint64_t* size_io, uint32_t type
         return STATUS_SUCCESS;
     }
     if (type & MEM_DECOMMIT) {
+        if (static const bool keep = std::getenv("UTSURO_NODECOMMIT") != nullptr; keep) {   // experiment: decommits keep their pages
+            *base_io = AlignDown(base, kPage);
+            *size_io = size == 0 ? r->base + r->used - *base_io : AlignUp(base + size, kPage) - *base_io;
+            return STATUS_SUCCESS;
+        }
         const uint64_t page_begin = AlignDown(base, kPage);
         const uint64_t page_end = size == 0 ? r->base + r->used : AlignUp(base + size, kPage);
         if (page_end > r->base + r->size) return STATUS_UNABLE_TO_FREE_VM;
