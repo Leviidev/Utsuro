@@ -30,6 +30,7 @@ while IFS= read -r src; do
     [[ "$src" == *.S ]] && { cc=clang; lang=(-x assembler-with-cpp); }
     objs+=("$obj")
     if [[ ! -f "$obj" || "$src" -nt "$obj" || -n "$(find "$ROOT/src" \( -name '*.h' -o -name '*.inc' \) -newer "$obj" -print -quit)" ]]; then
+        while (( $(jobs -rp | wc -l) >= ${JOBS:-6} )); do sleep 0.2; done   # a full rebuild would otherwise start every compile at once
         $cc -target arm64-apple-macos27.0 $([[ "$cc" == clang++ ]] && echo -std=c++20) -O1 -g -DARCHITECTURE_arm64=1 -DFEX_MAC_PHONE_PATH=1 \
             -Wall -Wno-unused-parameter -DMETA_NO_STD_FORWARD_DECLARATIONS -DUTSURO_DATA_DIR=\"$ROOT/data\" \
             "${INCLUDES[@]}" ${lang[@]+"${lang[@]}"} -c "$src" -o "$obj" &

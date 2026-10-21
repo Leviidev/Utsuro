@@ -844,7 +844,7 @@ gpu::DrawState Snapshot(Obj& ctx, CtxState& s, gpu::DrawArgs& args) {
         const auto& sh = stage == 0 ? d.vs : d.ps;
         if (!sh) continue;
         const auto& rf = gpu::Reflection(*sh);
-        for (int i = 0; i < 14; ++i) {
+        for (int i = 0; i < 16; ++i) {
             if (!(rf.constant_buffers & (1u << i))) continue;
             if (Res* r = ResAt(s.cb[src][i])) {
                 d.cb[stage][i].buffer = r->buffer;
@@ -863,6 +863,14 @@ gpu::DrawState Snapshot(Obj& ctx, CtxState& s, gpu::DrawArgs& args) {
             }
             if (rf.samplers & (1u << i)) {
                 if (Res* r = ResAt(s.sampler[src][i])) d.sampler[stage][i] = r->state;
+            }
+        }
+        for (uint8_t slot : rf.high_slots) {
+            if (Res* r = ResAt(s.srv[src][slot])) {
+                Res* target = r->base ? r->base : r;
+                if (target->placement != 0 && ((target->placement_dirty && g_frame.load() >= target->next_try_frame) || PlacementChanged(*target)))
+                    UploadPlacement(*target);
+                d.extra_srv[stage].emplace_back(slot, r->view);
             }
         }
     }
@@ -892,6 +900,33 @@ gpu::DrawState Snapshot(Obj& ctx, CtxState& s, gpu::DrawArgs& args) {
     std::memcpy(d.scissors, s.scissors, sizeof d.scissors);
     BindStream(s, d, args);
     return d;
+}
+
+// At the traced frame: where in the title each of the first draws comes from (UTSURO_TRACEFRAME).
+void TraceDrawCaller(Call& c) {
+    static uint64_t traced_frame = ~0ull;
+    static int shown = 0;
+    const uint64_t f = g_frame.load();
+    if (!gpu::IsTraceFrame(f)) return;
+    if (traced_frame != f) { traced_frame = f; shown = 0; }
+    if (shown++ >= 24) return;
+    GuestCpuState st;
+    if (c.thread.control == nullptr || !c.thread.control->CaptureCpuState(&st)) return;
+    uint64_t regs[16];
+    for (int k = 0; k < 16; ++k) regs[k] = st.gregs[k];
+    const auto frames = c.kernel.Backtrace(st.rip, regs, 8);
+    std::string chain;
+    for (size_t k = 1; k < frames.size(); ++k) chain += (k > 1 ? " < " : "") + c.kernel.Describe(frames[k]);
+    UT_INFO("gpu: draw #%d from %s", shown, chain.c_str());
+    const CtxState& cs = StateOf(c.obj);
+    for (int stage : {0, 4}) for (int i = 0; i < 16; ++i) {   // VS, PS
+        Res* v = ResAt(cs.srv[stage][i]);
+        Res* r = v ? v->base : nullptr;
+        if (r == nullptr || !r->texture) continue;
+        const auto& info = gpu::TextureInfo(*r->texture);
+        UT_INFO("gpu:   %s t%d: res %p %ux%u fmt %u mips %u bind %#x usage %u placement %#llx bytes %llu tile %u dirty %d gpu_written %d", stage ? "ps" : "vs", i, r, info.width, info.height, info.format, info.mips, r->bind, r->usage,
+                (unsigned long long)r->placement, (unsigned long long)r->placement_bytes, r->tile_mode, r->placement_dirty ? 1 : 0, r->gpu_written ? 1 : 0);
+    }
 }
 
 void DoDraw(Obj& ctx, const gpu::DrawArgs& args_in) {
@@ -978,7 +1013,7 @@ void DoDispatch(Obj& ctx, uint32_t x, uint32_t y, uint32_t z) {
     };
 
     // Constant buffers: check s.cb[5] first, or fall back to regs
-    for (int i = 0; i < 14; ++i) {
+    for (int i = 0; i < 16; ++i) {
         if (!(rf.constant_buffers & (1u << i))) continue;
         if (Res* cb = ResAt(s.cb[5][i])) {
             d.cb[i].buffer = cb->buffer;
@@ -1014,6 +1049,13 @@ void DoDispatch(Obj& ctx, uint32_t x, uint32_t y, uint32_t z) {
             } else if (const auto* t = get(kRegSampler + 0x10 * i)) {
                 if (Res* sampler = ResFromDescriptor(t->dw)) d.sampler[i] = sampler->state;
             }
+        }
+    }
+    for (uint8_t slot : rf.high_slots) {
+        if (Res* srv = ResAt(s.srv[5][slot])) {
+            Res* target = srv->base ? srv->base : srv;
+            if (target->placement != 0 && ((target->placement_dirty && g_frame.load() >= target->next_try_frame) || PlacementChanged(*target))) UploadPlacement(*target);
+            d.extra_srv.emplace_back(slot, srv->view);
         }
     }
 
@@ -1239,6 +1281,20 @@ void RegisterGpuOverrides() {
         if (r->map_write) {
             uint32_t mip, slice, row, rows, depth;
             TextureShape(gpu::TextureInfo(*r->texture), r->map_subresource, &mip, &slice, &row, &rows, &depth);
+            if (static const bool log = std::getenv("UTSURO_BINKLOG") != nullptr; log) {
+                const auto& i = gpu::TextureInfo(*r->texture);
+                if (i.format == 61 && i.width >= 960) {
+                    static std::map<Res*, uint32_t> counts;
+                    static std::mutex m;
+                    uint32_t n;
+                    { std::scoped_lock lock {m}; n = ++counts[r]; }
+                    if (n % 50 == 1) {
+                        size_t nonzero = 0;
+                        for (size_t k = 0; k < r->staging.size(); k += 64) nonzero += r->staging[k] != 0;
+                        UT_INFO("bink: frame %llu: upload %u of %ux%u R8 (res %p): %zu of %zu sampled bytes non-zero", (unsigned long long)g_frame.load(), n, i.width, i.height, r, nonzero, r->staging.size() / 64);
+                    }
+                }
+            }
             gpu::UploadTexture(*r->texture, mip, slice, nullptr, r->staging.data(), row, row * rows);
         }
         r->staging.clear();
@@ -1265,6 +1321,22 @@ void RegisterGpuOverrides() {
         if (r->texture) {
             uint32_t mip, slice, row, rows, depth;
             TextureShape(gpu::TextureInfo(*r->texture), static_cast<uint32_t>(c.Arg(1)), &mip, &slice, &row, &rows, &depth);
+            if (static const bool log = std::getenv("UTSURO_BINKLOG") != nullptr; log) {
+                const auto& i = gpu::TextureInfo(*r->texture);
+                if (i.format == 61 && i.width >= 960) {
+                    static std::map<Res*, uint32_t> counts;
+                    static std::mutex m;
+                    uint32_t n;
+                    { std::scoped_lock lock {m}; n = ++counts[r]; }
+                    if (n % 50 == 1) {
+                        const auto* src = c.Ptr<uint8_t>(3);
+                        const uint32_t pitch = static_cast<uint32_t>(c.Arg(4)) ? static_cast<uint32_t>(c.Arg(4)) : row;
+                        size_t nonzero = 0, total = 0;
+                        for (uint32_t y = 0; y < rows; y += 8) for (uint32_t x = 0; x < row; x += 64) { ++total; nonzero += src[static_cast<size_t>(y) * pitch + x] != 0; }
+                        UT_INFO("bink: frame %llu: UpdateSubresource %u of %ux%u R8 (res %p, box %s, pitch %u): %zu of %zu sampled bytes non-zero", (unsigned long long)g_frame.load(), n, i.width, i.height, r, box ? "yes" : "no", pitch, nonzero, total);
+                    }
+                }
+            }
             gpu::UploadTexture(*r->texture, mip, slice, box, c.Ptr<void>(3), static_cast<uint32_t>(c.Arg(4)) ? static_cast<uint32_t>(c.Arg(4)) : row,
                                static_cast<uint32_t>(c.Arg(5)));
         }
@@ -1394,6 +1466,30 @@ void RegisterGpuOverrides() {
         return 0;
     });
 
+    // GPU-written labels. The command processor would write these when the pipe drains; every call here has already
+    // finished when it returns, so the label is written at once. Forza Horizon 2's render thread spins on one
+    // (`WriteValueEndOfPipe(address, value)`) until it reaches the fence it expects.
+    auto write_label = [](const char* name, bool wide) {
+        return [name, wide](Call& c) -> uint32_t {
+            uint64_t* at = c.Ptr<uint64_t>(0);
+            uint64_t probe = 0;
+            if (at == nullptr || !SafeRead(reinterpret_cast<uint64_t>(at), &probe, 8)) return 0;
+            if (wide) *at = c.Arg(1); else *reinterpret_cast<uint32_t*>(at) = static_cast<uint32_t>(c.Arg(1));
+            static std::atomic<int> shown {0};
+            if (shown++ < 6) UT_INFO("d3d: %s(%p, %#llx)", name, static_cast<void*>(at), (unsigned long long)c.Arg(1));
+            return 0;
+        };
+    };
+    OverrideAll("WriteValueEndOfPipe", write_label("WriteValueEndOfPipe", false));
+    OverrideAll("WriteValueBottomOfPipe", write_label("WriteValueBottomOfPipe", false));
+    OverrideAll("WriteValueEndOfPipe64", write_label("WriteValueEndOfPipe64", true));
+    OverrideAll("WriteTimestampToMemory", [](Call& c) -> uint32_t {
+        uint64_t* at = c.Ptr<uint64_t>(0);
+        uint64_t probe = 0;
+        if (at != nullptr && SafeRead(reinterpret_cast<uint64_t>(at), &probe, 8)) *at = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() / 10);   // 100 MHz GPU ticks
+        return 0;
+    });
+
     // ---- draws ----
     OverrideAll("CSSetShader", [](Call& c) -> uint32_t {
         auto& s = StateOf(c.obj);
@@ -1425,6 +1521,7 @@ void RegisterGpuOverrides() {
         gpu::DrawArgs a;
         a.count = static_cast<uint32_t>(c.Arg(0));
         a.start = static_cast<uint32_t>(c.Arg(1));
+        TraceDrawCaller(c);
         DoDraw(c.obj, a);
         return 0;
     });
@@ -1435,6 +1532,7 @@ void RegisterGpuOverrides() {
         a.count = static_cast<uint32_t>(c.Arg(0) >> 32);
         a.start = static_cast<uint32_t>(c.Arg(0));
         a.base_vertex = static_cast<int32_t>(c.Arg(1));
+        TraceDrawCaller(c);
         DoDraw(c.obj, a);
         return 0;
     });
@@ -1444,6 +1542,7 @@ void RegisterGpuOverrides() {
         a.start = static_cast<uint32_t>(c.Arg(1));
         a.start_instance = static_cast<uint32_t>(c.Arg(1) >> 32);
         a.instances = static_cast<uint32_t>(c.Arg(2));
+        TraceDrawCaller(c);
         DoDraw(c.obj, a);
         return 0;
     });
@@ -1455,6 +1554,7 @@ void RegisterGpuOverrides() {
         a.base_vertex = static_cast<int32_t>(c.Arg(1));
         a.start_instance = static_cast<uint32_t>(c.Arg(1) >> 32);
         a.instances = static_cast<uint32_t>(c.Arg(2));
+        TraceDrawCaller(c);
         DoDraw(c.obj, a);
         return 0;
     });

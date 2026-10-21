@@ -1,3 +1,4 @@
+#include <algorithm>
 // dxbc.cpp -- DXBC (SM4/SM5 subset) to MSL. The shaders a D3D11 title ships are small, so the
 // translation is direct: every D3D register is a float4 (integer instructions reinterpret its
 // bits), instructions become one statement each, and control flow maps onto structured MSL.
@@ -141,17 +142,18 @@ struct SigRegister {
 // ShaderReflection::buffer_index. Compute keeps its fixed 14 + slot layout.
 template <typename T>
 uint32_t NextBufferIndex(T& t) {
-    const uint32_t first = t.stage == ShaderStage::Vertex ? 24u : 14u;
+    uint32_t first = t.stage == ShaderStage::Vertex ? 24u : 14u;
+    for (uint32_t b = 14; b < 16; ++b) if (t.refl.constant_buffers & (1u << b)) first = std::max(first, b + 1);   // cb14/cb15 exist on the console
     uint32_t used = 0;
-    for (int i = 0; i < 32; ++i) if (t.refl.buffer_index[i] != 0) ++used;
+    for (int i = 0; i < 128; ++i) if (t.refl.buffer_index[i] != 0) ++used;
     for (int i = 0; i < 64; ++i) if (t.refl.uav_index[i] != 0) ++used;
     return std::min(first + used, 30u);
 }
 template <typename T>
 uint32_t BufferIndexFor(T& t, uint32_t slot) {
-    if (slot < 32 && t.refl.buffer_index[slot] != 0) return t.refl.buffer_index[slot];
+    if (slot < 128 && t.refl.buffer_index[slot] != 0) return t.refl.buffer_index[slot];
     const uint32_t index = NextBufferIndex(t);
-    if (slot < 32) t.refl.buffer_index[slot] = static_cast<uint8_t>(index);
+    if (slot < 128) t.refl.buffer_index[slot] = static_cast<uint8_t>(index);
     return index;
 }
 template <typename T>
@@ -515,6 +517,7 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
             const uint32_t slot = o->index[0];
             t.resource_dim[slot] = dim;
             if (slot < 32) t.refl.textures |= 1u << slot;
+            if (slot >= 16 && slot < 128 && std::find(t.refl.high_slots.begin(), t.refl.high_slots.end(), slot) == t.refl.high_slots.end()) t.refl.high_slots.push_back(static_cast<uint8_t>(slot));
             if (slot < 128) t.refl.texture_dimension[slot] = dim;
             resource_decls.push_back(t.TextureType(dim) + " t" + std::to_string(slot) + " [[texture(" + std::to_string(slot) + ")]]");
             break;
@@ -526,6 +529,7 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
             t.resource_dim[slot] = 12;
             t.resource_stride[slot] = stride;
             if (slot < 32) t.refl.textures |= 1u << slot;
+            if (slot >= 16 && slot < 128 && std::find(t.refl.high_slots.begin(), t.refl.high_slots.end(), slot) == t.refl.high_slots.end()) t.refl.high_slots.push_back(static_cast<uint8_t>(slot));
             if (slot < 128) t.refl.texture_dimension[slot] = 12;
             const uint32_t buf_slot = BufferIndexFor(t, slot);
             resource_decls.push_back("device const uint* t" + std::to_string(slot) + " [[buffer(" + std::to_string(buf_slot) + ")]]");
@@ -589,6 +593,7 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
             t.resource_dim[slot] = 12;
             t.resource_stride[slot] = 0;
             if (slot < 32) t.refl.textures |= 1u << slot;
+            if (slot >= 16 && slot < 128 && std::find(t.refl.high_slots.begin(), t.refl.high_slots.end(), slot) == t.refl.high_slots.end()) t.refl.high_slots.push_back(static_cast<uint8_t>(slot));
             if (slot < 128) t.refl.texture_dimension[slot] = 12;
             resource_decls.push_back("device const uint* t" + std::to_string(slot) + " [[buffer(" + std::to_string(BufferIndexFor(t, slot)) + ")]]");
             break;
@@ -826,7 +831,8 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
             const uint32_t pick = smp->components == 4 ? (smp->select_mode == 2 ? (smp->bits & 3) : (smp->bits & 3)) : 0;
             std::string c = t.SrcF(*coord);
             std::string args = "s" + std::to_string(smp->index[0]) + ", " + t.Coord(dim, c) + t.ArraySlice(dim, c);
-            if (has_offset && (dim == 3 || dim == 8)) args += ", int2(" + std::to_string(offset[0]) + ", " + std::to_string(offset[1]) + ")";
+            // Metal's gather takes the offset before the component: pass int2(0) when there is none.
+            if (dim == 3 || dim == 8) args += has_offset ? ", int2(" + std::to_string(offset[0]) + ", " + std::to_string(offset[1]) + ")" : std::string(", int2(0)");
             args += std::string(", ") + comp[pick];
             t.Write(*d, saturate, "t" + std::to_string(slot) + ".gather(" + args + ")." + Translator::Swizzle(*res));
             break;
@@ -1206,6 +1212,7 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
         for (const auto& e : in_sig) {
             if (e.system_value == 1) { if (!has_pos) src << "    float4 position [[position]];\n"; has_pos = true; continue; }
             if (e.system_value == 9) continue;
+            if (e.system_value == 4) { src << "    uint rt_index [[render_target_array_index]];\n"; continue; }   // SV_RenderTargetArrayIndex read by the pixel shader
             if (e.system_value != 0) continue;
             src << "    float4 " << e.semantic << e.index << " [[user(" << e.semantic << e.index << ")]];\n";
         }
@@ -1265,9 +1272,12 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
             if (sv == 1) src << "    v" << reg << " = in.position;\n";
             else if (sv == 9) src << "    v" << reg << ".x = as_type<float>(front_facing ? 0xFFFFFFFFu : 0u);\n";
             else if (t.sig_in.count(reg)) {
-                for (const SignatureElement* e : t.sig_in[reg].elements)
+                for (const SignatureElement* e : t.sig_in[reg].elements) {
+                    if (e->system_value == 4) { src << "    v" << reg << ".x = as_type<float>(in.rt_index);\n"; continue; }
+                    if (e->system_value != 0) continue;
                     for (int c = 0; c < 4; ++c)
                         if (e->mask & (1u << c)) src << "    v" << reg << "." << kComp[c] << " = in." << e->semantic << e->index << "." << kComp[c] << ";\n";
+                }
             }
         }
     }

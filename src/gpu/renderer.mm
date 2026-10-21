@@ -116,6 +116,7 @@ struct Globals {
     std::string snapshot_path;
     std::string debug;   // UTSURO_GPUDEBUG: nodepth, nocull, noblend
     struct Stats { uint64_t draws {0}, no_vs {0}, bad_vs {0}, bad_ps {0}, no_pass {0}, no_pso {0}, bad_topology {0}, clears {0}, no_ib {0}; } stats;
+    std::map<std::string, uint64_t> rt_census;   ///< UTSURO_RTCENSUS: draws per render target since the last stats line
     std::chrono::steady_clock::time_point last_present;
     const char* dump_dir {nullptr};
     uint32_t dump_every {1};
@@ -1097,6 +1098,11 @@ void Draw(const DrawState& st, const DrawArgs& args) {
                 if (st.srv[stage][i] && st.srv[stage][i]->texture && IsDepth(st.srv[stage][i]->texture->pixel_format)) DepthAsFloat(*st.srv[stage][i]->texture);
         int width = 0, height = 0;
         if (!BeginPass(st, &width, &height)) { ++g->stats.no_pass; return; }
+        if (static const bool census = std::getenv("UTSURO_RTCENSUS") != nullptr; census && st.rtv[0] && st.rtv[0]->texture) {
+            char key[96];
+            std::snprintf(key, sizeof key, "%p %lux%lu fmt %lu", (__bridge void*)st.rtv[0]->texture->mtl, (unsigned long)st.rtv[0]->texture->mtl.width, (unsigned long)st.rtv[0]->texture->mtl.height, (unsigned long)st.rtv[0]->texture->pixel_format);
+            ++g->rt_census[key];
+        }
         uint32_t strides[16] = {};
         for (int i = 0; i < 16; ++i) strides[i] = st.vb[i].stride;
         id<MTLRenderPipelineState> pso = PipelineFor(st, *st.vs, ps, st.layout.get(), strides);
@@ -1145,7 +1151,7 @@ void Draw(const DrawState& st, const DrawArgs& args) {
             Shader* sh = stage == 0 ? st.vs.get() : ps;
             if (sh == nullptr) continue;
             const ShaderReflection& rf = sh->translated.reflection;
-            for (int i = 0; i < 14; ++i) {
+            for (int i = 0; i < 16; ++i) {
                 if (!(rf.constant_buffers & (1u << i))) continue;
                 const BufferBinding& b = st.cb[stage][i];
                 id<MTLBuffer> buf = b.buffer ? b.buffer->mtl : g->zero_cb;
@@ -1182,6 +1188,21 @@ void Draw(const DrawState& st, const DrawArgs& args) {
                 if (tex == nil) tex = DummyTexture(rf.texture_dimension[i]);
                 if (stage == 0) [e setVertexTexture:tex atIndex:i];
                 else [e setFragmentTexture:tex atIndex:i];
+            }
+            for (const auto& [slot, view] : st.extra_srv[stage]) {
+                if (rf.texture_dimension[slot] == 12) {
+                    id<MTLBuffer> buf = (view && view->buffer) ? view->buffer->mtl : nil;
+                    NSUInteger off = (view && view->buffer) ? view->buffer->offset : 0;
+                    if (buf == nil) { if (g->zero_cb == nil) { g->zero_cb = NewBuffer(65536); std::memset(g->zero_cb.contents, 0, 65536); } buf = g->zero_cb; off = 0; }
+                    if (stage == 0) [e setVertexBuffer:buf offset:off atIndex:rf.buffer_index[slot]];
+                    else [e setFragmentBuffer:buf offset:off atIndex:rf.buffer_index[slot]];
+                } else {
+                    id<MTLTexture> tex = nil;
+                    if (view && view->texture) { Texture& tx = *view->texture; tex = IsDepth(tx.pixel_format) && tx.depth_copy != nil ? tx.depth_copy : ViewOf(tx, view->desc, false); }
+                    if (tex == nil) tex = DummyTexture(rf.texture_dimension[slot]);
+                    if (stage == 0) [e setVertexTexture:tex atIndex:slot];
+                    else [e setFragmentTexture:tex atIndex:slot];
+                }
             }
             for (int i = 0; i < 16; ++i) {
                 if (!(rf.samplers & (1u << i))) continue;
@@ -1352,7 +1373,23 @@ void Dispatch(const DispatchState& st, uint32_t x, uint32_t y, uint32_t z) {
     if (!st.cs || x == 0 || y == 0 || z == 0) return;
     static int disp_count = 0;
     if (disp_count++ < 20 || g->frame_count == g->trace_frame) {
-        UT_INFO("gpu: Dispatch call %d (frame %llu): x=%u y=%u z=%u cs=%p", disp_count, (unsigned long long)g->frame_count, x, y, z, st.cs.get());
+        UT_INFO("gpu: Dispatch call %d (frame %llu): x=%u y=%u z=%u cs=%p(#%d)", disp_count, (unsigned long long)g->frame_count, x, y, z, st.cs.get(), st.cs->serial);
+        if (g->frame_count == g->trace_frame) {
+            const ShaderReflection& rf = st.cs->translated.reflection;
+            for (int i = 0; i < 16; ++i) {
+                if (!(rf.textures & (1u << i))) continue;
+                if (st.srv[i] && st.srv[i]->texture) { Texture& tx = *st.srv[i]->texture; UT_INFO("gpu:   cs t%d [%p]: %lux%lu fmt %lu uploads %u", i, (__bridge void*)tx.mtl, (unsigned long)tx.mtl.width, (unsigned long)tx.mtl.height, (unsigned long)tx.pixel_format, tx.uploads); }
+                else if (st.srv[i] && st.srv[i]->buffer) UT_INFO("gpu:   cs t%d: buffer %u bytes", i, st.srv[i]->buffer->size);
+                else UT_INFO("gpu:   cs t%d: NOT BOUND", i);
+            }
+            for (int i = 0; i < 64; ++i) {
+                if (!(rf.uavs & (1u << i))) continue;
+                if (st.uav[i] && st.uav[i]->texture) { Texture& tx = *st.uav[i]->texture; UT_INFO("gpu:   cs u%d [%p]: %lux%lu fmt %lu", i, (__bridge void*)tx.mtl, (unsigned long)tx.mtl.width, (unsigned long)tx.mtl.height, (unsigned long)tx.pixel_format); }
+                else if (st.uav[i] && st.uav[i]->buffer) UT_INFO("gpu:   cs u%d: buffer %u bytes", i, st.uav[i]->buffer->size);
+                else UT_INFO("gpu:   cs u%d: NOT BOUND", i);
+            }
+            for (int i = 0; i < 14; ++i) if (rf.constant_buffers & (1u << i)) UT_INFO("gpu:   cs cb%d: %s", i, st.cb[i].buffer ? "bound" : "NOT BOUND");
+        }
     }
     @autoreleasepool {
         EndEncoder();
@@ -1412,6 +1449,19 @@ void Dispatch(const DispatchState& st, uint32_t x, uint32_t y, uint32_t z) {
             [ce setTexture:tex atIndex:i];
         }
 
+        for (const auto& [slot, view] : st.extra_srv) {
+            if (rf.texture_dimension[slot] == 12) {
+                id<MTLBuffer> buf = (view && view->buffer) ? view->buffer->mtl : nil;
+                NSUInteger off = (view && view->buffer) ? view->buffer->offset : 0;
+                if (buf == nil) { if (g->zero_cb == nil) { g->zero_cb = NewBuffer(65536); std::memset(g->zero_cb.contents, 0, 65536); } buf = g->zero_cb; off = 0; }
+                [ce setBuffer:buf offset:off atIndex:rf.buffer_index[slot]];
+            } else {
+                id<MTLTexture> tex = nil;
+                if (view && view->texture) { Texture& tx = *view->texture; tex = IsDepth(tx.pixel_format) && tx.depth_copy != nil ? tx.depth_copy : ViewOf(tx, view->desc, false); }
+                if (tex == nil) tex = DummyTexture(rf.texture_dimension[slot]);
+                [ce setTexture:tex atIndex:slot];
+            }
+        }
         // Samplers
         for (int i = 0; i < 16; ++i) {
             if (!(rf.samplers & (1u << i))) continue;
@@ -1630,6 +1680,12 @@ void Present(const std::shared_ptr<Texture>& back, uint32_t sync_interval) {
             UT_INFO("gpu: frame %llu: %llu draws, %llu clears; skipped: no vs %llu, bad vs %llu, bad ps %llu, no pass %llu, no pso %llu, topology %llu, no ib %llu", (unsigned long long)index,
                     (unsigned long long)st.draws, (unsigned long long)st.clears, (unsigned long long)st.no_vs, (unsigned long long)st.bad_vs, (unsigned long long)st.bad_ps,
                     (unsigned long long)st.no_pass, (unsigned long long)st.no_pso, (unsigned long long)st.bad_topology, (unsigned long long)st.no_ib);
+            if (!g->rt_census.empty()) {
+                std::string line;
+                for (auto& [k, n] : g->rt_census) line += "  [" + k + "] x" + std::to_string(n);
+                UT_INFO("gpu: render targets since the last line:%s", line.c_str());
+                g->rt_census.clear();
+            }
         }
         // Show the back buffer in the window.
         if (g->layer != nil && back && back->mtl != nil) {
@@ -1693,6 +1749,8 @@ void RequestSnapshot(const std::string& path) {
     std::scoped_lock lock {g->mutex};
     g->snapshot_path = path;
 }
+
+bool IsTraceFrame(uint64_t frame) { return g != nullptr && frame == g->trace_frame; }
 
 void RequestTrace() {
     if (g == nullptr) return;

@@ -72,8 +72,9 @@ struct InputElement {
 struct DrawState {
     std::shared_ptr<Shader> vs, ps;
     std::shared_ptr<InputLayout> layout;
-    BufferBinding cb[2][14];                    ///< [0] vertex stage, [1] pixel stage
+    BufferBinding cb[2][16];                    ///< [0] vertex stage, [1] pixel stage
     std::shared_ptr<TextureView> srv[2][16];
+    std::vector<std::pair<uint8_t, std::shared_ptr<TextureView>>> extra_srv[2];   ///< SRVs in slots 16 and above (ShaderReflection::high_slots)
     StateBlob sampler[2][16];
     VertexBufferBinding vb[16];
     std::shared_ptr<Buffer> index_buffer;
@@ -102,8 +103,9 @@ struct DrawArgs {
 
 struct DispatchState {
     std::shared_ptr<Shader> cs;
-    BufferBinding cb[14];
+    BufferBinding cb[16];
     std::shared_ptr<TextureView> srv[16];
+    std::vector<std::pair<uint8_t, std::shared_ptr<TextureView>>> extra_srv;   ///< SRVs in slots 16 and above
     StateBlob sampler[16];
     std::shared_ptr<TextureView> uav[64];
 };
@@ -153,6 +155,8 @@ void Flush();
 void RequestSnapshot(const std::string& path);
 /// Logs every draw of a frame a moment from now (needs UTSURO_TRACEPIXELS for the data dump).
 void RequestTrace();
+/// Whether `frame` is the frame being traced (UTSURO_TRACEFRAME / RequestTrace).
+bool IsTraceFrame(uint64_t frame);
 
 /// Writes the texture's top mip to a PNG (debugging).
 bool SavePng(Texture& texture, const std::string& path);

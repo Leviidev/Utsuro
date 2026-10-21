@@ -922,8 +922,8 @@ int Kernel::Run() {
                 }
                 else
                 {
-                    UT_INFO("thread %llu %s: running (last syscall %s at %s)", (unsigned long long)t->tid_, t->name.c_str(), SyscallName(static_cast<uint32_t>(t->current_syscall)),
-                            Describe(t->current_rip).c_str());
+                    UT_INFO("thread %llu %s: running (last syscall %s at %s)%s%s", (unsigned long long)t->tid_, t->name.c_str(), SyscallName(static_cast<uint32_t>(t->current_syscall)),
+                            Describe(t->current_rip).c_str(), t->host_call.empty() ? "" : ", inside the host's ", t->host_call.c_str());
                     if (std::getenv("UTSURO_STACKS_RUNNING") != nullptr && t->control != nullptr) {   // sampled with a signal: where it is right now
                         uint64_t rip, regs[16];
                         if (t->control->SampleRunning(&rip, regs)) {

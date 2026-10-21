@@ -248,6 +248,7 @@ public:
     std::array<std::pair<uint32_t, uint64_t>, 24> history {};
     size_t history_count {0};
     uint64_t stack_regs[16] {};   ///< General registers at the last system call, kept only when UTSURO_STACKS is set.
+    std::string host_call;        ///< The host method this thread is executing ("IFoo::Bar"), for UTSURO_STACKS; empty between calls.
     uint64_t stack_rip {0};
     /// Host code that needs the guest to run a function (a COM method, a callback) asks here; the
     /// call is made when the host method returns, and the continuation sees its result.

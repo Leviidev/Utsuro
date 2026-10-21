@@ -545,6 +545,8 @@ method:
     }
     t_current_call = &m;
     t_current_iface = iface;
+    thread.host_call = iface->name + "::" + m.name;
+    struct ClearHostCall { NtThread& t; ~ClearHostCall() { t.host_call.clear(); } } clear_host_call {thread};
     t_current_caller = args.rsp != 0 ? *reinterpret_cast<const uint64_t*>(args.rsp) : 0;
     for (int i = 0; i < 4; ++i) t_current_args[i] = args[i + 1];
     struct Clear { ~Clear() { t_current_call = nullptr; } } clear_on_exit;
