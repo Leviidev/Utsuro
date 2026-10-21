@@ -2,6 +2,10 @@
 // DEFAULT). Hives are read-only; writes go to an in-memory overlay and are lost on exit.
 #include "nt/kernel.h"
 
+#ifndef UTSURO_DATA_DIR
+#define UTSURO_DATA_DIR "data"
+#endif
+
 #include <fstream>
 #include <sstream>
 

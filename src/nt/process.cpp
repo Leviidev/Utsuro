@@ -63,7 +63,8 @@ bool Kernel::Boot(std::string& error) {
     if (space == nullptr) { error = e; return false; }
     space_.reset(space);
     EngineOptions eo;
-    eo.tso_enabled = true;
+    // UTSURO_TSO=0 drops the x86 memory-ordering emulation: faster translated code, at the risk of races a title relies on.
+    eo.tso_enabled = !(std::getenv("UTSURO_TSO") != nullptr && std::string(std::getenv("UTSURO_TSO")) == "0");
     engine_ = FexEngine::Create(*space_, eo, e);
     if (!engine_) { error = "engine: " + e; return false; }
     vm_ = std::make_unique<VirtualMemory>(*space_, space_->Base(), space_->Size());

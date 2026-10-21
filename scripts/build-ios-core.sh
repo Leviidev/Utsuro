@@ -19,7 +19,7 @@ INCLUDES=(
     -I"$FEX_BUILD/include" -I"$FEX_BUILD/generated"
 )
 COMMON=(-target arm64-apple-ios$MIN -isysroot "$SDK" -O2 -g -DARCHITECTURE_arm64=1 -DUTSURO_IOS=1 -Wall -Wno-unused-parameter
-        -DMETA_NO_STD_FORWARD_DECLARATIONS "${INCLUDES[@]}")
+        -DMETA_NO_STD_FORWARD_DECLARATIONS -DUTSURO_DATA_DIR=\"$ROOT/data\" "${INCLUDES[@]}")
 
 objs=(); pids=()
 while IFS= read -r src; do

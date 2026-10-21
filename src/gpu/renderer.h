@@ -119,6 +119,8 @@ void SetLayer(void* ca_metal_layer);
 
 // ---- buffers ------------------------------------------------------------------------------
 std::shared_ptr<Buffer> CreateBuffer(uint32_t size, bool dynamic, const void* initial);
+/// A buffer for this frame only, from the frame ring when it has room.
+std::shared_ptr<Buffer> CreateTransientBuffer(uint32_t size, const void* initial);
 /// The CPU address of the buffer's current contents (shared memory: the guest reads and writes it).
 uint8_t* BufferData(Buffer& buffer);
 uint32_t BufferSize(Buffer& buffer);

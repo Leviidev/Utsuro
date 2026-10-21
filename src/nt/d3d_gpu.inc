@@ -400,7 +400,10 @@ TileModel BuildTileModel(const gpu::TextureDesc& info, uint32_t tile_mode, uint3
         static std::once_flag once;
         std::call_once(once, [&] { for (int i = 0; i < 16; ++i) UT_INFO("xg: computer vtable[%d] = %s", i, g_kernel->Describe(vtable[i]).c_str()); });
     }
-    const uint64_t subres_fn = vtable[3];
+    const uint64_t offset_fn = vtable[6];
+    auto at = [&](uint32_t mip, uint32_t x, uint32_t y, uint32_t slice) {
+        return xg::Call(*g_kernel, offset_fn, {comp, 0, mip, x, y, slice, 0});
+    };
     m.levels_per_slice = info.mips;
     const bool linear_layout = tile_mode == 0 || tile_mode == 1;
     bool ok = true;
@@ -409,18 +412,17 @@ TileModel BuildTileModel(const gpu::TextureDesc& info, uint32_t tile_mode, uint3
             TileLevel lv;
             lv.width = std::max(1u, ((info.width >> mip) + block - 1) / block);
             lv.height = std::max(1u, ((info.height >> mip) + block - 1) / block);
-            lv.base = xg::Call(*g_kernel, subres_fn, {comp, mip, slice});
+            lv.base = at(mip, 0, 0, slice);
             if (lv.base == ~0ull) { ok = false; break; }
             if (linear_layout) {
                 m.linear = true;
                 lv.tile_bytes = 0;
-                lv.row_stride = pitch ? pitch : static_cast<uint64_t>(lv.width) * m.bytes;
+                lv.row_stride = pitch ? pitch : (lv.height > 1 ? at(mip, 0, 1, slice) - lv.base : static_cast<uint64_t>(lv.width) * m.bytes);
                 m.levels.push_back(lv);
                 continue;
             }
-            const uint32_t tiles_x = (lv.width + 7) / 8;
-            lv.tile_bytes = 64ull * m.bytes;
-            lv.row_stride = pitch ? pitch : static_cast<uint64_t>(tiles_x) * lv.tile_bytes;
+            lv.tile_bytes = lv.width > 8 ? at(mip, 8, 0, slice) - lv.base : 64ull * m.bytes;
+            lv.row_stride = lv.height > 8 ? at(mip, 0, 8, slice) - lv.base : (pitch ? pitch : static_cast<uint64_t>((lv.width + 7) / 8) * lv.tile_bytes);
             m.levels.push_back(lv);
         }
     }
@@ -446,11 +448,11 @@ TileModel BuildTileModel(const gpu::TextureDesc& info, uint32_t tile_mode, uint3
         });
         if (g_probe_comp == comp) { m.ok = ok; return m; }
     }
-    if (!linear_layout && tile_mode >= 4) {
+    if (static const bool no_xg = std::getenv("UTSURO_NOXGCOPY") != nullptr; !no_xg && !linear_layout && tile_mode >= 4) {
         // 2D tilings (bank and pipe swizzled macro tiles): xg_x.dll copies them out itself. 1D thin tiling (mode 2) is
         // the Morton layout above, which the host does faster.
         m.computer = comp;
-        m.copy_fn = vtable[6];
+        m.copy_fn = vtable[9];
     } else {
         xg::Call(*g_kernel, vtable[1], {comp});   // Release
     }
@@ -473,7 +475,7 @@ uint64_t HashWords(const uint8_t* p, size_t bytes, uint64_t h) {
 /// Whether a placement texture's memory differs from what was last uploaded (checked at most once per frame; the CPU may rewrite
 /// dynamic textures, such as glyph caches, without any call the host sees).
 bool PlacementChanged(Res& r) {
-    if (r.placement == 0 || r.placement_bytes == 0 || r.placement_bytes > (4u << 20) || (r.bind & 0x40) != 0 || (r.gpu_written && (r.bind & 0x20) != 0)) return false;
+    if (r.placement == 0 || r.placement_bytes == 0 || r.placement_bytes > (4u << 20) || (r.bind & 0x40) != 0) return false;
     const uint64_t frame = g_frame.load();
     if (r.checked_frame == frame) return false;
     r.checked_frame = frame;
@@ -523,7 +525,7 @@ void UploadPlacement(Res& r) {
         const int64_t now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
         if (now - last_report.load() >= 3) { last_report = now; UT_INFO("d3d: placement uploads so far: %llu textures, about %llu MB", (unsigned long long)uploads.load(), (unsigned long long)(bytes.load() >> 20)); }
     }
-    if (!r.texture || r.placement == 0 || (r.bind & 0x40) != 0 || (r.gpu_written && (r.bind & 0x20) != 0)) return;
+    if (!r.texture || r.placement == 0 || (r.bind & 0x40) != 0) return;
     const auto& info = gpu::TextureInfo(*r.texture);
     uint32_t bytes, block;
     ElementOf(info.format, &bytes, &block);
@@ -592,10 +594,11 @@ void UploadPlacement(Res& r) {
     };
     std::vector<uint8_t> linear;
     uint32_t lowest_missing = 0;   // sampled views start below the last level that is missing
+    bool stream_prefix = true;
     for (uint32_t slice = 0; slice < info.array_size; ++slice) {
         for (uint32_t mip = 0; mip < info.mips; ++mip) {
             const TileLevel& lv = model->levels[slice * model->levels_per_slice + mip];
-            if (!level_present(lv)) { if (slice == 0 && mip + 1 > lowest_missing) lowest_missing = mip + 1; continue; }
+            if (!level_present(lv)) { if (slice == 0 && stream_prefix) lowest_missing = mip + 1; continue; }
             const uint32_t row_pitch = lv.width * bytes;
             linear.resize(static_cast<size_t>(row_pitch) * lv.height);
             if (model->copy_fn != 0) {
@@ -603,7 +606,15 @@ void UploadPlacement(Res& r) {
                 static uint64_t scratch = 0, scratch_size = 0;
                 const uint64_t need = static_cast<uint64_t>(row_pitch) * lv.height + 64;
                 if (need > scratch_size) { scratch = Runtime::Get().AllocGuest(std::max<uint64_t>(need, 1u << 20), 64); scratch_size = std::max<uint64_t>(need, 1u << 20); }
-                const uint64_t hr = xg::Call(*g_kernel, model->copy_fn, {model->computer, scratch, 0, static_cast<uint64_t>(slice) * info.mips + mip, r.placement, row_pitch, static_cast<uint64_t>(row_pitch) * lv.height});
+                const auto t0 = std::chrono::steady_clock::now();
+                const uint64_t hr = xg::Call(*g_kernel, model->copy_fn, {model->computer, scratch, static_cast<uint64_t>(slice) * info.mips + mip, 0, r.placement, row_pitch, static_cast<uint64_t>(row_pitch) * lv.height});
+                {
+                    static std::atomic<uint64_t> calls {0}, micros {0}, bytes {0};
+                    static std::atomic<int64_t> last_report {0};
+                    calls++; micros += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count(); bytes += static_cast<uint64_t>(row_pitch) * lv.height;
+                    const int64_t now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                    if (now - last_report.load() >= 5) { last_report = now; UT_INFO("d3d: xg detile so far: %llu levels, %llu ms, %llu MB", (unsigned long long)calls.load(), (unsigned long long)(micros.load() / 1000), (unsigned long long)(bytes.load() >> 20)); }
+                }
                 if (hr != 0) {
                     static std::atomic<int> shown {0};
                     if (shown++ < 10) UT_INFO("d3d: xg CopyFromSubresource failed (%#llx) for %ux%u fmt %u mip %u tile %u", (unsigned long long)hr, info.width, info.height, info.format, mip, r.tile_mode);
@@ -623,13 +634,17 @@ void UploadPlacement(Res& r) {
                     std::memcpy(linear.data() + static_cast<size_t>(y) * row_pitch + static_cast<size_t>(x) * bytes, raw.data() + src, bytes);
                 }
             }
-            {
+            if (slice == 0 && stream_prefix) {
                 // Committed but never filled (a level the streamer has not delivered): not a level the shader may sample yet.
                 const uint64_t* w = reinterpret_cast<const uint64_t*>(linear.data());
                 const size_t words = linear.size() / 8;
                 size_t k = 0;
                 while (k < words && w[k] == 0) ++k;
-                if (k == words && linear.size() >= 64) { if (slice == 0 && mip + 1 > lowest_missing) lowest_missing = mip + 1; continue; }
+                if (k == words && linear.size() >= 64 && mip + 1 < info.mips) {
+                    lowest_missing = mip + 1;
+                    continue;
+                }
+                stream_prefix = false;
             }
             gpu::UploadTexture(*r.texture, mip, slice, nullptr, linear.data(), row_pitch, row_pitch * lv.height);
             if (const char* dump = std::getenv("UTSURO_DUMPR8"); dump != nullptr && info.format == 61 && mip == 0 && info.width >= 512) {
@@ -674,10 +689,31 @@ void UploadPlacement(Res& r) {
 // (V#, 4) from 0x1c40 (vertex stage) and from 0x6a00 (pixel stage).
 constexpr uint32_t kRegTexture = 0x6b40, kRegSampler = 0x7b40, kRegVertex = 0x7d70, kRegCbA = 0x1c40, kRegCbB = 0x6a00;
 
+/// Whether every page of [address, address + bytes) was readable the first time it was looked at: the mach probe that
+/// SafeCopy makes costs more than the copy itself, and these descriptors point into the title's constant and vertex
+/// memory, which stays mapped once it exists. A page that failed is probed again each time (it may be committed later).
+bool PagesKnownReadable(uint64_t address, uint32_t bytes) {
+    static thread_local std::vector<uint64_t> known;   // sorted page addresses, a few thousand at most
+    const uint64_t first = address & ~4095ull, last = (address + bytes - 1) & ~4095ull;
+    for (uint64_t page = first; page <= last; page += 4096) {
+        auto it = std::lower_bound(known.begin(), known.end(), page);
+        if (it != known.end() && *it == page) continue;
+        uint64_t probe;
+        if (!SafeRead(page, &probe, 8)) return false;
+        known.insert(it, page);
+    }
+    return true;
+}
+
 std::shared_ptr<gpu::Buffer> CopyOfHost(uint64_t address, uint32_t bytes) {
     if (address == 0 || bytes == 0) return nullptr;
-    std::vector<uint8_t> data(std::max<uint32_t>(bytes, 16));
-    if (!SafeCopy(address, data.data(), bytes)) {
+    static thread_local std::vector<uint8_t> data;
+    const uint32_t target_size = std::max<uint32_t>(bytes, 16);
+    data.resize(target_size);
+    if (PagesKnownReadable(address, bytes)) {
+        std::memcpy(data.data(), reinterpret_cast<const void*>(address), bytes);
+        if (bytes < target_size) std::memset(data.data() + bytes, 0, target_size - bytes);
+    } else if (!SafeCopy(address, data.data(), bytes)) {
         // A constant buffer's size is its slot's maximum, not what was allocated: keep the readable part, page by page.
         uint32_t got = 0;
         while (got < bytes) {
@@ -691,8 +727,11 @@ std::shared_ptr<gpu::Buffer> CopyOfHost(uint64_t address, uint32_t bytes) {
             if (shown++ < 8) UT_INFO("d3d: a descriptor points at %#llx (%u bytes), which is not readable", (unsigned long long)address, bytes);
             return nullptr;
         }
+        if (got < target_size) std::memset(data.data() + got, 0, target_size - got);
+    } else if (bytes < target_size) {
+        std::memset(data.data() + bytes, 0, target_size - bytes);
     }
-    return gpu::CreateBuffer(static_cast<uint32_t>(data.size()), false, data.data());
+    return gpu::CreateTransientBuffer(static_cast<uint32_t>(data.size()), data.data());
 }
 
 /// Reads the packets the title appended to the context's constant-engine buffer since the last read.

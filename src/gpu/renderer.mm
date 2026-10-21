@@ -241,7 +241,9 @@ static size_t PixelFormatBytes(MTLPixelFormat f) {
     case MTLPixelFormatRG11B10Float:
     case MTLPixelFormatRGB9E5Float:
     case MTLPixelFormatDepth32Float:
+#if !TARGET_OS_IPHONE
     case MTLPixelFormatDepth24Unorm_Stencil8:
+#endif
     case MTLPixelFormatDepth32Float_Stencil8:
         return 4;
     case MTLPixelFormatRG32Uint:
@@ -875,6 +877,22 @@ std::shared_ptr<Buffer> CreateBuffer(uint32_t size, bool dynamic, const void* in
     b->mtl = NewBuffer(size);
     if (initial != nullptr) std::memcpy(b->mtl.contents, initial, size);
     else std::memset(b->mtl.contents, 0, size);
+    return b;
+}
+
+/// A buffer that lives for this frame only (descriptor copies, per-draw constants): a slice of the frame's ring, or a buffer
+/// of its own when the ring is full.
+std::shared_ptr<Buffer> CreateTransientBuffer(uint32_t size, const void* initial) {
+    std::scoped_lock lock {g->mutex};
+    auto b = std::make_shared<Buffer>();
+    b->size = size;
+    b->dynamic = false;
+    if (uint8_t* at = RingAlloc(b, size)) {
+        std::memcpy(at, initial, size);
+        return b;
+    }
+    b->mtl = NewBuffer(size);
+    std::memcpy(b->mtl.contents, initial, size);
     return b;
 }
 
