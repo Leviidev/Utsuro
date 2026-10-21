@@ -601,6 +601,7 @@ void UploadPlacement(Res& r) {
             if (!level_present(lv)) { if (slice == 0 && stream_prefix) lowest_missing = mip + 1; continue; }
             const uint32_t row_pitch = lv.width * bytes;
             linear.resize(static_cast<size_t>(row_pitch) * lv.height);
+            bool copied = false;
             if (model->copy_fn != 0) {
                 // The console's own detiling, into a guest scratch buffer the helper thread can write.
                 static uint64_t scratch = 0, scratch_size = 0;
@@ -608,30 +609,28 @@ void UploadPlacement(Res& r) {
                 if (need > scratch_size) { scratch = Runtime::Get().AllocGuest(std::max<uint64_t>(need, 1u << 20), 64); scratch_size = std::max<uint64_t>(need, 1u << 20); }
                 const auto t0 = std::chrono::steady_clock::now();
                 const uint64_t hr = xg::Call(*g_kernel, model->copy_fn, {model->computer, scratch, static_cast<uint64_t>(slice) * info.mips + mip, 0, r.placement, row_pitch, static_cast<uint64_t>(row_pitch) * lv.height});
-                {
-                    static std::atomic<uint64_t> calls {0}, micros {0}, bytes {0};
+                if (hr == 0) {
+                    std::memcpy(linear.data(), reinterpret_cast<const void*>(scratch), linear.size());
+                    copied = true;
+                    static std::atomic<uint64_t> calls {0}, micros {0}, bytes_detiled {0};
                     static std::atomic<int64_t> last_report {0};
-                    calls++; micros += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count(); bytes += static_cast<uint64_t>(row_pitch) * lv.height;
+                    calls++; micros += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count(); bytes_detiled += static_cast<uint64_t>(row_pitch) * lv.height;
                     const int64_t now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-                    if (now - last_report.load() >= 5) { last_report = now; UT_INFO("d3d: xg detile so far: %llu levels, %llu ms, %llu MB", (unsigned long long)calls.load(), (unsigned long long)(micros.load() / 1000), (unsigned long long)(bytes.load() >> 20)); }
+                    if (now - last_report.load() >= 5) { last_report = now; UT_INFO("d3d: xg detile so far: %llu levels, %llu ms, %llu MB", (unsigned long long)calls.load(), (unsigned long long)(micros.load() / 1000), (unsigned long long)(bytes_detiled.load() >> 20)); }
                 }
-                if (hr != 0) {
-                    static std::atomic<int> shown {0};
-                    if (shown++ < 10) UT_INFO("d3d: xg CopyFromSubresource failed (%#llx) for %ux%u fmt %u mip %u tile %u", (unsigned long long)hr, info.width, info.height, info.format, mip, r.tile_mode);
-                    continue;
-                }
-                std::memcpy(linear.data(), reinterpret_cast<const void*>(scratch), linear.size());
-            } else
-            for (uint32_t y = 0; y < lv.height; ++y) {
-                if (model->linear) {
-                    const uint64_t src = lv.base + static_cast<uint64_t>(y) * lv.row_stride;
-                    if (src + row_pitch <= raw.size()) std::memcpy(linear.data() + static_cast<size_t>(y) * row_pitch, raw.data() + src, row_pitch);
-                    continue;
-                }
-                for (uint32_t x = 0; x < lv.width; ++x) {
-                    const uint64_t src = lv.base + (y >> 3) * lv.row_stride + (x >> 3) * lv.tile_bytes + static_cast<uint64_t>(Morton8(x & 7, y & 7)) * bytes;
-                    if (src + bytes > raw.size()) continue;
-                    std::memcpy(linear.data() + static_cast<size_t>(y) * row_pitch + static_cast<size_t>(x) * bytes, raw.data() + src, bytes);
+            }
+            if (!copied) {
+                for (uint32_t y = 0; y < lv.height; ++y) {
+                    if (model->linear) {
+                        const uint64_t src = lv.base + static_cast<uint64_t>(y) * lv.row_stride;
+                        if (src + row_pitch <= raw.size()) std::memcpy(linear.data() + static_cast<size_t>(y) * row_pitch, raw.data() + src, row_pitch);
+                        continue;
+                    }
+                    for (uint32_t x = 0; x < lv.width; ++x) {
+                        const uint64_t src = lv.base + (y >> 3) * lv.row_stride + (x >> 3) * lv.tile_bytes + static_cast<uint64_t>(Morton8(x & 7, y & 7)) * bytes;
+                        if (src + bytes > raw.size()) continue;
+                        std::memcpy(linear.data() + static_cast<size_t>(y) * row_pitch + static_cast<size_t>(x) * bytes, raw.data() + src, bytes);
+                    }
                 }
             }
             if (slice == 0 && stream_prefix) {

@@ -523,7 +523,10 @@ id<MTLSamplerState> SamplerFor(const StateBlob& blob) {
     d.tAddressMode = Address(Rd<uint32_t>(blob.bytes, 8));
     d.rAddressMode = Address(Rd<uint32_t>(blob.bytes, 12));
     d.maxAnisotropy = aniso ? std::max<uint32_t>(1, std::min<uint32_t>(16, Rd<uint32_t>(blob.bytes, 20))) : 1;
-    if (filter & 0x80) d.compareFunction = CompareFunc(Rd<uint32_t>(blob.bytes, 24));
+    // In Metal, samplers with compareFunction != Never cannot be sampled via texture2d.sample().
+    // dxbc translates comparison ops (and shaders like UE3 shadow sampling) to regular texture2d.sample(),
+    // so compareFunction must remain Never for Apple Silicon.
+    (void)filter;
     const float border[4] = {Rd<float>(blob.bytes, 28), Rd<float>(blob.bytes, 32), Rd<float>(blob.bytes, 36), Rd<float>(blob.bytes, 40)};
     d.borderColor = border[3] == 0 ? MTLSamplerBorderColorTransparentBlack : (border[0] > 0.5f ? MTLSamplerBorderColorOpaqueWhite : MTLSamplerBorderColorOpaqueBlack);
     d.lodMinClamp = Rd<float>(blob.bytes, 44);
@@ -940,8 +943,7 @@ std::shared_ptr<Texture> CreateTexture(const TextureDesc& desc) {
     d.sampleCount = std::max<uint32_t>(1, desc.samples);
     // Not every GPU does 8x (or any) multisampling: take the largest count the device has.
     while (d.sampleCount > 1 && ![g->device supportsTextureSampleCount:d.sampleCount]) d.sampleCount >>= 1;
-    d.usage = MTLTextureUsagePixelFormatView;
-    if (desc.shader_resource || !desc.depth_stencil) d.usage |= MTLTextureUsageShaderRead;
+    d.usage = MTLTextureUsagePixelFormatView | MTLTextureUsageShaderRead;
     if (desc.render_target || desc.depth_stencil) d.usage |= MTLTextureUsageRenderTarget;
     if (!desc.depth_stencil) d.usage |= MTLTextureUsageShaderWrite;
     if (desc.depth > 1) {
@@ -988,6 +990,7 @@ void UploadTexture(Texture& t, uint32_t mip, uint32_t slice, const uint32_t box[
     std::scoped_lock lock {g->mutex};
     if (t.mtl == nil || data == nullptr) return;
     ++t.uploads;
+    if (IsDepth(t.pixel_format)) ++t.depth_gen;
     const uint32_t mw = std::max<uint32_t>(1, (uint32_t)t.mtl.width >> mip), mh = std::max<uint32_t>(1, (uint32_t)t.mtl.height >> mip);
     const uint32_t md = std::max<uint32_t>(1, (uint32_t)t.mtl.depth >> mip);
     uint32_t l = 0, tp = 0, f = 0, r = mw, b = mh, bk = md;
@@ -1031,6 +1034,7 @@ void CopyTexture(Texture& dst, uint32_t dmip, uint32_t dslice, uint32_t dx, uint
     [blit copyFromTexture:src.mtl sourceSlice:sslice sourceLevel:smip sourceOrigin:MTLOriginMake(l, t, f) sourceSize:MTLSizeMake(r - l, b - t, bk - f)
                 toTexture:dst.mtl destinationSlice:dslice destinationLevel:dmip destinationOrigin:MTLOriginMake(dx, dy, dz)];
     [blit endEncoding];
+    if (IsDepth(dst.pixel_format)) ++dst.depth_gen;
 }
 
 const TextureDesc& TextureInfo(const Texture& t) { return t.desc; }
@@ -1129,9 +1133,12 @@ void Draw(const DrawState& st, const DrawArgs& args) {
     Shader* ps = st.ps && st.ps->translated.ok ? st.ps.get() : nullptr;
     if (ps != nullptr && !CompileShader(*ps)) { ++g->stats.bad_ps; return; }
     @autoreleasepool {
-        for (int stage = 0; stage < 2; ++stage)
+        for (int stage = 0; stage < 2; ++stage) {
             for (int i = 0; i < 16; ++i)
                 if (st.srv[stage][i] && st.srv[stage][i]->texture && IsDepth(st.srv[stage][i]->texture->pixel_format)) DepthAsFloat(*st.srv[stage][i]->texture);
+            for (const auto& [slot, view] : st.extra_srv[stage])
+                if (view && view->texture && IsDepth(view->texture->pixel_format)) DepthAsFloat(*view->texture);
+        }
         int width = 0, height = 0;
         if (!BeginPass(st, &width, &height)) { ++g->stats.no_pass; return; }
         if (static const bool census = std::getenv("UTSURO_RTCENSUS") != nullptr; census && st.rtv[0] && st.rtv[0]->texture) {
@@ -1450,6 +1457,11 @@ void Dispatch(const DispatchState& st, uint32_t x, uint32_t y, uint32_t z) {
             }
             g->compute_pipelines[st.cs->translated.msl] = pso;
         }
+
+        for (int i = 0; i < 16; ++i)
+            if (st.srv[i] && st.srv[i]->texture && IsDepth(st.srv[i]->texture->pixel_format)) DepthAsFloat(*st.srv[i]->texture);
+        for (const auto& [slot, view] : st.extra_srv)
+            if (view && view->texture && IsDepth(view->texture->pixel_format)) DepthAsFloat(*view->texture);
 
         id<MTLComputeCommandEncoder> ce = [Command() computeCommandEncoder];
         if (ce == nil) return;
