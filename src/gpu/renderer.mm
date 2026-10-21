@@ -649,6 +649,24 @@ bool BeginPass(const DrawState& st, int* width, int* height) {
         if (!any) { *width = (int)depth.width; *height = (int)depth.height; }
         any = true;
     }
+    if (!any) {
+        // No attachments: a pass whose pixel shader writes through UAVs only. Metal wants the raster size then.
+        for (int i = 0; i < 64 && !any; ++i) {
+            if (st.ps_uav[i] && st.ps_uav[i]->texture) {
+                pass.renderTargetWidth = st.ps_uav[i]->texture->mtl.width;
+                pass.renderTargetHeight = st.ps_uav[i]->texture->mtl.height;
+                pass.defaultRasterSampleCount = 1;
+                *width = (int)pass.renderTargetWidth; *height = (int)pass.renderTargetHeight;
+                any = true;
+            }
+        }
+        if (!any && st.num_viewports > 0 && st.viewports[0].w > 0 && st.viewports[0].h > 0) {
+            pass.renderTargetWidth = (NSUInteger)st.viewports[0].w; pass.renderTargetHeight = (NSUInteger)st.viewports[0].h;
+            pass.defaultRasterSampleCount = 1;
+            *width = (int)pass.renderTargetWidth; *height = (int)pass.renderTargetHeight;
+            any = true;
+        }
+    }
     if (!any) return false;
     g->encoder = [Command() renderCommandEncoderWithDescriptor:pass];
     g->pass_key = key;
@@ -1103,6 +1121,11 @@ void Draw(const DrawState& st, const DrawArgs& args) {
             std::snprintf(key, sizeof key, "%p %lux%lu fmt %lu", (__bridge void*)st.rtv[0]->texture->mtl, (unsigned long)st.rtv[0]->texture->mtl.width, (unsigned long)st.rtv[0]->texture->mtl.height, (unsigned long)st.rtv[0]->texture->pixel_format);
             ++g->rt_census[key];
         }
+        if (static const bool census = std::getenv("UTSURO_RTCENSUS") != nullptr; census && st.rtv[0] && st.rtv[0]->texture) {
+            char key[96];
+            std::snprintf(key, sizeof key, "%p %lux%lu fmt %lu", (__bridge void*)st.rtv[0]->texture->mtl, (unsigned long)st.rtv[0]->texture->mtl.width, (unsigned long)st.rtv[0]->texture->mtl.height, (unsigned long)st.rtv[0]->texture->pixel_format);
+            ++g->rt_census[key];
+        }
         uint32_t strides[16] = {};
         for (int i = 0; i < 16; ++i) strides[i] = st.vb[i].stride;
         id<MTLRenderPipelineState> pso = PipelineFor(st, *st.vs, ps, st.layout.get(), strides);
@@ -1161,11 +1184,13 @@ void Draw(const DrawState& st, const DrawArgs& args) {
                 else [e setFragmentBuffer:buf offset:off atIndex:i];
             }
             if (stage == 1 && rf.uavs != 0) {
-                // Pixel-shader UAVs: placeholders so the pipeline binds; what the shader writes there is not kept yet.
+                // Pixel-shader UAVs: textures at 64 + slot, buffers at their pooled index.
                 if (g->zero_cb == nil) { g->zero_cb = NewBuffer(65536); std::memset(g->zero_cb.contents, 0, 65536); }
                 for (int i = 0; i < 64; ++i) {
                     if (!(rf.uavs & (1u << i))) continue;
-                    if (rf.uav_index[i] != 0) [e setFragmentBuffer:g->zero_cb offset:0 atIndex:rf.uav_index[i]];
+                    const auto& v = st.ps_uav[i];
+                    if (rf.uav_index[i] != 0) [e setFragmentBuffer:(v && v->buffer) ? v->buffer->mtl : g->zero_cb offset:(v && v->buffer) ? v->buffer->offset : 0 atIndex:rf.uav_index[i]];
+                    else if (v && v->texture) [e setFragmentTexture:ViewOf(*v->texture, v->desc, false) atIndex:64 + i];
                     else [e setFragmentTexture:DummyTexture(3) atIndex:64 + i];
                 }
             }
@@ -1680,6 +1705,12 @@ void Present(const std::shared_ptr<Texture>& back, uint32_t sync_interval) {
             UT_INFO("gpu: frame %llu: %llu draws, %llu clears; skipped: no vs %llu, bad vs %llu, bad ps %llu, no pass %llu, no pso %llu, topology %llu, no ib %llu", (unsigned long long)index,
                     (unsigned long long)st.draws, (unsigned long long)st.clears, (unsigned long long)st.no_vs, (unsigned long long)st.bad_vs, (unsigned long long)st.bad_ps,
                     (unsigned long long)st.no_pass, (unsigned long long)st.no_pso, (unsigned long long)st.bad_topology, (unsigned long long)st.no_ib);
+            if (!g->rt_census.empty()) {
+                std::string line;
+                for (auto& [k, n] : g->rt_census) line += "  [" + k + "] x" + std::to_string(n);
+                UT_INFO("gpu: render targets since the last line:%s", line.c_str());
+                g->rt_census.clear();
+            }
             if (!g->rt_census.empty()) {
                 std::string line;
                 for (auto& [k, n] : g->rt_census) line += "  [" + k + "] x" + std::to_string(n);

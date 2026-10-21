@@ -542,6 +542,11 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
             const uint32_t slot = o->index[0];
             t.refl.uavs |= (1u << slot);
             t.uav_dim[slot] = dim;
+            if (dim == 1) {   // RWBuffer<T>: a typed buffer; read and written as raw words here (titles use it for counters)
+                t.uav_stride[slot] = 4;
+                uav_decls.push_back("device uint* u" + std::to_string(slot) + " [[buffer(" + std::to_string(UavBufferIndexFor(t, slot)) + ")]]");
+                break;
+            }
             std::string type = (dim == 8) ? "texture2d_array<float, access::read_write>" :
                                (dim == 5) ? "texture3d<float, access::read_write>" :
                                "texture2d<float, access::read_write>";
@@ -1005,7 +1010,9 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
         case OP_STORE_UAV_TYPED: {
             auto dst = operand(); auto coord = operand(); auto val = operand();
             const uint32_t slot = dst->index[0];
-            if (t.uav_dim[slot] == 8) {
+            if (t.uav_dim[slot] == 1) {
+                t.Line("u" + std::to_string(slot) + "[" + t.SrcU(*coord) + ".x] = " + t.SrcU(*val) + ".x;");
+            } else if (t.uav_dim[slot] == 8) {
                 t.Line("u" + std::to_string(slot) + ".write(" + t.SrcF(*val) + ", uint2(" + t.SrcU(*coord) + ".xy), " + t.SrcU(*coord) + ".z);");
             } else if (t.uav_dim[slot] == 5) {
                 t.Line("u" + std::to_string(slot) + ".write(" + t.SrcF(*val) + ", uint3(" + t.SrcU(*coord) + ".xyz));");
@@ -1040,7 +1047,9 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
         case OP_LD_UAV_TYPED: {
             auto dst = operand(); auto coord = operand(); auto uav = operand();
             const uint32_t slot = uav->index[0];
-            if (t.uav_dim[slot] == 8) {
+            if (t.uav_dim[slot] == 1) {
+                t.Write(*dst, false, "as_type<float4>(uint4(u" + std::to_string(slot) + "[" + t.SrcU(*coord) + ".x], 0u, 0u, 0u))");
+            } else if (t.uav_dim[slot] == 8) {
                 t.Write(*dst, false, "u" + std::to_string(slot) + ".read(uint2(" + t.SrcU(*coord) + ".xy), " + t.SrcU(*coord) + ".z)");
             } else if (t.uav_dim[slot] == 5) {
                 t.Write(*dst, false, "u" + std::to_string(slot) + ".read(uint3(" + t.SrcU(*coord) + ".xyz))");

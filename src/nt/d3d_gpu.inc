@@ -885,8 +885,20 @@ gpu::DrawState Snapshot(Obj& ctx, CtxState& s, gpu::DrawArgs& args) {
     d.index_format = s.ib_format;
     d.index_offset = s.ib_offset;
     d.topology = s.topology;
+    if (d.ps) {
+        const auto& prf = gpu::Reflection(*d.ps);
+        for (int i = 0; i < 64; ++i) if ((prf.uavs & (1u << i)) && s.uav[i] != 0) if (Res* r = ResAt(s.uav[i])) d.ps_uav[i] = r->view;
+    }
     for (int i = 0; i < 8; ++i)
         if (Res* r = ResAt(s.rtv[i])) d.rtv[i] = r->view;
+        if (s.rtv[0] != 0 && (!d.rtv[0] || !d.rtv[0]->texture)) {
+            // A draw into a target the host could not resolve ("no pass" in the frame stats): say which.
+            static std::atomic<int> shown {0};
+            Res* r = ResAt(s.rtv[0]);
+            Res* base = r ? r->base : nullptr;
+            if (shown++ < 12) UT_INFO("d3d: draw into an unresolved render target %#llx: res %p view %p base %p %s", (unsigned long long)s.rtv[0], r, r ? r->view.get() : nullptr, base,
+                                      base && base->texture ? "(base has a texture)" : base && base->buffer ? "(base is a buffer)" : "(no base resource)");
+        }
     if (Res* r = ResAt(s.dsv)) d.dsv = r->view;
     if (Res* r = ResAt(s.blend)) d.blend = r->state;
     if (Res* r = ResAt(s.depth_stencil)) d.depth_stencil = r->state;

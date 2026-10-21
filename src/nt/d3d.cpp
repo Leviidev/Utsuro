@@ -480,6 +480,9 @@ static void Setup(Runtime& rt, uint32_t os_timestamp, bool old_abi) {
             for (uint64_t i = 0; i < 8; ++i) s.rtv[i] = (i < c.Arg(0) && c.Arg(1)) ? c.Ptr<uint64_t>(1)[i] : 0;
             s.dsv = c.Arg(2);
         }
+        // (UAVStartSlot, NumUAVs, ppUAVs, pUAVInitialCounts): the pixel stage's UAVs share the context's uav[] with compute.
+        const uint64_t start = c.Arg(3), count = c.Arg(4);
+        if (count != 0xFFFFFFFFu && c.Arg(5) != 0) for (uint64_t i = 0; i < count && start + i < 64; ++i) s.uav[start + i] = c.Ptr<uint64_t>(5)[i];
         return 0;
     });
     OverrideAll("OMGetRenderTargets", [](Call& c) -> uint32_t {

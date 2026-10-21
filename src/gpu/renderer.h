@@ -75,6 +75,7 @@ struct DrawState {
     BufferBinding cb[2][16];                    ///< [0] vertex stage, [1] pixel stage
     std::shared_ptr<TextureView> srv[2][16];
     std::vector<std::pair<uint8_t, std::shared_ptr<TextureView>>> extra_srv[2];   ///< SRVs in slots 16 and above (ShaderReflection::high_slots)
+    std::shared_ptr<TextureView> ps_uav[64];    ///< pixel-stage UAVs (OMSetRenderTargetsAndUnorderedAccessViews)
     StateBlob sampler[2][16];
     VertexBufferBinding vb[16];
     std::shared_ptr<Buffer> index_buffer;
