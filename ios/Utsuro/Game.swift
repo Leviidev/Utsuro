@@ -20,6 +20,13 @@ struct InstalledGame: Identifiable, Hashable {
     let wideLogo: URL?
     let splash: URL?
 
+    /// How this game runs, as a dot and a word: this iPhone's own record first (it was played here), then what the
+    /// project knows about the title. Nothing fancier: the list lives in this file and moves with each release.
+    var compatibility: GameCompatibility {
+        if GameSettings(gameID: id).playSeconds > 120 { return .plays }
+        return GameCompatibility.known(title: title, executable: executable)
+    }
+
     static func == (a: InstalledGame, b: InstalledGame) -> Bool { a.id == b.id && a.dump == b.dump }
     func hash(into hasher: inout Hasher) { hasher.combine(id); hasher.combine(dump) }
 
@@ -119,5 +126,29 @@ final class ManifestReader: NSObject, XMLParserDelegate {
         }
         _ = path.popLast()
         text = ""
+    }
+}
+
+
+/// A status word and its colour, as Husk shows them.
+struct GameCompatibility: Equatable {
+    let label: String
+    let color: Color
+
+    static let plays = GameCompatibility(label: "Plays", color: .green)
+    static let ingame = GameCompatibility(label: "In-game", color: Color(red: 0.6, green: 0.8, blue: 0.2))
+    static let opens = GameCompatibility(label: "Opens", color: .orange)
+    static let broken = GameCompatibility(label: "Broken", color: .red)
+    static let untested = GameCompatibility(label: "Untested", color: .gray)
+
+    /// What the project has seen of the titles it ships notes for (PROJECT.md section 2).
+    static func known(title: String, executable: String) -> GameCompatibility {
+        let t = title.lowercased(), e = executable.lowercased()
+        if t.contains("minecraft") || t.contains("sonic mania") { return .plays }
+        if t.contains("rocket league") || e.contains("tagame") { return .ingame }
+        if t.contains("forza horizon 2") || e.contains("forza_durango") { return .opens }
+        if t.contains("puyo") || t.contains("mega man") || t.contains("overcooked") || t.contains("peggle") { return .opens }
+        if t.contains("trackmania") { return .broken }
+        return .untested
     }
 }

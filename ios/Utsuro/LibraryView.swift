@@ -53,7 +53,7 @@ struct LibraryView: View {
             VStack(spacing: 10) {
                 Image(systemName: "plus").font(.system(size: 34, weight: .semibold)).foregroundStyle(Theme.accentBright)
                     .frame(maxWidth: .infinity).aspectRatio(1, contentMode: .fit)
-                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cardCorner, style: .continuous))
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: Theme.cardCorner, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: Theme.cardCorner, style: .continuous).strokeBorder(Theme.hairline, style: StrokeStyle(lineWidth: 1.5, dash: [6, 5])))
                 Text("Add game").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.textDim)
             }
@@ -90,7 +90,13 @@ struct GameTile: View {
             }
             .frame(maxWidth: .infinity).aspectRatio(1, contentMode: .fit)
             .clipShape(RoundedRectangle(cornerRadius: Theme.cardCorner, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: Theme.cardCorner, style: .continuous).stroke(Color.white.opacity(0.12), lineWidth: 0.5))
+            .shadow(color: Color.black.opacity(0.08), radius: 6, x: 0, y: 3)
             Text(game.title).font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.text).lineLimit(2).multilineTextAlignment(.leading)
+            HStack(spacing: 5) {
+                Circle().fill(game.compatibility.color).frame(width: 7, height: 7)
+                Text(game.compatibility.label).font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.textDim)
+            }
         }
     }
 }

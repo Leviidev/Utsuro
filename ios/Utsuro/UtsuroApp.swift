@@ -24,6 +24,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 struct UtsuroApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @Environment(\.scenePhase) private var scenePhase
+    @ObservedObject private var theme = AppTheme.shared
 
     init() {
         // Before anything can execute a brk: an unserviced one is a fatal SIGTRAP, not a failed call.
@@ -35,8 +36,10 @@ struct UtsuroApp: App {
     var body: some Scene {
         WindowGroup {
             RootView()
-                .preferredColorScheme(.dark)
-                .tint(Theme.accentBright)
+                .tint(theme.accentColor)
+                .onAppear {
+                    Theme.apply(Theme.Appearance.current)
+                }
                 .onChange(of: scenePhase) { phase in
                     // StikDebug, TrollStore and the built-in helper all attach to a running Utsuro and leave it marked as debugged.
                     // The region is claimed the moment that is seen, while the debugger is still there to grant it.
