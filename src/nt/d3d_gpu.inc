@@ -1653,9 +1653,9 @@ void RegisterGpuOverrides() {
             }
             gpu::Draw(d, rd.args);
         }
-        // The title records a list per frame and runs it once; the host never frees objects, so the recording (with the data each draw
-        // copied) goes now.
-        std::vector<RecordedDraw>().swap(list->recorded);
+        // A list runs as often as the title executes it: Forza Horizon 2 records its scene into lists once and executes ~850 a frame
+        // (dropping the recording after the first run left everything but per-frame work undrawn). The recording goes when the title
+        // releases the list (command lists are recycled objects).
         return 0;
     });
 
