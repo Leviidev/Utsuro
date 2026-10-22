@@ -176,6 +176,7 @@ struct Translator {
     std::map<uint32_t, uint32_t> resource_dim;                      // t# -> dimension
     std::map<uint32_t, uint32_t> resource_stride;                   // t# -> byte stride
     std::map<uint32_t, uint32_t> tgsm_stride, tgsm_count;
+    std::set<uint32_t> tgsm_raw;   ///< raw (byte-addressed) thread group memory, as opposed to structured
     std::map<uint32_t, uint32_t> uav_stride;
     std::map<uint32_t, uint32_t> uav_dim;
     bool uses_structured {false}, uses_f32to16 {false}, uses_f16tof32 {false};
@@ -575,6 +576,7 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
             const uint32_t slot = o->index[0];
             t.tgsm_stride[slot] = 4;
             t.tgsm_count[slot] = (bytes + 3) / 4;
+            t.tgsm_raw.insert(slot);
             break;
         }
         case OP_DCL_TGSM_STRUCTURED: {
@@ -1028,20 +1030,62 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
         }
         case OP_IMM_ATOMIC_IADD: case OP_IMM_ATOMIC_AND: case OP_IMM_ATOMIC_OR: case OP_IMM_ATOMIC_XOR:
         case OP_IMM_ATOMIC_EXCH: case OP_IMM_ATOMIC_CMP_EXCH: case OP_IMM_ATOMIC_IMAX: case OP_IMM_ATOMIC_IMIN:
-        case OP_IMM_ATOMIC_UMAX: case OP_IMM_ATOMIC_UMIN: {
-            auto dst = operand(); auto uav = operand(); auto addr = operand(); auto val = operand();
-            t.Write(*dst, false, "as_type<float4>(uint4(0u))");
-            break;
-        }
-        case OP_ATOMIC_IADD: {
-            auto uav = operand(); auto addr = operand(); auto val = operand();
-            const uint32_t slot = uav->index[0];
-            t.Line("atomic_fetch_add_explicit((device atomic_uint*)&u" + std::to_string(slot) + "[" + t.SrcU(*addr) + ".x / 4u], " + t.SrcU(*val) + ".x, memory_order_relaxed);");
-            break;
-        }
-        case OP_ATOMIC_AND: case OP_ATOMIC_OR: case OP_ATOMIC_XOR: case OP_ATOMIC_CMP_STORE:
+        case OP_IMM_ATOMIC_UMAX: case OP_IMM_ATOMIC_UMIN:
+        case OP_ATOMIC_IADD: case OP_ATOMIC_AND: case OP_ATOMIC_OR: case OP_ATOMIC_XOR: case OP_ATOMIC_CMP_STORE:
         case OP_ATOMIC_IMAX: case OP_ATOMIC_IMIN: case OP_ATOMIC_UMAX: case OP_ATOMIC_UMIN: {
-            auto uav = operand(); auto addr = operand(); auto val = operand();
+            // atomic_*     mem, address, value [, value2]        (compare-store: compare, value)
+            // imm_atomic_* out, mem, address, value [, value2]   (out gets the value from before; compare-exchange: compare, value)
+            // mem is thread group memory (g#) or a buffer UAV (u#); both are words here. An earlier version always wrote u#,
+            // which named a UAV that was not declared for a g# (Forza Horizon 2's luminance average failed to compile).
+            const bool imm = op >= OP_IMM_ATOMIC_IADD;
+            OperandPtr out = imm ? operand() : nullptr;
+            auto mem = operand(); auto addr = operand(); auto v0 = operand();
+            const bool two = op == OP_ATOMIC_CMP_STORE || op == OP_IMM_ATOMIC_CMP_EXCH;
+            OperandPtr v1 = two ? operand() : nullptr;
+            const bool is_signed = op == OP_ATOMIC_IMAX || op == OP_ATOMIC_IMIN || op == OP_IMM_ATOMIC_IMAX || op == OP_IMM_ATOMIC_IMIN;
+            const std::string atype = is_signed ? "atomic_int" : "atomic_uint";
+            const uint32_t slot = mem->index[0];
+            const std::string a = t.SrcU(*addr);
+            std::string ptr;
+            if (mem->type == T_TGSM) {
+                const std::string index = t.tgsm_raw.count(slot) ? "(" + a + ".x / 4u)"
+                    : "((" + a + ".x * " + std::to_string(t.tgsm_stride[slot]) + "u + " + a + ".y) / 4u)";
+                ptr = "(threadgroup " + atype + "*)&tgsm_g" + std::to_string(slot) + "[" + index + "]";
+            } else if (mem->type == T_UAV && (t.uav_dim[slot] == 0 || t.uav_dim[slot] == 1)) {
+                const std::string index = t.uav_dim[slot] == 1 ? a + ".x"                          // RWBuffer<uint>: an element
+                    : t.uav_stride.count(slot) ? "((" + a + ".x * " + std::to_string(t.uav_stride[slot]) + "u + " + a + ".y) / 4u)"   // structured
+                    : "(" + a + ".x / 4u)";                                                         // raw: a byte offset
+                ptr = "(device " + atype + "*)&u" + std::to_string(slot) + "[" + index + "]";
+            } else {
+                static bool shown = false;
+                if (!shown) { shown = true; std::fprintf(stderr, "[ut:I] dxbc: an atomic on a texture UAV is not translated\n"); }
+                if (out) t.Write(*out, false, "as_type<float4>(uint4(0u))");
+                break;
+            }
+            const std::string val = is_signed ? "as_type<int>(" + t.SrcU(*v0) + ".x)" : t.SrcU(*v0) + ".x";
+            std::string fn;
+            switch (op) {
+            case OP_ATOMIC_IADD: case OP_IMM_ATOMIC_IADD: fn = "atomic_fetch_add_explicit"; break;
+            case OP_ATOMIC_AND: case OP_IMM_ATOMIC_AND: fn = "atomic_fetch_and_explicit"; break;
+            case OP_ATOMIC_OR: case OP_IMM_ATOMIC_OR: fn = "atomic_fetch_or_explicit"; break;
+            case OP_ATOMIC_XOR: case OP_IMM_ATOMIC_XOR: fn = "atomic_fetch_xor_explicit"; break;
+            case OP_ATOMIC_IMAX: case OP_IMM_ATOMIC_IMAX: case OP_ATOMIC_UMAX: case OP_IMM_ATOMIC_UMAX: fn = "atomic_fetch_max_explicit"; break;
+            case OP_ATOMIC_IMIN: case OP_IMM_ATOMIC_IMIN: case OP_ATOMIC_UMIN: case OP_IMM_ATOMIC_UMIN: fn = "atomic_fetch_min_explicit"; break;
+            case OP_IMM_ATOMIC_EXCH: fn = "atomic_exchange_explicit"; break;
+            default: break;
+            }
+            t.Line("{");
+            if (two) {
+                // Compare-exchange happens once in D3D; Metal's weak form may fail without cause, so it is retried until it either
+                // succeeds or sees a value other than the one compared with.
+                t.Line("    uint ut_old = " + t.SrcU(*v0) + ".x;");
+                t.Line("    while (!atomic_compare_exchange_weak_explicit(" + ptr + ", &ut_old, " + t.SrcU(*v1) + ".x, memory_order_relaxed, memory_order_relaxed)"
+                       " && ut_old == " + t.SrcU(*v0) + ".x) {}");
+            } else {
+                t.Line("    uint ut_old = as_type<uint>(" + fn + "(" + ptr + ", " + val + ", memory_order_relaxed));");
+            }
+            if (out) t.Write(*out, false, "as_type<float4>(uint4(ut_old))");
+            t.Line("}");
             break;
         }
         case OP_LD_UAV_TYPED: {
