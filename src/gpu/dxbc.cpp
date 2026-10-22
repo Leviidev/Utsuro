@@ -1215,7 +1215,13 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
            "    uint4 b = as_type<uint4>(v);\n"
            "    uint4 mag = b & uint4(0x7fffffffu);\n"
            "    float4 r = select(v, as_type<float4>((b & uint4(0x80000000u)) | uint4(0x477fe000u)), mag == uint4(0x7f800000u));\n"
-           "    return select(r, float4(0.0f), mag > uint4(0x7f800000u));\n}\n\n";
+           << (std::getenv("UTSURO_NANDEBUG") != nullptr
+                   // Debugging aid: a NaN output shows magenta, an infinite one green, a negative one blue (instead of 0, clamped, 0).
+                   ? "    if (any(mag > uint4(0x7f800000u))) return float4(64.0f, 0.0f, 64.0f, 1.0f);\n"
+                     "    if (any(mag == uint4(0x7f800000u))) return float4(0.0f, 64.0f, 0.0f, 1.0f);\n"
+                     "    if (any(v.xyz < float3(0.0f))) return float4(0.0f, 0.0f, 64.0f, 1.0f);\n"
+                   : "")
+           << "    return select(r, float4(0.0f), mag > uint4(0x7f800000u));\n}\n\n";
     if (t.uses_structured) {
         src << "static inline float4 ut_ld_structured(device const uint* buf, uint struct_idx, uint stride, uint byte_offset) {\n"
                "    if (!buf) return float4(0.0f);\n"

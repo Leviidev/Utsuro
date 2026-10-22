@@ -114,6 +114,7 @@ struct Globals {
     uint64_t frame_count {0};
     int trace_draws {0};
     uint64_t trace_frame {0};
+    uint32_t trace_cap {1500};   ///< draws logged in the traced frame (UTSURO_TRACECAP)
     id<MTLRenderPipelineState> depth_copy_pipeline {nil};
     int step_dumps {0}, srv_dumps {0};
     int draws_in_command {0};   ///< draws encoded into the current command buffer (it is committed every so many)
@@ -859,7 +860,7 @@ id<MTLRenderPipelineState> PipelineFor(const DrawState& st, Shader& vs, Shader* 
         d.depthAttachmentPixelFormat = df;
         if (HasStencil(df)) d.stencilAttachmentPixelFormat = df;
     }
-    if (!st.blend.empty() && Rd<uint32_t>(st.blend.bytes, 0) != 0) d.alphaToCoverageEnabled = YES;
+    if (!st.blend.empty() && Rd<uint32_t>(st.blend.bytes, 0) != 0 && g->debug.find("noa2c") == std::string::npos) d.alphaToCoverageEnabled = YES;
     NSError* err = nil;
     id<MTLRenderPipelineState> pso = [g->device newRenderPipelineStateWithDescriptor:d error:&err];
     if (pso == nil) UT_ERROR("gpu: pipeline creation failed: %s", [[err localizedDescription] UTF8String]);
@@ -935,6 +936,7 @@ bool Init() {
         g->dump_dir = std::getenv("UTSURO_DUMPFRAMES");
         if (const char* d = std::getenv("UTSURO_GPUDEBUG")) g->debug = d;
         if (const char* d = std::getenv("UTSURO_TRACEFRAME")) g->trace_frame = std::strtoull(d, nullptr, 10);
+        if (const char* d = std::getenv("UTSURO_TRACECAP")) g->trace_cap = static_cast<uint32_t>(std::strtoul(d, nullptr, 10));
         if (const char* e = std::getenv("UTSURO_DUMPEVERY")) g->dump_every = (uint32_t)std::max(1, std::atoi(e));
     }
     g->ready = true;
@@ -1488,7 +1490,7 @@ void Draw(const DrawState& st, const DrawArgs& args) {
             [e setVertexBuffer:st.vb[i].buffer->mtl offset:st.vb[i].buffer->offset + st.vb[i].offset atIndex:15 + i];
         }
 
-        if (g->frame_count == g->trace_frame && g->trace_draws < 1500) {
+        if (g->frame_count == g->trace_frame && g->trace_draws < g->trace_cap) {
             ++g->trace_draws;
             if (st.rtv[0] && st.rtv[0]->texture && std::find(g->trace_rts.begin(), g->trace_rts.end(), st.rtv[0]->texture) == g->trace_rts.end()) g->trace_rts.push_back(st.rtv[0]->texture);
             id<MTLTexture> rt0 = st.rtv[0] && st.rtv[0]->texture ? ViewOf(*st.rtv[0]->texture, st.rtv[0]->desc, true) : nil;
@@ -1499,7 +1501,7 @@ void Draw(const DrawState& st, const DrawArgs& args) {
                     st.num_viewports ? st.viewports[0].w : 0.f, st.num_viewports ? st.viewports[0].h : 0.f, st.num_viewports ? st.viewports[0].x : 0.f, st.num_viewports ? st.viewports[0].y : 0.f,
                     (void*)st.cb[0][0].buffer.get(), (void*)st.srv[1][0].get(), st.blend.bytes.size());
         }
-        if (g->frame_count == g->trace_frame && g->trace_draws <= 1500 && g->trace_draws > 0 && std::getenv("UTSURO_TRACEPIXELS")) {
+        if (g->frame_count == g->trace_frame && g->trace_draws <= g->trace_cap && g->trace_draws > 0 && std::getenv("UTSURO_TRACEPIXELS")) {
             for (int stage = 0; stage < 2; ++stage) for (int slot = 0; slot < 14; ++slot) {
                 const BufferBinding& b = st.cb[stage][slot];
                 const Shader* shader = stage == 0 ? st.vs.get() : st.ps.get();
@@ -1624,7 +1626,7 @@ void Draw(const DrawState& st, const DrawArgs& args) {
             }
             ++g->srv_dumps;
         }
-        if (g->frame_count == g->trace_frame && g->dump_dir != nullptr && std::getenv("UTSURO_STEPDUMP") && g->trace_draws > 0 && g->trace_draws < 1500 && st.rtv[0] && st.rtv[0]->texture && st.rtv[0]->texture->mtl.width <= (std::getenv("UTSURO_STEPDUMP")[0] == 'a' ? 4000 : 960) && st.rtv[0]->texture->mtl.width >= 400 && g->step_dumps < 400) {
+        if (g->frame_count == g->trace_frame && g->dump_dir != nullptr && std::getenv("UTSURO_STEPDUMP") && g->trace_draws > 0 && g->trace_draws < g->trace_cap && st.rtv[0] && st.rtv[0]->texture && st.rtv[0]->texture->mtl.width <= (std::getenv("UTSURO_STEPDUMP")[0] == 'a' ? 4000 : 960) && st.rtv[0]->texture->mtl.width >= 400 && g->step_dumps < 400) {
             // Debug: the render target after this draw, one picture per draw.
             EndEncoder();
             [Command() commit];
@@ -2070,6 +2072,22 @@ void Present(const std::shared_ptr<Texture>& back, uint32_t sync_interval) {
         EndEncoder();
         g->draws_in_command = 0;
         const uint64_t index = ++g->frame_count;
+        // UTSURO_TRACEAFTER=<draws>:<frames>: trace the frame that many frames after the first one with more draws than that (a
+        // title's heavy phase starts at a different frame from run to run).
+        if (static const char* after = std::getenv("UTSURO_TRACEAFTER"); after != nullptr) {
+            static uint64_t last_draws = 0, heavy = 0;
+            static bool armed = false;
+            const uint64_t frame_draws = g->stats.draws - last_draws;
+            last_draws = g->stats.draws;
+            const uint64_t threshold = std::strtoull(after, nullptr, 10);
+            const char* colon = std::strchr(after, ':');
+            heavy = frame_draws > threshold ? heavy + 1 : 0;
+            if (!armed && heavy >= 30) {   // thirty heavy frames in a row: not a one-frame spike
+                armed = true;
+                g->trace_frame = index + (colon != nullptr ? std::strtoull(colon + 1, nullptr, 10) : 60);
+                UT_INFO("gpu: frame %llu drew %llu: tracing frame %llu", (unsigned long long)index, (unsigned long long)frame_draws, (unsigned long long)g->trace_frame);
+            }
+        }
         if (index % 120 == 1) UT_INFO("gpu: Present back=%p mtl=%p", back.get(), back ? (__bridge void*)back->mtl : nullptr);
         if (index % 120 == 1) {
             static auto last_report = std::chrono::steady_clock::now();
