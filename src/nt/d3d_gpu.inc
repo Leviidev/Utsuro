@@ -258,6 +258,10 @@ void OnCreate(Call& c, const winrt::Method& m, Obj& o) {
             }
             // A format of 0 keeps the texture's own.
         }
+        if (n == "CreateUnorderedAccessView" && base->buffer) {
+            const uint32_t zero = 0;
+            v->counter = gpu::CreateBuffer(4, false, &zero);   // the hidden append/consume counter every buffer UAV carries
+        }
         r.view = v;
     } else if (n.size() > 12 && n.compare(0, 6, "Create") == 0 && n.find("Shader") != std::string::npos && n != "CreateShaderResourceView") {
         if (c.Arg(0) == 0) return;
@@ -1149,6 +1153,15 @@ void DoDispatch(Obj& ctx, uint32_t x, uint32_t y, uint32_t z) {
 
 // ---- resource contents -----------------------------------------------------------------------------
 
+/// Sets a UAV's append/consume counter (an initial count given when it is bound; -1 keeps it), in order on the GPU.
+void SetUavCounter(Res* uav, uint32_t value) {
+    if (value == 0xFFFFFFFFu || uav == nullptr || !uav->view || !uav->view->counter) return;
+    gpu::TextureView word;
+    word.buffer = uav->view->counter;
+    const uint32_t v[4] = {value, 0, 0, 0};
+    gpu::ClearUav(word, v, false);
+}
+
 void TextureShape(const gpu::TextureDesc& d, uint32_t sub, uint32_t* mip, uint32_t* slice, uint32_t* row, uint32_t* rows, uint32_t* depth) {
     *mip = sub % std::max(1u, d.mips);
     *slice = sub / std::max(1u, d.mips);
@@ -1162,6 +1175,12 @@ uint32_t MapBuffer(Call& c, Res& r, uint32_t type, uint64_t* out) {
         Tally("~buffer read maps");
         static std::atomic<int> shown {0};
         if (shown++ < 12) UT_INFO("d3d: Map for reading: buffer %u bytes usage %u bind %#x gpu_written %d", gpu::BufferSize(*r.buffer), r.usage, r.bind, r.gpu_written ? 1 : 0);
+        static std::atomic<uint64_t> reads {0};
+        if (std::getenv("UTSURO_READBACKLOG") != nullptr && gpu::BufferSize(*r.buffer) >= 16 && reads++ % 120 == 0) {
+            const float* v = reinterpret_cast<const float*>(gpu::BufferData(*r.buffer));
+            const uint32_t* u = reinterpret_cast<const uint32_t*>(v);
+            UT_INFO("d3d: readback (frame %llu): %g %g %g %g (%08x %08x %08x %08x)", (unsigned long long)g_frame.load(), v[0], v[1], v[2], v[3], u[0], u[1], u[2], u[3]);
+        }
     }
     uint8_t* p;
     if (type == 4) p = gpu::RenameBuffer(r.buffer, false);   // WRITE_DISCARD: new storage, old contents stay with the frames that use them
@@ -1546,6 +1565,20 @@ void RegisterGpuOverrides() {
         gpu::ClearRenderTarget(*r->view, c.Ptr<float>(1));
         return 0;
     });
+    // ClearUnorderedAccessViewUint/Float(uav, values[4]): Forza Horizon 2 resets its per-frame GPU counters with these (unhandled,
+    // the 16-byte buffer it reads back each frame counted up for ever).
+    OverrideAll("ClearUnorderedAccessViewUint", [](Call& c) -> uint32_t {
+        Res* r = ResAt(c.Arg(0));
+        if (r == nullptr || !r->view || c.Arg(1) == 0) return 0;
+        gpu::ClearUav(*r->view, c.Ptr<uint32_t>(1), false);
+        return 0;
+    });
+    OverrideAll("ClearUnorderedAccessViewFloat", [](Call& c) -> uint32_t {
+        Res* r = ResAt(c.Arg(0));
+        if (r == nullptr || !r->view || c.Arg(1) == 0) return 0;
+        gpu::ClearUav(*r->view, c.Ptr<uint32_t>(1), true);
+        return 0;
+    });
     // ClearDepthStencilView(dsv, flags, depth (xmm3), stencil)
     OverrideAll("ClearDepthStencilView", [](Call& c) -> uint32_t {
         Res* r = ResAt(c.Arg(0));
@@ -1658,14 +1691,25 @@ void RegisterGpuOverrides() {
         if (cs_shown++ < 20) UT_INFO("d3d: CSSetShader cs=%#llx res=%p shader=%p", (unsigned long long)c.Arg(0), r, r ? r->shader.get() : nullptr);
         return 0;
     });
+    // CSSetUnorderedAccessViews(start, count, uavs, initial counts): a count other than -1 sets the view's append/consume counter.
     OverrideAll("CSSetUnorderedAccessViews", [](Call& c) -> uint32_t {
         auto& s = StateOf(c.obj);
         uint32_t start = static_cast<uint32_t>(c.Arg(0));
         uint32_t count = static_cast<uint32_t>(c.Arg(1));
         const auto* uavs = c.Ptr<uint64_t>(2);
+        const auto* initial = c.Arg(3) != 0 ? c.Ptr<uint32_t>(3) : nullptr;
         for (uint32_t i = 0; uavs && i < count && (start + i) < 64; ++i) {
             s.uav[start + i] = uavs[i];
+            if (initial != nullptr) SetUavCounter(ResAt(uavs[i]), initial[i]);
         }
+        return 0;
+    });
+    // CopyStructureCount(dst buffer, byte offset, uav): the view's counter, copied on the GPU in order with the work around it.
+    OverrideAll("CopyStructureCount", [](Call& c) -> uint32_t {
+        Res* dst = ResAt(c.Arg(0));
+        Res* uav = ResAt(c.Arg(2));
+        if (dst == nullptr || !dst->buffer || uav == nullptr || !uav->view || !uav->view->counter) return 0;
+        gpu::CopyBuffer(*dst->buffer, static_cast<uint32_t>(c.Arg(1)), *uav->view->counter, 0, 4);
         return 0;
     });
     OverrideAll("Dispatch", [](Call& c) -> uint32_t {

@@ -147,6 +147,7 @@ uint32_t NextBufferIndex(T& t) {
     uint32_t used = 0;
     for (int i = 0; i < 128; ++i) if (t.refl.buffer_index[i] != 0) ++used;
     for (int i = 0; i < 64; ++i) if (t.refl.uav_index[i] != 0) ++used;
+    for (int i = 0; i < 64; ++i) if (t.refl.counter_index[i] != 0) ++used;
     return std::min(first + used, 30u);
 }
 template <typename T>
@@ -154,6 +155,13 @@ uint32_t BufferIndexFor(T& t, uint32_t slot) {
     if (slot < 128 && t.refl.buffer_index[slot] != 0) return t.refl.buffer_index[slot];
     const uint32_t index = NextBufferIndex(t);
     if (slot < 128) t.refl.buffer_index[slot] = static_cast<uint8_t>(index);
+    return index;
+}
+template <typename T>
+uint32_t CounterIndexFor(T& t, uint32_t slot) {
+    if (slot < 64 && t.refl.counter_index[slot] != 0) return t.refl.counter_index[slot];
+    const uint32_t index = NextBufferIndex(t);
+    if (slot < 64) t.refl.counter_index[slot] = static_cast<uint8_t>(index);
     return index;
 }
 template <typename T>
@@ -1024,8 +1032,16 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
             break;
         }
         case OP_IMM_ATOMIC_ALLOC: case OP_IMM_ATOMIC_CONSUME: {
+            // Append/consume: the UAV's hidden counter, a word the renderer binds next to it (set by the initial count given with the
+            // view, read back by CopyStructureCount). Alloc returns the count before the increment, consume the one after the decrement.
             auto dst = operand(); auto uav = operand();
-            t.Write(*dst, false, "as_type<float4>(uint4(0u))");
+            const uint32_t slot = uav->index[0];
+            if (slot < 64 && t.refl.counter_index[slot] == 0)
+                uav_decls.push_back("device atomic_uint* uc" + std::to_string(slot) + " [[buffer(" + std::to_string(CounterIndexFor(t, slot)) + ")]]");
+            const std::string c = "uc" + std::to_string(slot);
+            const std::string v = op == OP_IMM_ATOMIC_ALLOC ? "atomic_fetch_add_explicit(" + c + ", 1u, memory_order_relaxed)"
+                                                            : "(atomic_fetch_sub_explicit(" + c + ", 1u, memory_order_relaxed) - 1u)";
+            t.Write(*dst, false, "as_type<float4>(uint4(" + v + "))");
             break;
         }
         case OP_IMM_ATOMIC_IADD: case OP_IMM_ATOMIC_AND: case OP_IMM_ATOMIC_OR: case OP_IMM_ATOMIC_XOR:

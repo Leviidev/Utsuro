@@ -30,6 +30,7 @@ struct ShaderReflection {
     uint8_t buffer_index[128] {};         ///< Metal buffer index of a structured/raw buffer SRV in slot i (0 = none).
     std::vector<uint8_t> high_slots;      ///< Declared SRV slots at 16 and above (outside the `textures` mask and the fixed state arrays).
     uint8_t uav_index[64] {};             ///< Metal buffer index of a structured/raw buffer UAV in slot i (0 = none).
+    uint8_t counter_index[64] {};         ///< Metal buffer index of UAV i's hidden append/consume counter (0 = none).
     bool writes_depth {false};
     uint32_t outputs_written {0};    ///< SV_Target mask for pixel shaders.
     uint32_t uavs {0};

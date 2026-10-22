@@ -37,6 +37,7 @@ struct TextureView {
     std::shared_ptr<Texture> texture;
     std::shared_ptr<Buffer> buffer;
     ViewDesc desc;
+    std::shared_ptr<Buffer> counter;   ///< a buffer UAV's hidden append/consume counter (one 32-bit word)
 };
 
 struct BufferBinding {
@@ -158,6 +159,8 @@ void Draw(const DrawState& state, const DrawArgs& args);
 void Dispatch(const DispatchState& state, uint32_t x, uint32_t y, uint32_t z);
 void ClearRenderTarget(const TextureView& view, const float color[4]);
 void ClearDepthStencil(const TextureView& view, uint32_t flags, float depth, uint8_t stencil);
+/// ClearUnorderedAccessViewUint/Float: a buffer view gets value[0] in every 32-bit word, a texture view the value per channel.
+void ClearUav(const TextureView& view, const uint32_t value[4], bool as_float);
 void CopyBuffer(Buffer& dst, uint32_t dst_offset, Buffer& src, uint32_t src_offset, uint32_t size);
 /// Ends the frame: shows `back_buffer` in the window and waits for the display's pace.
 void Present(const std::shared_ptr<Texture>& back_buffer, uint32_t sync_interval);

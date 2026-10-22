@@ -107,6 +107,7 @@ struct Globals {
     id<MTLBuffer> zero_cb {nil};
 
     id<MTLRenderPipelineState> present_pipeline {nil};
+    id<MTLComputePipelineState> fill_pipeline {nil};   ///< writes one 32-bit value over a buffer (UAV clears)
     CAMetalLayer* layer {nil};
 
     uint64_t frame_count {0};
@@ -422,6 +423,13 @@ void EndEncoder() {
 id<MTLCommandBuffer> Command() {
     if (g->command == nil) g->command = [g->queue commandBuffer];
     return g->command;
+}
+
+/// A counter word for append/consume UAVs bound without one (their counts go nowhere).
+id<MTLBuffer> ScratchCounter() {
+    static id<MTLBuffer> b = nil;
+    if (b == nil) { b = NewBuffer(256); std::memset(b.contents, 0, 256); }
+    return b;
 }
 
 id<MTLTexture> ViewOf(Texture& t, const ViewDesc& v, bool as_render_target) {
@@ -1368,6 +1376,10 @@ void Draw(const DrawState& st, const DrawArgs& args) {
                     if (rf.uav_index[i] != 0) [e setFragmentBuffer:(v && v->buffer) ? v->buffer->mtl : g->zero_cb offset:(v && v->buffer) ? v->buffer->offset : 0 atIndex:rf.uav_index[i]];
                     else if (v && v->texture) [e setFragmentTexture:ViewOf(*v->texture, v->desc, false) atIndex:64 + i];
                     else [e setFragmentTexture:DummyTexture(3) atIndex:64 + i];
+                    if (rf.counter_index[i] != 0) {
+                        const bool have = v && v->counter && v->counter->mtl != nil;
+                        [e setFragmentBuffer:have ? v->counter->mtl : ScratchCounter() offset:have ? v->counter->offset : 0 atIndex:rf.counter_index[i]];
+                    }
                 }
             }
             for (int i = 0; i < 16; ++i) {
@@ -1704,6 +1716,11 @@ void Dispatch(const DispatchState& st, uint32_t x, uint32_t y, uint32_t z) {
                 [ce setTexture:DummyTexture(3) atIndex:64 + i];
             }
         }
+        for (int i = 0; i < 64; ++i) {
+            if (rf.counter_index[i] == 0) continue;
+            const bool have = st.uav[i] && st.uav[i]->counter && st.uav[i]->counter->mtl != nil;
+            [ce setBuffer:have ? st.uav[i]->counter->mtl : ScratchCounter() offset:have ? st.uav[i]->counter->offset : 0 atIndex:rf.counter_index[i]];
+        }
 
         MTLSize threadgroups = MTLSizeMake(x, y, z);
         MTLSize threadsPerThreadgroup = MTLSizeMake(
@@ -1731,6 +1748,85 @@ void ClearRenderTarget(const TextureView& view, const float color[4]) {
         pass.colorAttachments[0].clearColor = MTLClearColorMake(color[0], color[1], color[2], color[3]);
         id<MTLRenderCommandEncoder> e = [Command() renderCommandEncoderWithDescriptor:pass];
         [e endEncoding];
+    }
+}
+
+static bool IsIntegerFormat(MTLPixelFormat f) {
+    switch (f) {
+    case MTLPixelFormatR8Uint: case MTLPixelFormatR8Sint: case MTLPixelFormatR16Uint: case MTLPixelFormatR16Sint: case MTLPixelFormatRG8Uint:
+    case MTLPixelFormatRG8Sint: case MTLPixelFormatR32Uint: case MTLPixelFormatR32Sint: case MTLPixelFormatRG16Uint: case MTLPixelFormatRG16Sint:
+    case MTLPixelFormatRGBA8Uint: case MTLPixelFormatRGBA8Sint: case MTLPixelFormatRGB10A2Uint: case MTLPixelFormatRG32Uint: case MTLPixelFormatRG32Sint:
+    case MTLPixelFormatRGBA16Uint: case MTLPixelFormatRGBA16Sint: case MTLPixelFormatRGBA32Uint: case MTLPixelFormatRGBA32Sint:
+        return true;
+    default:
+        return false;
+    }
+}
+
+void ClearUav(const TextureView& view, const uint32_t value[4], bool as_float) {
+    std::scoped_lock lock {g->mutex};
+    @autoreleasepool {
+        if (view.buffer && view.buffer->mtl != nil) {
+            // Raw and structured views clear every 32-bit word to the first value (a typed buffer's elements are words here too).
+            Buffer& b = *view.buffer;
+            const uint32_t v = value[0];
+            EndEncoder();
+            if ((v & 0xFF) * 0x01010101u == v) {
+                id<MTLBlitCommandEncoder> blit = [Command() blitCommandEncoder];
+                [blit fillBuffer:b.mtl range:NSMakeRange(b.offset, b.size) value:static_cast<uint8_t>(v)];
+                [blit endEncoding];
+                return;
+            }
+            if (g->fill_pipeline == nil) {
+                NSString* src = @"#include <metal_stdlib>\nusing namespace metal;\n"
+                    "kernel void fill(device uint* b [[buffer(0)]], constant uint2& a [[buffer(1)]], uint i [[thread_position_in_grid]]) { if (i < a.y) b[i] = a.x; }\n";
+                NSError* err = nil;
+                id<MTLLibrary> lib = [g->device newLibraryWithSource:src options:nil error:&err];
+                if (lib != nil) g->fill_pipeline = [g->device newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fill"] error:&err];
+                if (g->fill_pipeline == nil) { UT_ERROR("gpu: fill pipeline: %s", err ? [[err localizedDescription] UTF8String] : "?"); return; }
+            }
+            const uint32_t args[2] = {v, b.size / 4};
+            id<MTLComputeCommandEncoder> ce = [Command() computeCommandEncoder];
+            [ce setComputePipelineState:g->fill_pipeline];
+            [ce setBuffer:b.mtl offset:b.offset atIndex:0];
+            [ce setBytes:args length:sizeof args atIndex:1];
+            [ce dispatchThreads:MTLSizeMake(args[1], 1, 1) threadsPerThreadgroup:MTLSizeMake(std::min<NSUInteger>(256, std::max<uint32_t>(1, args[1])), 1, 1)];
+            [ce endEncoding];
+            return;
+        }
+        if (!view.texture || view.texture->mtl == nil) return;
+        Texture& t = *view.texture;
+        id<MTLTexture> target = ViewOf(t, view.desc, true);
+        if (target == nil) return;
+        MTLClearColor color;
+        if (as_float) {
+            float f[4];
+            std::memcpy(f, value, sizeof f);
+            color = MTLClearColorMake(f[0], f[1], f[2], f[3]);
+        } else if (IsIntegerFormat(target.pixelFormat)) {
+            color = MTLClearColorMake(value[0], value[1], value[2], value[3]);
+        } else {
+            // A uint clear of a float or normalised view copies bits; the values titles use are 0 (and all ones).
+            auto unit = [](uint32_t v) { return v == 0 ? 0.0 : 1.0; };
+            color = MTLClearColorMake(unit(value[0]), unit(value[1]), unit(value[2]), unit(value[3]));
+        }
+        EndEncoder();
+        ++g->stats.clears;
+        const NSUInteger planes = target.textureType == MTLTextureType3D ? std::max<NSUInteger>(1, target.depth) : 1;
+        const NSUInteger layers = target.textureType == MTLTextureType3D ? 1 : std::max<NSUInteger>(1, target.arrayLength);
+        for (NSUInteger z = 0; z < planes; ++z) {
+            for (NSUInteger layer = 0; layer < layers; ++layer) {
+                MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+                pass.colorAttachments[0].texture = target;
+                pass.colorAttachments[0].depthPlane = z;
+                pass.colorAttachments[0].slice = layer;
+                pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+                pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+                pass.colorAttachments[0].clearColor = color;
+                id<MTLRenderCommandEncoder> e = [Command() renderCommandEncoderWithDescriptor:pass];
+                [e endEncoding];
+            }
+        }
     }
 }
 
