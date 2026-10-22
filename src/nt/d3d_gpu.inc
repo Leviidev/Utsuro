@@ -1521,9 +1521,13 @@ void RegisterGpuOverrides() {
         gpu::ClearDepthStencil(*r->view, static_cast<uint32_t>(c.Arg(1)), c.Float(2), static_cast<uint8_t>(c.Arg(3)));
         return 0;
     });
+    // ClearState resets what is bound, not what a deferred context has recorded: Forza Horizon 2 records its video frame and then
+    // clears state before its UI on the same context, which dropped the video (the screen stayed black while it played).
     OverrideAll("ClearState", [](Call& c) -> uint32_t {
         auto& s = StateOf(c.obj);
+        std::vector<RecordedDraw> recorded = std::move(s.recorded);
         s = CtxState {};
+        s.recorded = std::move(recorded);
         return 0;
     });
 
