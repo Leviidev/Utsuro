@@ -365,9 +365,49 @@ void RegisterClasses(Runtime& rt) {
     // PackageTransferWatcher.Create: a watcher that never reports anything (the title waits for chunks that are all installed).
     rt.OverrideAllNamed("IPackageTransferWatcherStatics", "Create", [](Call& c) -> uint32_t {
         Runtime& r = Runtime::Get();
+        static std::atomic<int> shown {0};
+        if (shown++ < 6) {
+            uint64_t vt = 0;
+            if (c.Arg(0) > 0x10000) SafeRead(c.Arg(0), &vt, 8);
+            Obj* arg = c.Arg(0) > 0x10000 ? r.FromPointer(c.Arg(0)) : nullptr;
+            UT_INFO("winrt: PackageTransferWatcher.Create(slot %u: %#llx [vtable %s, host object %s], %#llx, %#llx)", c.slot, (unsigned long long)c.Arg(0),
+                    c.kernel.Describe(vt).c_str(), arg ? arg->class_name.c_str() : "none", (unsigned long long)c.Arg(1), (unsigned long long)c.Arg(2));
+        }
         Iface* main = r.FindInterface("IPackageTransferWatcher");
         Obj* watcher = r.NewObject("Windows.Xbox.Management.Deployment.PackageTransferWatcher", {main, r.FindInterface("IPackageTransferWatcherTransferInfo")});
         *c.Ptr<uint64_t>(c.iface.methods[c.slot].ret_arg) = r.Pointer(*watcher, *main);
+        return 0;
+    });
+
+    // add_ChunkCompleted: a watcher made for a whole package (Forza Horizon 2: PackageTransferWatcher.Create(Package.Current)) raises
+    // ChunkCompleted for its chunks as they install, and titles keep their own record of installed chunks from it. FH2 loads a file
+    // -- an FMOD bank, for one -- only when the chunk its file table gives for that file is in that record; with nothing raised no
+    // bank loaded and it sat on a black screen after its intro. A dump has every chunk installed but carries no chunk layout, so
+    // every id the title can name is raised: FH2's table uses ids from 0 to 0x22a5 (745 of them, ten apart), hence 0 .. 0x3fff.
+    rt.Override("IChunkCompletedEventArgs", "get_ChunkId", [](Call& c) -> uint32_t {
+        if (auto* out = c.Ptr<uint32_t>(0)) *out = static_cast<uint32_t>(c.obj.u64["chunk"]);
+        return 0;
+    });
+    rt.Override("IPackageTransferWatcher", "add_ChunkCompleted", [](Call& c) -> uint32_t {
+        constexpr uint32_t kChunks = 0x4000;
+        const uint64_t handler = c.Arg(0);
+        if (auto* token = c.Ptr<uint64_t>(1)) *token = 1;
+        if (handler <= 0x10000) return 0;
+        Runtime& r = Runtime::Get();
+        const uint64_t sender = r.Pointer(c.obj, c.iface);
+        Iface* args_iface = r.FindInterface("IChunkCompletedEventArgs");
+        Obj* args = r.NewObject("Windows.Xbox.Management.Deployment.ChunkCompletedEventArgs", {args_iface});   // one, reused: the handler reads it and lets go
+        args->refs += 1;
+        const uint64_t args_ptr = r.Pointer(*args, *args_iface);
+        UT_INFO("winrt: PackageTransferWatcher raises ChunkCompleted for chunks 0 .. %#x", kChunks - 1);
+        auto fire = std::make_shared<std::function<GuestStep(uint32_t)>>();
+        *fire = [fire, handler, sender, args, args_ptr](uint32_t chunk) -> GuestStep {
+            if (chunk == kChunks) return GuestStep::Return(0);
+            args->u64["chunk"] = chunk;
+            ++args->refs;   // the handler may Release what it was given
+            return Runtime::Get().InvokeDelegate(handler, {sender, args_ptr}, [fire, chunk](NtThread&, uint64_t) { return (*fire)(chunk + 1); });
+        };
+        c.thread.CallGuest((*fire)(0));
         return 0;
     });
 

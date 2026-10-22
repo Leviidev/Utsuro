@@ -1,5 +1,6 @@
 // sys_thread.cpp -- threads, contexts, exceptions and process termination.
 #include "nt/kernel.h"
+#include "nt/safe_mem.h"
 
 #include "engine/log.h"
 
@@ -137,6 +138,21 @@ NTSTATUS NtRaiseException(Kernel& k, NtThread& t, SyscallArgs& a) {
     auto* rec = a.Ptr<EXCEPTION_RECORD>(0);
     auto* ctx = a.Ptr<CONTEXT>(1);
     const bool first = (a[2] & 0xFF) != 0;
+    // The MSVC way to name a thread for a debugger: exception 0x406D1388 with THREADNAME_INFO {0x1000, name, thread id, flags}.
+    // No debugger catches it here and the title's own handler swallows it, as on a console; the name is kept for stack snapshots.
+    if (rec != nullptr && rec->ExceptionCode == 0x406D1388 && rec->NumberParameters >= 3 && rec->ExceptionInformation[0] == 0x1000) {
+        char name[64] = {};
+        for (size_t i = 0; i + 1 < sizeof name; ++i) {
+            char c = 0;
+            if (!SafeRead(rec->ExceptionInformation[1] + i, &c, 1) || c == 0) break;
+            name[i] = c;
+        }
+        const uint32_t id = static_cast<uint32_t>(rec->ExceptionInformation[2]);
+        std::shared_ptr<NtThread> other = (id == 0xFFFFFFFFu || id == t.tid_) ? nullptr : k.FindThread(id);
+        NtThread& named = other ? *other : t;
+        if (named.name.empty()) named.name = name;
+        UT_INFO("thread %llu is called \"%s\"", (unsigned long long)named.tid_, name);
+    }
     if (first) {
         // Build the frame KiUserExceptionDispatcher expects: CONTEXT at rsp, the record at
         // rsp+0x4f0, and run it.

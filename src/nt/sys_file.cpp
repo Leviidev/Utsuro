@@ -198,14 +198,31 @@ NTSTATUS DoCreate(Kernel& k, NtThread&, HANDLE* out, uint32_t access, const OBJE
     return STATUS_SUCCESS;
 }
 
+/// UTSURO_FILELOG=<text>: logs every open whose path contains <text> (any case; "*" for all), with its result.
+void LogOpen(Kernel& k, NtThread& t, const OBJECT_ATTRIBUTES* oa, NTSTATUS rc) {
+    static const char* filter = std::getenv("UTSURO_FILELOG");
+    if (filter == nullptr) return;
+    std::string nt_path;
+    if (!NameFromAttributes(k, oa, &nt_path)) return;
+    std::string low = nt_path, want = filter;
+    for (auto& c : low) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (auto& c : want) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (want != "*" && low.find(want) == std::string::npos) return;
+    UT_INFO("file: [%llu] open %s -> %#x", (unsigned long long)t.tid_, nt_path.c_str(), rc);
+}
+
 NTSTATUS NtCreateFile(Kernel& k, NtThread& t, SyscallArgs& a) {
-    return DoCreate(k, t, a.Ptr<HANDLE>(0), static_cast<uint32_t>(a[1]), a.Ptr<OBJECT_ATTRIBUTES>(2),
-                    a.Ptr<IO_STATUS_BLOCK>(3), static_cast<uint32_t>(a[7]), static_cast<uint32_t>(a[8]));
+    const NTSTATUS rc = DoCreate(k, t, a.Ptr<HANDLE>(0), static_cast<uint32_t>(a[1]), a.Ptr<OBJECT_ATTRIBUTES>(2),
+                                 a.Ptr<IO_STATUS_BLOCK>(3), static_cast<uint32_t>(a[7]), static_cast<uint32_t>(a[8]));
+    LogOpen(k, t, a.Ptr<OBJECT_ATTRIBUTES>(2), rc);
+    return rc;
 }
 
 NTSTATUS NtOpenFile(Kernel& k, NtThread& t, SyscallArgs& a) {
-    return DoCreate(k, t, a.Ptr<HANDLE>(0), static_cast<uint32_t>(a[1]), a.Ptr<OBJECT_ATTRIBUTES>(2),
-                    a.Ptr<IO_STATUS_BLOCK>(3), FILE_OPEN, static_cast<uint32_t>(a[5]));
+    const NTSTATUS rc = DoCreate(k, t, a.Ptr<HANDLE>(0), static_cast<uint32_t>(a[1]), a.Ptr<OBJECT_ATTRIBUTES>(2),
+                                 a.Ptr<IO_STATUS_BLOCK>(3), FILE_OPEN, static_cast<uint32_t>(a[5]));
+    LogOpen(k, t, a.Ptr<OBJECT_ATTRIBUTES>(2), rc);
+    return rc;
 }
 
 // NtReadFile / NtWriteFile ------------------------------------------------------------

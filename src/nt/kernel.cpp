@@ -252,6 +252,11 @@ std::string FindCaseInsensitive(const std::string& dir, const std::string& name)
 bool Kernel::ResolvePath(const std::string& nt_in, std::string* host_path, bool* exists, bool create_parent_ok) {
     std::string p = nt_in;
     std::replace(p.begin(), p.end(), '/', '\\');
+    // "GAME:\" is a title's own name for its package root (the Xbox 360 device prefix its file layer turns into G:\). When such a
+    // path goes to the OS as it is -- FMOD opening Forza Horizon 2's banks -- it is not a drive path, so it arrives made relative
+    // to the current directory: "G:\GAME:\Media\...". Either way it names the package root.
+    if (const size_t at = Lower(p).find("game:\\"); at != std::string::npos && (at == 0 || p[at - 1] == '\\'))
+        p = "G:\\" + p.substr(at + 6);
     std::string root;
     std::string rest;
     auto starts = [&](const char* prefix) {
