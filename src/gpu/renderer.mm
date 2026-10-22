@@ -1057,6 +1057,39 @@ void CopyTexture(Texture& dst, uint32_t dmip, uint32_t dslice, uint32_t dx, uint
     if (IsDepth(dst.pixel_format)) ++dst.depth_gen;
 }
 
+void ResolveTexture(Texture& dst, uint32_t dmip, uint32_t dslice, Texture& src, uint32_t smip, uint32_t sslice) {
+    if (dst.mtl == nil || src.mtl == nil) return;
+    if (src.mtl.sampleCount <= 1) { CopyTexture(dst, dmip, dslice, 0, 0, 0, src, smip, sslice, nullptr); return; }
+    if (src.mtl.pixelFormat != dst.mtl.pixelFormat || dst.mtl.sampleCount != 1) {
+        static std::atomic<int> shown {0};
+        if (shown++ < 4) UT_INFO("gpu: resolve %lu -> %lu (samples %lu -> %lu) not supported", (unsigned long)src.mtl.pixelFormat, (unsigned long)dst.mtl.pixelFormat,
+                                 (unsigned long)src.mtl.sampleCount, (unsigned long)dst.mtl.sampleCount);
+        return;
+    }
+    std::scoped_lock lock {g->mutex};
+    EndEncoder();
+    @autoreleasepool {
+        // An empty render pass over the multisampled texture whose store action resolves it into the destination.
+        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        const bool depth = IsDepth(src.pixel_format);
+        MTLRenderPassAttachmentDescriptor* a = depth ? static_cast<MTLRenderPassAttachmentDescriptor*>(pass.depthAttachment)
+                                                     : static_cast<MTLRenderPassAttachmentDescriptor*>(pass.colorAttachments[0]);
+        a.texture = src.mtl;
+        a.level = smip;
+        a.slice = sslice;
+        a.loadAction = MTLLoadActionLoad;
+        a.storeAction = MTLStoreActionStoreAndMultisampleResolve;
+        a.resolveTexture = dst.mtl;
+        a.resolveLevel = dmip;
+        a.resolveSlice = dslice;
+        if (depth) pass.depthAttachment.depthResolveFilter = MTLMultisampleDepthResolveFilterSample0;
+        if (depth) pass.renderTargetWidth = src.mtl.width, pass.renderTargetHeight = src.mtl.height;
+        id<MTLRenderCommandEncoder> enc = [Command() renderCommandEncoderWithDescriptor:pass];
+        [enc endEncoding];
+    }
+    if (IsDepth(dst.pixel_format)) ++dst.depth_gen;
+}
+
 void DecompressCopy(Texture& dst, uint32_t dmip, uint32_t dslice, uint32_t dx, uint32_t dy, Texture& src, uint32_t smip, uint32_t sslice, const uint32_t rect[4]) {
     if (dst.mtl == nil || src.mtl == nil) return;
     const uint32_t sw = std::max<uint32_t>(1, (uint32_t)src.mtl.width >> smip), sh = std::max<uint32_t>(1, (uint32_t)src.mtl.height >> smip);

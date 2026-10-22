@@ -138,6 +138,9 @@ void CopyTexture(Texture& dst, uint32_t dst_mip, uint32_t dst_slice, uint32_t dx
 /// D3D11.X DecompressResource: copies a (compressed, on the console) surface into another, converting where the formats differ --
 /// a depth buffer into a depth or R32 float texture a shader can sample. `rect` is {left, top, right, bottom} or null for all.
 void DecompressCopy(Texture& dst, uint32_t dst_mip, uint32_t dst_slice, uint32_t dx, uint32_t dy, Texture& src, uint32_t src_mip, uint32_t src_slice, const uint32_t rect[4]);
+/// ResolveSubresource: a multisampled texture averaged into one sample (Metal resolves it at the end of a render pass), or a copy
+/// when the source has one sample.
+void ResolveTexture(Texture& dst, uint32_t dst_mip, uint32_t dst_slice, Texture& src, uint32_t src_mip, uint32_t src_slice);
 void GenerateMips(Texture& texture);
 const TextureDesc& TextureInfo(const Texture& texture);
 /// The Metal texture behind `texture`, for logs (matches the pointers frame traces print).

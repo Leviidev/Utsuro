@@ -1464,6 +1464,23 @@ void RegisterGpuOverrides() {
         gpu::DecompressCopy(*dst->texture, dm, ds, pt ? pt[0] : 0, pt ? pt[1] : 0, *src->texture, sm, ss, rc);
         return 0;
     });
+    // ResolveSubresource(dst, dst sub, src, src sub, DXGI_FORMAT): Forza Horizon 2 renders multisampled and resolves before its
+    // post-processing samples the result; unanswered, that texture stayed empty and the picture black.
+    OverrideAll("ResolveSubresource", [](Call& c) -> uint32_t {
+        Res* dst = ResAt(c.Arg(0));
+        Res* src = ResAt(c.Arg(2));
+        if (dst == nullptr || src == nullptr || !dst->texture || !src->texture) return 0;
+        uint32_t dm, ds, sm, ss, row, rows, depth;
+        TextureShape(gpu::TextureInfo(*dst->texture), static_cast<uint32_t>(c.Arg(1)), &dm, &ds, &row, &rows, &depth);
+        TextureShape(gpu::TextureInfo(*src->texture), static_cast<uint32_t>(c.Arg(3)), &sm, &ss, &row, &rows, &depth);
+        static std::atomic<int> shown {0};
+        if (shown++ < 4) {
+            const auto& di = gpu::TextureInfo(*dst->texture); const auto& si = gpu::TextureInfo(*src->texture);
+            UT_INFO("d3d: ResolveSubresource %ux%u fmt %u <- %ux%u fmt %u (format %u)", di.width, di.height, di.format, si.width, si.height, si.format, static_cast<uint32_t>(c.Arg(4)));
+        }
+        gpu::ResolveTexture(*dst->texture, dm, ds, *src->texture, sm, ss);
+        return 0;
+    });
     OverrideAll("CopySubresourceRegion", [](Call& c) -> uint32_t {
         Res* dst = ResAt(c.Arg(0));
         Res* src = ResAt(c.Arg(5));
