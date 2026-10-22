@@ -1268,12 +1268,15 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
         src << "struct VSOut {\n";
         bool has_pos = false;
         for (const auto& e : out_sig) {
-            if (e.system_value == 1) { if (!has_pos) src << "    float4 position [[position]];\n"; has_pos = true; continue; }
+            // Positions are invariant: D3D gives the same position for the same inputs and math in every vertex shader, and titles
+            // draw a depth pre-pass and then the scene with an EQUAL depth test (Forza Horizon 2). Metal only promises that for
+            // `invariant` outputs (with preserveInvariance on).
+            if (e.system_value == 1) { if (!has_pos) src << "    float4 position [[position, invariant]];\n"; has_pos = true; continue; }
             if (e.system_value == 2 || e.system_value == 3) continue;   // clip/cull distance: not forwarded
             if (e.system_value == 4 || e.system_value == 5) continue;
             src << "    float4 " << e.semantic << e.index << " [[user(" << e.semantic << e.index << ")]];\n";
         }
-        if (!has_pos) src << "    float4 position [[position]];\n";
+        if (!has_pos) src << "    float4 position [[position, invariant]];\n";
         src << "};\n\n";
     } else {
         src << "struct PSIn {\n";

@@ -583,6 +583,7 @@ bool CompileShader(Shader& s) {
     NSString* src = [NSString stringWithUTF8String:s.translated.msl.c_str()];
     MTLCompileOptions* opts = [MTLCompileOptions new];
     opts.fastMathEnabled = NO;
+    opts.preserveInvariance = YES;   // vertex positions are [[invariant]] (see the translator)
     NSError* err = nil;
     s.library = [g->device newLibraryWithSource:src options:opts error:&err];
     if (s.library == nil) {
@@ -616,6 +617,7 @@ id<MTLFunction> VariantFor(Shader& s, const std::vector<uint8_t>& classes) {
         NSError* err = nil;
         MTLCompileOptions* opts = [MTLCompileOptions new];
         opts.fastMathEnabled = NO;
+        opts.preserveInvariance = YES;
         id<MTLLibrary> lib = [g->device newLibraryWithSource:[NSString stringWithUTF8String:t.msl.c_str()] options:opts error:&err];
         if (lib == nil) UT_ERROR("gpu: Metal rejected a shader variant: %s", [[err localizedDescription] UTF8String]);
         else fn = [lib newFunctionWithName:@"main0"];
@@ -734,6 +736,7 @@ static id<MTLFunction> FragmentFor(Shader& vs, Shader& ps) {
     }
     MTLCompileOptions* opts = [MTLCompileOptions new];
     opts.fastMathEnabled = NO;
+    opts.preserveInvariance = YES;
     NSError* err = nil;
     id<MTLLibrary> lib = [g->device newLibraryWithSource:[NSString stringWithUTF8String:msl.c_str()] options:opts error:&err];
     id<MTLFunction> fn = lib != nil ? [lib newFunctionWithName:@"main0"] : nil;
