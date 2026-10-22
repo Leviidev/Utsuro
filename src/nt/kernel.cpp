@@ -1,4 +1,5 @@
 #include "nt/kernel.h"
+#include <atomic>
 #include <pthread/qos.h>
 
 #include "engine/log.h"
@@ -539,6 +540,15 @@ NTSTATUS Kernel::Dispatch(NtThread& thread, uint32_t number, SyscallArgs& args) 
             if (out.find("(bad)") != std::string::npos && fmt != nullptr) UT_INFO("[%llu] ntdll (format \"%s\", args at %#llx): %s", (unsigned long long)thread.tid_, fmt, (unsigned long long)va_ptr, out.c_str());
             else UT_INFO("[%llu] ntdll: %s", (unsigned long long)thread.tid_, out.c_str());
             return STATUS_SUCCESS;
+        }
+        // UTSURO_TPEVERY=N logs every Nth hit of each tracepoint, UTSURO_TPMAX=N at most N of them: one in a thread's hot loop
+        // otherwise floods the log, and a sample every few thousand hits shows how it goes along.
+        static const long tp_every = std::getenv("UTSURO_TPEVERY") ? std::max(1L, std::atol(std::getenv("UTSURO_TPEVERY"))) : 1;
+        static const long tp_max = std::getenv("UTSURO_TPMAX") ? std::atol(std::getenv("UTSURO_TPMAX")) : 0;
+        static std::atomic<long> tp_hits[64], tp_logged[64];
+        if (id < 64) {
+            if (tp_hits[id]++ % tp_every != 0) return STATUS_SUCCESS;
+            if (tp_max > 0 && tp_logged[id]++ >= tp_max) return STATUS_SUCCESS;
         }
         UT_INFO("[%llu] TP%u %s rsp=%#llx rcx=%#llx rdx=%#llx r8=%#llx r9=%#llx <- %s", (unsigned long long)thread.tid_, id,
                 id < tracepoints.size() ? tracepoints[id].name.c_str() : "?", (unsigned long long)args.rsp + 32, (unsigned long long)args.reg[0],

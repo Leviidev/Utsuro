@@ -1,5 +1,6 @@
 // process.cpp -- bringing a process into existence: ntdll, the executable, the PEB, the
 // first thread; and the thread machinery shared with NtCreateThreadEx.
+#include "nt/safe_mem.h"
 #include "nt/kernel.h"
 #include "nt/winrt.h"
 
@@ -585,10 +586,10 @@ bool Kernel::BuildProcess(std::string& error) {
     // The process heap table and its lock are ntdll's to create.
     PutU64(peb_, peb::kProcessParameters, BuildProcessParameters());
 
-    if (options_.exe_name.find("forza") != std::string::npos) {
-        // Forza Horizon 2: Render thread stalls at 0x140f74c2e waiting for update thread queue,
-        // while update thread waits for car background assets. Bypass the wait so the render thread
-        // enters the frame tick/render loop.
+    if (options_.exe_name.find("forza") != std::string::npos && std::getenv("UTSURO_FH2_SYNCPATCH") != nullptr) {
+        // Forza Horizon 2, opt-in only: the render thread stalls at 0x140f74c2e waiting for the update thread's queue, while the
+        // update thread waits for car background assets. This skips the wait, which also skips the update thread's work, and a
+        // timer thread then dies on a null member (exe+0x100f896) and the screen goes black: not a fix, kept to compare.
         const uint64_t patch_va = exe_base_ + 0xf74c17;
         uint8_t* p = reinterpret_cast<uint8_t*>(patch_va);
         if (p[0] == 0x74 && p[1] == 0x1c) {
@@ -914,17 +915,23 @@ int Kernel::Run() {
             }
             UT_INFO("---- threads ----");
             for (auto& t : list) {
+                if (std::getenv("UTSURO_STACKS_STEPS")) UT_INFO("(thread %llu: syscall %#x, args %p, ret %#llx, rip %#llx, stack rip %#llx)", (unsigned long long)t->tid_,
+                                                                 static_cast<uint32_t>(t->current_syscall), (void*)t->current_args, (unsigned long long)t->current_ret,
+                                                                 (unsigned long long)t->current_rip, (unsigned long long)t->stack_rip);
+                // The arguments live on the thread's host stack, which an exiting thread is freeing: read them carefully.
+                uint64_t first_arg = 0;
+                if (const SyscallArgs* args = t->current_args; args != nullptr) SafeRead(reinterpret_cast<uint64_t>(&args->reg[0]), &first_arg, 8);
                 if (t->current_args != nullptr)
                 {
                     UT_INFO("thread %llu %s: in %s(%#llx) from %s (syscall site %s)", (unsigned long long)t->tid_, t->name.c_str(), SyscallName(static_cast<uint32_t>(t->current_syscall)),
-                            (unsigned long long)(t->current_args ? t->current_args->reg[0] : 0), Describe(t->current_ret).c_str(), Describe(t->current_rip).c_str());
+                            (unsigned long long)first_arg, Describe(t->current_ret).c_str(), Describe(t->current_rip).c_str());
                     const auto frames = Backtrace(t->stack_rip, t->stack_regs, 14);
                     for (size_t i = 0; i < frames.size(); ++i) UT_INFO("    #%zu %s", i, Describe(frames[i]).c_str());
                 }
                 else
                 {
                     UT_INFO("thread %llu %s: running (last syscall %s at %s)%s%s", (unsigned long long)t->tid_, t->name.c_str(), SyscallName(static_cast<uint32_t>(t->current_syscall)),
-                            Describe(t->current_rip).c_str(), t->host_call.empty() ? "" : ", inside the host's ", t->host_call.c_str());
+                            Describe(t->current_rip).c_str(), t->host_call[0] == 0 ? "" : ", inside the host's ", t->host_call);
                     if (std::getenv("UTSURO_STACKS_RUNNING") != nullptr && t->control != nullptr) {   // sampled with a signal: where it is right now
                         uint64_t rip, regs[16];
                         if (t->control->SampleRunning(&rip, regs)) {

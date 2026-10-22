@@ -48,6 +48,7 @@ Iface* g_collection = nullptr;
 
 Iface* g_audio_client = nullptr;
 Iface* g_render_client = nullptr;
+Iface* g_activate_op = nullptr;
 
 // ---- WASAPI shared-mode output (IAudioClient + IAudioRenderClient) -------------------------------------------------------
 // Titles that drive the speakers themselves (Wwise in Rocket League, Peggle 2) ask the endpoint for an IAudioClient. The
@@ -287,6 +288,9 @@ void Define(Runtime& rt) {
             const uint32_t frames = std::min<uint32_t>(static_cast<uint32_t>(c.Arg(0)), cs->pending_get);
             Play(*cs, reinterpret_cast<const uint8_t*>(cs->buffer), frames, (c.Arg(1) & 2) != 0);   // AUDCLNT_BUFFERFLAGS_SILENT
             cs->queued += frames;
+            static std::atomic<uint64_t> released {0}, calls {0};
+            released += frames;
+            if (calls++ % 1000 == 0) UT_INFO("mmdevice: ReleaseBuffer #%llu, %llu frames so far", (unsigned long long)calls.load(), (unsigned long long)released.load());
             cs->pending_get = 0;
             return kSOk;
         }));
@@ -318,6 +322,8 @@ void Define(Runtime& rt) {
         client.push_back(M("GetStreamLatency", [](Call& c) -> uint32_t { if (auto* p = c.Ptr<uint64_t>(0)) *p = 100000; return kSOk; }));   // 10 ms
         client.push_back(M("GetCurrentPadding", [](Call& c) -> uint32_t {
             auto st = StreamOf(c.obj);
+            static std::atomic<uint64_t> polls {0};
+            if (polls++ % 2000 == 0) UT_INFO("mmdevice: GetCurrentPadding #%llu (queued %.0f, started %d)", (unsigned long long)polls.load(), st->queued, st->started ? 1 : 0);
             std::scoped_lock lock {st->mutex};
             if (auto* p = c.Ptr<uint32_t>(0)) *p = static_cast<uint32_t>(st->queued);
             return kSOk;
@@ -333,16 +339,28 @@ void Define(Runtime& rt) {
             if (auto* p = c.Ptr<uint64_t>(1)) *p = 30000;    // 3 ms
             return kSOk;
         }));
-        client.push_back(M("Start", [](Call& c) -> uint32_t { auto st = StreamOf(c.obj); std::scoped_lock lock {st->mutex}; st->started = true; return kSOk; }));
+        client.push_back(M("Start", [](Call& c) -> uint32_t {
+            auto st = StreamOf(c.obj); std::scoped_lock lock {st->mutex}; st->started = true;
+            static std::atomic<int> shown {0};
+            if (shown++ < 4) UT_INFO("mmdevice: IAudioClient::Start (event %#llx)", (unsigned long long)st->event);
+            return kSOk;
+        }));
         client.push_back(M("Stop", [](Call& c) -> uint32_t { auto st = StreamOf(c.obj); std::scoped_lock lock {st->mutex}; st->started = false; return kSOk; }));
         client.push_back(M("Reset", [](Call& c) -> uint32_t { auto st = StreamOf(c.obj); std::scoped_lock lock {st->mutex}; st->queued = 0; return kSOk; }));
-        client.push_back(M("SetEventHandle", [](Call& c) -> uint32_t { auto st = StreamOf(c.obj); std::scoped_lock lock {st->mutex}; st->event = c.Arg(0); return kSOk; }));
+        client.push_back(M("SetEventHandle", [](Call& c) -> uint32_t {
+            auto st = StreamOf(c.obj); std::scoped_lock lock {st->mutex}; st->event = c.Arg(0);
+            static std::atomic<int> shown {0};
+            if (shown++ < 4) UT_INFO("mmdevice: IAudioClient::SetEventHandle(%#llx)", (unsigned long long)c.Arg(0));
+            return kSOk;
+        }));
         // GetService(riid, ppv)
         client.push_back(M("GetService", [](Call& c) -> uint32_t {
             auto* out = c.Ptr<uint64_t>(1);
             if (out == nullptr || c.Ptr<Guid>(0) == nullptr) return 0x80004003u;
             const Guid iid = *c.Ptr<Guid>(0);
             if (iid == g_render_client->iid) {
+                static std::atomic<int> shown {0};
+                if (shown++ < 4) UT_INFO("mmdevice: IAudioClient::GetService(IAudioRenderClient)");
                 Runtime& r = Runtime::Get();
                 Obj* o = r.NewObject("MMDevAPI.AudioRenderClient", {g_render_client});
                 o->u64["client"] = r.Pointer(c.obj, c.iface);
@@ -375,6 +393,16 @@ void Define(Runtime& rt) {
             return kSOk;
         }));
         g_collection = &rt.DefineComInterface("IMMDeviceCollection", "0BD7A1BE-7A1A-44DB-8397-CC5392387B5E", std::move(collection), nullptr);
+    }
+    {
+        // What ActivateAudioInterfaceAsync hands back: GetActivateResult(HRESULT* activateResult, IUnknown** activatedInterface).
+        std::vector<Method> op;
+        op.push_back(M("GetActivateResult", [](Call& c) -> uint32_t {
+            if (auto* hr = c.Ptr<uint32_t>(0)) *hr = static_cast<uint32_t>(c.obj.u64["hr"]);
+            if (auto* out = c.Ptr<uint64_t>(1)) *out = c.obj.u64["result"];
+            return kSOk;
+        }));
+        g_activate_op = &rt.DefineComInterface("IActivateAudioInterfaceAsyncOperation", "72A22D78-CDE4-431D-B8CC-843A71199B6D", std::move(op), nullptr);
     }
     g_enumerator = &rt.DefineComInterface("IMMXboxDeviceEnumerator", "8B557ADC-555E-47A0-B223-43477E481DAD", std::move(methods), nullptr);
     g_enumerator->aliases.push_back(Guid::Parse("A95664D2-9614-4F35-A746-DE8DB63617E6"));   // IMMDeviceEnumerator: a prefix of the vtable above
@@ -411,6 +439,44 @@ uint64_t DllGetClassObject(Kernel&, NtThread&, SyscallArgs& a) {
     if (clsid == nullptr || !(*clsid == ClsidEnumerator())) { *out = 0; return kEClassNotAvailable; }
     Obj* o = r.NewObject("MMDevAPI.ClassFactory", {g_factory});
     *out = r.Pointer(*o, *g_factory);
+    return kSOk;
+}
+
+// mmdevapi!ActivateAudioInterfaceAsync(LPCWSTR deviceInterfacePath, REFIID riid, PROPVARIANT* activationParams,
+//                                      IActivateAudioInterfaceCompletionHandler* handler, IActivateAudioInterfaceAsyncOperation** op)
+// The real one creates the "ActivateAudioInterfaceWorker" class ({E2F7A62A-862B-40AE-BBC2-5C0CA9A5B7E1}), which is private to the
+// console's audio stack. Forza Horizon 2 asks for a player's audio device this way; when it fails, the title swaps its audio-device
+// manager for a stand-in whose devices are null and a timer thread dies on one. Every path gets the one output's IAudioClient,
+// and the handler's ActivateCompleted (slot 3) runs before this returns: the operation is complete by then, as it may be.
+uint64_t ActivateAudioInterfaceAsync(Kernel&, NtThread& t, SyscallArgs& a) {
+    Runtime& r = Runtime::Get();
+    Define(r);
+    std::string path;
+    if (const auto* w = a.Ptr<char16_t>(0)) for (size_t i = 0; w[i] != 0 && i < 256; ++i) path += w[i] < 0x80 ? static_cast<char>(w[i]) : '?';
+    const auto* riid = a.Ptr<Guid>(1);
+    const uint64_t handler = a[3];
+    auto* out = a.Ptr<uint64_t>(4);
+
+    Obj* op = r.NewObject("MMDevAPI.ActivateAudioInterfaceAsyncOperation", {g_activate_op});
+    uint32_t hr = kENoInterface;
+    uint64_t result = 0;
+    if (riid != nullptr && (*riid == g_audio_client->iid
+                            || std::find(g_audio_client->aliases.begin(), g_audio_client->aliases.end(), *riid) != g_audio_client->aliases.end())) {
+        Obj* client = r.NewObject("MMDevAPI.AudioClient", {g_audio_client});
+        result = r.Pointer(*client, *g_audio_client);
+        hr = kSOk;
+    }
+    op->u64["hr"] = hr;
+    op->u64["result"] = result;
+    const uint64_t self = r.Pointer(*op, *g_activate_op);
+    if (out != nullptr) *out = self;
+    static std::atomic<int> shown {0};
+    if (shown++ < 8)
+        UT_INFO("mmdevice: ActivateAudioInterfaceAsync(\"%s\", %s) -> %s", path.c_str(), riid ? riid->ToString().c_str() : "null", hr == kSOk ? "IAudioClient" : "no such interface");
+    if (handler > 0x10000) {
+        const uint64_t activate_completed = reinterpret_cast<const uint64_t*>(*reinterpret_cast<const uint64_t*>(handler))[3];
+        t.CallGuest(GuestStep::Call(activate_completed, {handler, self}, [](NtThread&, uint64_t) { return GuestStep::Return(kSOk); }));
+    }
     return kSOk;
 }
 

@@ -250,6 +250,7 @@ const Hook kHooks[] = {
     {"d3d11_x.dll", "DXGIXSetVLineNotification", SignalOnVblank, 0},
     {"d3d11_x.dll", "DXGIXSetFrameNotification", SignalOnVblank, 0},
     {"mmdevapi.dll", "DllGetClassObject", mmdevice::DllGetClassObject, 0},
+    {"mmdevapi.dll", "ActivateAudioInterfaceAsync", mmdevice::ActivateAudioInterfaceAsync, 0},
     {"acphal.dll", "ApuAlloc", ApuAlloc, 0},
     {"acphal.dll", "ApuFree", D3DFreeGraphicsMemory, 0},
     {"acphal.dll", "ApuCreateHeap", ReturnOk, 0},

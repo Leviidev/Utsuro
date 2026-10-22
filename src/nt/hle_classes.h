@@ -6,4 +6,6 @@
 namespace utsuro::nt::mmdevice {
 /// MMDevAPI.dll!DllGetClassObject.
 uint64_t DllGetClassObject(Kernel& kernel, NtThread& thread, SyscallArgs& args);
+/// MMDevAPI.dll!ActivateAudioInterfaceAsync: an IAudioClient for any device path, the completion handler called at once.
+uint64_t ActivateAudioInterfaceAsync(Kernel& kernel, NtThread& thread, SyscallArgs& args);
 }
