@@ -7,6 +7,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
+#include <cstdio>
+#include <cmath>
+#include <chrono>
 #include <cstring>
 #include <mutex>
 #include <vector>
@@ -73,7 +77,42 @@ bool Init() {
     return true;
 }
 
+namespace {
+/// UTSURO_AUDIODUMP=<path.wav>: everything played, as 48 kHz stereo float WAV (the header is rewritten as it grows), and
+/// a level line every few seconds -- how sound is checked on a headless run.
+void Dump(const float* interleaved, size_t frames) {
+    static const char* path = std::getenv("UTSURO_AUDIODUMP");
+    if (path == nullptr) return;
+    static std::mutex m;
+    static FILE* f = nullptr;
+    static uint64_t total = 0;
+    static float peak = 0;
+    static auto last = std::chrono::steady_clock::now();
+    std::scoped_lock lock {m};
+    if (f == nullptr) { f = std::fopen(path, "wb+"); if (f == nullptr) return; uint8_t zero[44] = {}; std::fwrite(zero, 1, 44, f); }
+    std::fwrite(interleaved, sizeof(float), frames * 2, f);
+    total += frames;
+    for (size_t i = 0; i < frames * 2; ++i) peak = std::max(peak, std::fabs(interleaved[i]));
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last > std::chrono::seconds(3)) {
+        last = now;
+        UT_INFO("audio: %.1f s played so far, peak level %.3f since the last line", total / double(kRate), peak);
+        peak = 0;
+        const uint32_t data = static_cast<uint32_t>(total * 8), riff = data + 36, fmt_len = 16, rate = kRate, bytes = kRate * 8;
+        const uint16_t tag = 3, ch = 2, block = 8, bits = 32;
+        const long at = std::ftell(f);
+        std::fseek(f, 0, SEEK_SET);
+        std::fwrite("RIFF", 1, 4, f); std::fwrite(&riff, 4, 1, f); std::fwrite("WAVEfmt ", 1, 8, f); std::fwrite(&fmt_len, 4, 1, f);
+        std::fwrite(&tag, 2, 1, f); std::fwrite(&ch, 2, 1, f); std::fwrite(&rate, 4, 1, f); std::fwrite(&bytes, 4, 1, f);
+        std::fwrite(&block, 2, 1, f); std::fwrite(&bits, 2, 1, f); std::fwrite("data", 1, 4, f); std::fwrite(&data, 4, 1, f);
+        std::fseek(f, at, SEEK_SET);
+        std::fflush(f);
+    }
+}
+} // namespace
+
 void Write(const float* interleaved, size_t frames) {
+    Dump(interleaved, frames);
     if (g_engine == nil) return;
     size_t w = g_ring.write.load(std::memory_order_relaxed);
     const size_t r = g_ring.read.load(std::memory_order_acquire);
