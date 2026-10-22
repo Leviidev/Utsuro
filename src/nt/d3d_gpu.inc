@@ -299,6 +299,10 @@ void OnCreate(Call& c, const winrt::Method& m, Obj& o) {
     } else if (n == "FinishCommandList") {
         r.recorded = std::move(StateOf(c.obj).recorded);
         StateOf(c.obj).recorded.clear();
+        Tally("~lists finished");
+        Tally("~list draws finished", r.recorded.size());
+        static std::atomic<int> shown {0};
+        if (shown++ < 24) UT_INFO("d3d: FinishCommandList on %p (deferred %d): %zu draws -> list %p", static_cast<void*>(&c.obj), c.obj.u64["deferred"] != 0 ? 1 : 0, r.recorded.size(), static_cast<void*>(&o));
     } else if (n == "CreatePlacementBuffer") {
         // (desc, placement address, ppBuffer): the title keeps the data; descriptors point straight at it.
         r.usage = U32(desc, 1);
@@ -986,7 +990,7 @@ void TraceDrawCaller(Call& c) {
     const auto frames = c.kernel.Backtrace(st.rip, regs, 8);
     std::string chain;
     for (size_t k = 1; k < frames.size(); ++k) chain += (k > 1 ? " < " : "") + c.kernel.Describe(frames[k]);
-    UT_INFO("gpu: draw #%d from %s", shown, chain.c_str());
+    UT_INFO("gpu: draw #%d on context %llu%s from %s", shown, (unsigned long long)c.obj.id, c.obj.u64["deferred"] != 0 ? " (deferred)" : "", chain.c_str());
     const CtxState& cs = StateOf(c.obj);
     for (int stage : {0, 4}) for (int i = 0; i < 16; ++i) {   // VS, PS
         Res* v = ResAt(cs.srv[stage][i]);
@@ -1054,8 +1058,11 @@ void DoDraw(Obj& ctx, const gpu::DrawArgs& args_in) {
     }
     if (ctx.u64["deferred"] != 0) {
         state.recorded.push_back({d, args});
+        Tally("~draws recorded");
+        if (state.recorded.size() == 2048) UT_WARN("d3d: deferred context %llu holds 2048 draws and was never finished", (unsigned long long)ctx.id);
         return;
     }
+    Tally("~draws immediate");
     gpu::Draw(d, args);
 }
 
@@ -1151,6 +1158,11 @@ void TextureShape(const gpu::TextureDesc& d, uint32_t sub, uint32_t* mip, uint32
 }
 
 uint32_t MapBuffer(Call& c, Res& r, uint32_t type, uint64_t* out) {
+    if (type == 1 || type == 3) {   // a read: what the GPU wrote, back on the CPU
+        Tally("~buffer read maps");
+        static std::atomic<int> shown {0};
+        if (shown++ < 12) UT_INFO("d3d: Map for reading: buffer %u bytes usage %u bind %#x gpu_written %d", gpu::BufferSize(*r.buffer), r.usage, r.bind, r.gpu_written ? 1 : 0);
+    }
     uint8_t* p;
     if (type == 4) p = gpu::RenameBuffer(r.buffer, false);   // WRITE_DISCARD: new storage, old contents stay with the frames that use them
     else p = gpu::BufferData(*r.buffer);
@@ -1418,6 +1430,9 @@ void RegisterGpuOverrides() {
         Res* src = ResAt(c.Arg(1));
         if (dst == nullptr || src == nullptr) return 0;
         if (dst->buffer && src->buffer) {
+            Tally("~buffer copies");
+            static std::atomic<int> shown {0};
+            if (shown++ < 12) UT_INFO("d3d: CopyResource buffer %u bytes (usage %u bind %#x) <- %u bytes (usage %u bind %#x)", gpu::BufferSize(*dst->buffer), dst->usage, dst->bind, gpu::BufferSize(*src->buffer), src->usage, src->bind);
             gpu::CopyBuffer(*dst->buffer, 0, *src->buffer, 0, std::min(gpu::BufferSize(*dst->buffer), gpu::BufferSize(*src->buffer)));
         } else if (dst->texture && src->texture) {
             const auto& d = gpu::TextureInfo(*src->texture);
@@ -1578,6 +1593,10 @@ void RegisterGpuOverrides() {
     // ExecuteCommandList(list, restore state): the recorded draws run now, on the immediate context's render targets.
     OverrideAll("ExecuteCommandList", [](Call& c) -> uint32_t {
         Res* list = ResAt(c.Arg(0));
+        Tally("~lists executed");
+        if (list != nullptr) Tally("~list draws replayed", list->recorded.size());
+        static std::atomic<int> shown {0};
+        if (shown++ < 24) UT_INFO("d3d: ExecuteCommandList(%#llx): res %p, %zu draws", (unsigned long long)c.Arg(0), static_cast<void*>(list), list ? list->recorded.size() : 0);
         if (list == nullptr || !gpu::Available()) return 0;
         const CtxState& imm = StateOf(c.obj);
         for (const RecordedDraw& rd : list->recorded) {

@@ -603,6 +603,21 @@ bool Kernel::BuildProcess(std::string& error) {
         }
     }
 
+    if (options_.exe_name.find("forza") != std::string::npos && std::getenv("UTSURO_FH2_NOXMAWAIT") != nullptr) {
+        // Forza Horizon 2, experiment only: FMOD's mixer (exe+0x1a50a60) waits, holding its lock, for SHAPE to decode XMA voices
+        // into their DMA rings, which nothing does here yet. Returning at once lets it go on (in silence) to see what that holds up.
+        const uint64_t patch_va = exe_base_ + 0x1a50a60;
+        uint8_t* p = reinterpret_cast<uint8_t*>(patch_va);
+        if (p[0] == 0x40 && p[1] == 0x57) {
+            uint64_t page = patch_va & ~0xFFFull, page_sz = 0x1000;
+            uint32_t old_prot = 0;
+            vm_->Protect(&page, &page_sz, PAGE_EXECUTE_READWRITE, &old_prot);
+            p[0] = 0x31; p[1] = 0xc0; p[2] = 0xc3;   // xor eax, eax; ret
+            space_->NotifyContentsReplaced(patch_va, patch_va + 3);
+            UT_INFO("Applied FH2 XMA wait bypass at %#llx", (unsigned long long)patch_va);
+        }
+    }
+
     // The first thread.
     const uint64_t stack = std::max<uint64_t>(exe_image_->stack_reserve, 0x800000);
     auto thread = NewThread(stack, exe_image_->stack_commit, e);
@@ -914,6 +929,9 @@ int Kernel::Run() {
                 for (auto& [id, t] : threads_) list.push_back(t);
             }
             UT_INFO("---- threads ----");
+            DumpRequestedMemory("UTSURO_STACKS_DUMP");   // image+rva:len[:deref], guest memory to look at alongside
+            DumpRequestedMemory("UTSURO_STACKS_DUMP2");
+            DumpRequestedMemory("UTSURO_STACKS_DUMP3");
             for (auto& t : list) {
                 if (std::getenv("UTSURO_STACKS_STEPS")) UT_INFO("(thread %llu: syscall %#x, args %p, ret %#llx, rip %#llx, stack rip %#llx)", (unsigned long long)t->tid_,
                                                                  static_cast<uint32_t>(t->current_syscall), (void*)t->current_args, (unsigned long long)t->current_ret,
@@ -927,6 +945,24 @@ int Kernel::Run() {
                             (unsigned long long)first_arg, Describe(t->current_ret).c_str(), Describe(t->current_rip).c_str());
                     const auto frames = Backtrace(t->stack_rip, t->stack_regs, 14);
                     for (size_t i = 0; i < frames.size(); ++i) UT_INFO("    #%zu %s", i, Describe(frames[i]).c_str());
+                    // Waiting on a critical section's semaphore: find the section (a register or a stack slot pointing at a
+                    // structure whose LockSemaphore is the handle) and say who owns it.
+                    if (std::string(SyscallName(static_cast<uint32_t>(t->current_syscall))) == "NtWaitForSingleObject") {
+                        std::vector<uint64_t> candidates(t->stack_regs, t->stack_regs + 16);
+                        for (uint64_t at = t->stack_regs[4]; at < t->stack_regs[4] + 0x400; at += 8) {
+                            uint64_t v = 0;
+                            if (SafeRead(at, &v, 8)) candidates.push_back(v);
+                        }
+                        for (uint64_t p : candidates) {
+                            uint64_t sem = 0, owner = 0;
+                            uint32_t counts[2] {};
+                            if (p < 0x10000 || (p & 7) != 0 || !SafeRead(p + 0x18, &sem, 8) || sem != first_arg || first_arg == 0) continue;
+                            SafeRead(p + 0x10, &owner, 8);
+                            SafeRead(p + 0x8, counts, 8);
+                            UT_INFO("    critical section %#llx: owner thread %llu, lock count %d, recursion %u", (unsigned long long)p, (unsigned long long)owner, static_cast<int32_t>(counts[0]), counts[1]);
+                            break;
+                        }
+                    }
                 }
                 else
                 {

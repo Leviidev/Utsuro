@@ -16,7 +16,10 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
+#include <map>
+#include <mutex>
 
 namespace utsuro::nt {
 
@@ -259,6 +262,21 @@ NTSTATUS NtReadFile(Kernel& k, NtThread&, SyscallArgs& a) {
         if (n >= 0) f->position += n;
     }
     UT_DEBUG("read: %s off %lld len %u -> %zd", f->nt_path.c_str(), (long long)(off ? *off : -1), len, n);
+    if (static const bool log = std::getenv("UTSURO_READLOG") != nullptr; log) {
+        // Reads per file, summed and printed every 5 s: whether a title's streaming is reading, and what.
+        static std::mutex m;
+        static std::map<std::string, std::pair<uint64_t, uint64_t>> reads;
+        static auto last = std::chrono::steady_clock::now();
+        std::scoped_lock rl {m};
+        auto& r = reads[f->nt_path];
+        ++r.first;
+        r.second += n > 0 ? static_cast<uint64_t>(n) : 0;
+        if (std::chrono::steady_clock::now() - last > std::chrono::seconds(5)) {
+            last = std::chrono::steady_clock::now();
+            for (auto& [path, v] : reads) UT_INFO("read/5s: %llu reads, %llu KB: %s", (unsigned long long)v.first, (unsigned long long)(v.second >> 10), path.c_str());
+            reads.clear();
+        }
+    }
     if (n < 0) { SetIosb(iosb, FromErrno(errno), 0); return FromErrno(errno); }
     if (n == 0 && len != 0) { SetIosb(iosb, STATUS_END_OF_FILE, 0); return STATUS_END_OF_FILE; }
     SetIosb(iosb, STATUS_SUCCESS, static_cast<uint64_t>(n));

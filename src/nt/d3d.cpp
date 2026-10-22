@@ -178,13 +178,22 @@ void OverrideAll(const char* method, winrt::HostFn fn, const char* only_iface_pr
     }
 }
 
+std::map<std::string, uint64_t> g_calls;   // call counts by Interface::method, for the periodic summary
+std::mutex g_calls_mutex;
+
+/// Adds to a named counter in the UTSURO_D3DSTATS summary (host-side events: draws recorded and replayed, and so on).
+void Tally(const char* name, uint64_t n = 1) {
+    static const bool on = std::getenv("UTSURO_D3DSTATS") != nullptr;
+    if (!on) return;
+    std::scoped_lock lock {g_calls_mutex};
+    g_calls[name] += n;
+}
+
 #include "nt/d3d_gpu.inc"
 
 std::mutex g_state_mutex;
 std::map<std::string, uint64_t> g_state_cache;   // identical state descriptions share one object
 
-std::map<std::string, uint64_t> g_calls;   // call counts by Interface::method, for the periodic summary
-std::mutex g_calls_mutex;
 
 uint32_t Fallback(Call& c) {
     const winrt::Method& m = c.iface.methods[c.slot];
@@ -752,8 +761,11 @@ uint32_t MakeDevice(uint64_t* out_device, uint64_t* out_context) {
 }
 } // namespace
 
+void StartCallStats(Kernel& kernel);
+
 /// D3D11XCreateDeviceX(pParameters, ppDevice, ppImmediateContext): the Xbox-only entry point Unity titles use.
 uint64_t CreateDeviceX(Kernel& kernel, NtThread&, SyscallArgs& a) {
+    StartCallStats(kernel);
     g_kernel = &kernel;
     const uint32_t version = a[0] != 0 ? *a.Ptr<uint32_t>(0) : 0;
     UT_INFO("d3d: D3D11XCreateDeviceX, ABI version %#x", version);
@@ -761,8 +773,8 @@ uint64_t CreateDeviceX(Kernel& kernel, NtThread&, SyscallArgs& a) {
     return MakeDevice(a[1] != 0 ? a.Ptr<uint64_t>(1) : nullptr, a[2] != 0 ? a.Ptr<uint64_t>(2) : nullptr);
 }
 
-uint64_t CreateDevice(Kernel& kernel, NtThread&, SyscallArgs& a) {
-    g_kernel = &kernel;
+/// UTSURO_D3DSTATS=1: D3D method call counts every 3 seconds (both device creation paths start it).
+void StartCallStats(Kernel& kernel) {
     static bool stats = false;
     if (!stats && std::getenv("UTSURO_D3DSTATS") != nullptr) {
         stats = true;
@@ -783,6 +795,11 @@ uint64_t CreateDevice(Kernel& kernel, NtThread&, SyscallArgs& a) {
             }
         }).detach();
     }
+}
+
+uint64_t CreateDevice(Kernel& kernel, NtThread&, SyscallArgs& a) {
+    g_kernel = &kernel;
+    StartCallStats(kernel);
     // D3D11CreateDevice(adapter, driverType, software, flags, levels, nlevels, sdk, ppDevice, pLevel, ppContext)
     EnsureSetup(false);
     gpu::Init();
