@@ -87,8 +87,22 @@ void PostCompletion(Kernel& k, SyscallArgs& a, IO_STATUS_BLOCK* iosb, int event_
             k.Notify(*e);
         }
     }
-    (void)apc_arg;
-    (void)iosb;
+    // A handle associated with a completion port: the packet goes there too, with the caller's context (the OVERLAPPED, as
+    // ReadFile passes it -- none when the event's low bit asks for no packet). Windows queues it even for I/O that finished at once,
+    // and titles wait for it (Forza Horizon 2's streaming thread sits in GetQueuedCompletionStatus).
+    const uint64_t context = a[apc_arg + 1];
+    if (auto f = k.Get<FileObject>(a[0], ObjType::File); f && context != 0 && !f->skip_completion_on_success) {
+        if (auto port = std::static_pointer_cast<IoCompletionObject>(f->completion_port.lock())) {
+            const IO_STATUS_BLOCK st = iosb != nullptr ? *iosb : IO_STATUS_BLOCK {};
+            {
+                std::scoped_lock lock {k.WaitMutex()};
+                port->queue.push_back({f->completion_key, context, static_cast<int32_t>(st.Status), st.Information});
+                port->signaled = true;
+                k.NotifyAll();
+            }
+            WorkerFactoryPacketQueued(k, port);
+        }
+    }
 }
 
 // NtCreateFile / NtOpenFile -----------------------------------------------------------
@@ -474,8 +488,23 @@ NTSTATUS NtSetInformationFile(Kernel& k, NtThread&, SyscallArgs& a) {
         SetIosb(iosb, STATUS_SUCCESS, 0);
         return STATUS_SUCCESS;
     }
-    case 30:  // FileCompletionInformation: association with an I/O completion port; I/O here
-              // completes synchronously, so there is nothing to deliver
+    case 30: {  // FileCompletionInformation {HANDLE Port; PVOID Key}: completions on this handle go to the port
+        if (len < 16) return STATUS_INFO_LENGTH_MISMATCH;
+        uint64_t port_handle = 0, key = 0;
+        std::memcpy(&port_handle, buf, 8);
+        std::memcpy(&key, buf + 8, 8);
+        auto port = k.Get<IoCompletionObject>(port_handle, ObjType::IoCompletion);
+        if (!port) return STATUS_INVALID_HANDLE;
+        f->completion_port = port;
+        f->completion_key = key;
+        static int shown = 0;
+        if (shown++ < 12) UT_INFO("file: %s completes to port %#llx (key %#llx)", f->nt_path.c_str(), (unsigned long long)port_handle, (unsigned long long)key);
+        SetIosb(iosb, STATUS_SUCCESS, 0);
+        return STATUS_SUCCESS;
+    }
+    case 41:  // FileIoCompletionNotificationInformation: FILE_SKIP_COMPLETION_PORT_ON_SUCCESS (1), FILE_SKIP_SET_EVENT_ON_HANDLE (2)
+        if (len < 4) return STATUS_INFO_LENGTH_MISMATCH;
+        f->skip_completion_on_success = (buf[0] & 1) != 0;
         SetIosb(iosb, STATUS_SUCCESS, 0);
         return STATUS_SUCCESS;
     default:

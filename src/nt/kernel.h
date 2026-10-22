@@ -136,6 +136,11 @@ struct FileObject : Object {
     uint32_t options {0};
     bool delete_on_close {false};
     int64_t position {0};
+    /// The I/O completion port the handle is associated with (FileCompletionInformation): every overlapped read or write on it
+    /// queues a packet there when it completes, even at once, unless FILE_SKIP_COMPLETION_PORT_ON_SUCCESS was set.
+    std::weak_ptr<Object> completion_port;
+    uint64_t completion_key {0};
+    bool skip_completion_on_success {false};
     /// Directory enumeration state.
     std::vector<std::string> dir_entries;
     size_t dir_index {0};
