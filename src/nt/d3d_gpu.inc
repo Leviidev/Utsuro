@@ -792,10 +792,18 @@ void BindStream(CtxState& s, gpu::DrawState& d, gpu::DrawArgs& args) {
     auto get = [&](uint32_t reg) -> const CtxState::Reg* { auto it = s.regs.find(reg); return it == s.regs.end() ? nullptr : &it->second; };
     auto address = [](const CtxState::Reg& r) { return static_cast<uint64_t>(r.dw[0]) | (static_cast<uint64_t>(r.dw[1] & 0xFFFF) << 32); };
 
-    // The indices the draw reads, and with them the vertices.
+    // The indices the draw reads, and with them the vertices. (An indirect draw's counts are on the GPU: whole streams.)
+    const bool indirect = args.indirect != nullptr;
     int64_t first_vertex = args.indexed ? 0 : args.start;
     int64_t last_vertex = args.indexed ? 0 : static_cast<int64_t>(args.start) + args.count - 1;
-    if (args.indexed && s.ib_address != 0) {
+    if (indirect) {
+        first_vertex = 0;
+        last_vertex = INT32_MAX;
+        if (args.indexed && s.ib_address != 0) {
+            static std::atomic<int> shown {0};
+            if (shown++ < 4) UT_WARN("d3d: indirect indexed draw from a placement index buffer: its size is not known here");
+        }
+    } else if (args.indexed && s.ib_address != 0) {
         const uint32_t size = s.ib_format == 42 ? 4 : 2;
         const uint64_t at = s.ib_address + static_cast<uint64_t>(args.start) * size;
         std::vector<uint8_t> indices(std::max<uint64_t>(static_cast<uint64_t>(args.count) * size, 16));
@@ -833,7 +841,7 @@ void BindStream(CtxState& s, gpu::DrawState& d, gpu::DrawArgs& args) {
         bool per_instance = false;
         if (layout != nullptr) for (const auto& e : layout->elements) if (e.slot == k && e.slot_class == 1) per_instance = true;
         uint64_t lo, hi;
-        if (per_instance) { lo = 0; hi = std::min<uint64_t>(size, (static_cast<uint64_t>(args.start_instance) + args.instances) * stride); }
+        if (per_instance) { lo = 0; hi = indirect ? size : std::min<uint64_t>(size, (static_cast<uint64_t>(args.start_instance) + args.instances) * stride); }
         else { lo = static_cast<uint64_t>(std::max<int64_t>(first_vertex, 0)) * stride; hi = std::min<uint64_t>(size, static_cast<uint64_t>(std::max<int64_t>(last_vertex + 1, 0)) * stride); }
         if (hi <= lo) continue;
         d.vb[k].buffer = CopyOfHost(base + lo, static_cast<uint32_t>(hi - lo));
@@ -1070,7 +1078,7 @@ void DoDraw(Obj& ctx, const gpu::DrawArgs& args_in) {
     gpu::Draw(d, args);
 }
 
-void DoDispatch(Obj& ctx, uint32_t x, uint32_t y, uint32_t z) {
+void DoDispatch(Obj& ctx, uint32_t x, uint32_t y, uint32_t z, std::shared_ptr<gpu::Buffer> indirect = nullptr, uint32_t indirect_offset = 0) {
     if (!gpu::Available() || x == 0 || y == 0 || z == 0) return;
     CtxState& s = StateOf(ctx);
     ParseStream(ctx, s);
@@ -1083,6 +1091,8 @@ void DoDispatch(Obj& ctx, uint32_t x, uint32_t y, uint32_t z) {
     const auto& rf = gpu::Reflection(*r->shader);
     gpu::DispatchState d;
     d.cs = r->shader;
+    d.indirect = std::move(indirect);
+    d.indirect_offset = indirect_offset;
 
     auto get = [&](uint32_t reg) -> const CtxState::Reg* {
         auto it = s.regs.find(reg);
@@ -1720,6 +1730,35 @@ void RegisterGpuOverrides() {
         return 0;
     });
 
+    // Draw(Indexed)InstancedIndirect(args buffer, byte offset) and DispatchIndirect: the counts a GPU pass wrote (Forza Horizon 2's
+    // GPU-culled draws), read by Metal from the buffer in order with the work that wrote them.
+    OverrideAll("DrawInstancedIndirect", [](Call& c) -> uint32_t {
+        Res* args = ResAt(c.Arg(0));
+        if (args == nullptr || !args->buffer) return 0;
+        gpu::DrawArgs a;
+        a.indirect = args->buffer;
+        a.indirect_offset = static_cast<uint32_t>(c.Arg(1));
+        TraceDrawCaller(c);
+        DoDraw(c.obj, a);
+        return 0;
+    });
+    OverrideAll("DrawIndexedInstancedIndirect", [](Call& c) -> uint32_t {
+        Res* args = ResAt(c.Arg(0));
+        if (args == nullptr || !args->buffer) return 0;
+        gpu::DrawArgs a;
+        a.indexed = true;
+        a.indirect = args->buffer;
+        a.indirect_offset = static_cast<uint32_t>(c.Arg(1));
+        TraceDrawCaller(c);
+        DoDraw(c.obj, a);
+        return 0;
+    });
+    OverrideAll("DispatchIndirect", [](Call& c) -> uint32_t {
+        Res* args = ResAt(c.Arg(0));
+        if (args == nullptr || !args->buffer) return 0;
+        DoDispatch(c.obj, 1, 1, 1, args->buffer, static_cast<uint32_t>(c.Arg(1)));
+        return 0;
+    });
     OverrideAll("Draw", [](Call& c) -> uint32_t {
         gpu::DrawArgs a;
         a.count = static_cast<uint32_t>(c.Arg(0));

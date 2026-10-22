@@ -1521,7 +1521,18 @@ void Draw(const DrawState& st, const DrawArgs& args) {
             return;
         }
         ++g->stats.draws;
-        if (args.indexed) {
+        if (args.indirect && args.indirect->mtl != nil) {
+            // D3D's indirect argument records are laid out as Metal's MTLDraw(Indexed)PrimitivesIndirectArguments.
+            if (args.indexed) {
+                if (!st.index_buffer) { ++g->stats.no_ib; return; }
+                const bool wide = st.index_format == 42;
+                [e drawIndexedPrimitives:prim indexType:wide ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16 indexBuffer:st.index_buffer->mtl
+                       indexBufferOffset:st.index_buffer->offset + st.index_offset indirectBuffer:args.indirect->mtl
+                    indirectBufferOffset:args.indirect->offset + args.indirect_offset];
+            } else {
+                [e drawPrimitives:prim indirectBuffer:args.indirect->mtl indirectBufferOffset:args.indirect->offset + args.indirect_offset];
+            }
+        } else if (args.indexed) {
             if (!st.index_buffer) { ++g->stats.no_ib; return; }
             const bool wide = st.index_format == 42;
             const NSUInteger isize = wide ? 4 : 2;
@@ -1593,7 +1604,7 @@ void Draw(const DrawState& st, const DrawArgs& args) {
 
 void Dispatch(const DispatchState& st, uint32_t x, uint32_t y, uint32_t z) {
     std::scoped_lock lock {g->mutex};
-    if (!st.cs || x == 0 || y == 0 || z == 0) return;
+    if (!st.cs || ((x == 0 || y == 0 || z == 0) && !st.indirect)) return;
     static int disp_count = 0;
     if (disp_count++ < 20 || g->frame_count == g->trace_frame) {
         UT_INFO("gpu: Dispatch call %d (frame %llu): x=%u y=%u z=%u cs=%p(#%d)", disp_count, (unsigned long long)g->frame_count, x, y, z, st.cs.get(), st.cs->serial);
@@ -1728,7 +1739,10 @@ void Dispatch(const DispatchState& st, uint32_t x, uint32_t y, uint32_t z) {
             std::max(1u, rf.thread_group_size[1]),
             std::max(1u, rf.thread_group_size[2])
         );
-        [ce dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerThreadgroup];
+        if (st.indirect && st.indirect->mtl != nil)
+            [ce dispatchThreadgroupsWithIndirectBuffer:st.indirect->mtl indirectBufferOffset:st.indirect->offset + st.indirect_offset threadsPerThreadgroup:threadsPerThreadgroup];
+        else
+            [ce dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerThreadgroup];
         [ce endEncoding];
     }
 }

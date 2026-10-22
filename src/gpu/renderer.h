@@ -101,10 +101,14 @@ struct DrawArgs {
     uint32_t start {0};            ///< first vertex or first index
     int32_t base_vertex {0};
     uint32_t start_instance {0};
+    std::shared_ptr<Buffer> indirect;   ///< Draw(Indexed)InstancedIndirect: the arguments are in this buffer (same layout as Metal's)
+    uint32_t indirect_offset {0};
 };
 
 struct DispatchState {
     std::shared_ptr<Shader> cs;
+    std::shared_ptr<Buffer> indirect;   ///< DispatchIndirect: the thread group counts are in this buffer
+    uint32_t indirect_offset {0};
     BufferBinding cb[16];
     std::shared_ptr<TextureView> srv[16];
     std::vector<std::pair<uint8_t, std::shared_ptr<TextureView>>> extra_srv;   ///< SRVs in slots 16 and above
