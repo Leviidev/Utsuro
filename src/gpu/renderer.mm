@@ -23,6 +23,7 @@
 #include <chrono>
 #include <cstring>
 #include <map>
+#include <set>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -691,6 +692,60 @@ bool BeginPass(const DrawState& st, int* width, int* height) {
     return true;
 }
 
+/// The [[user(...)]] members of one struct in a translated shader (the vertex outputs, or the pixel inputs).
+static std::set<std::string> UserNames(const std::string& msl, const char* struct_name) {
+    std::set<std::string> names;
+    const size_t a = msl.find(std::string("struct ") + struct_name + " {");
+    if (a == std::string::npos) return names;
+    const size_t b = msl.find("};", a);
+    for (size_t p = msl.find("[[user(", a); p != std::string::npos && p < b; p = msl.find("[[user(", p)) {
+        p += 7;
+        const size_t q = msl.find(')', p);
+        names.insert(msl.substr(p, q - p));
+    }
+    return names;
+}
+
+/// The pixel function to pair with `vs`. D3D links a pixel input the vertex shader does not write and the shader reads 0 there;
+/// Metal refuses the pipeline ("not written by vertex shader"). Such pairs get a variant of the pixel shader without those inputs.
+static id<MTLFunction> FragmentFor(Shader& vs, Shader& ps) {
+    if (ps.function == nil) return nil;
+    const std::set<std::string> have = UserNames(vs.translated.msl, "VSOut"), want = UserNames(ps.translated.msl, "PSIn");
+    std::vector<std::string> missing;
+    for (const std::string& n : want) if (have.count(n) == 0) missing.push_back(n);
+    if (missing.empty()) return ps.function;
+    std::string key = "unwritten";
+    for (const std::string& n : missing) key += ":" + n;
+    if (auto it = ps.variants.find(key); it != ps.variants.end()) return it->second;
+    std::string msl = ps.translated.msl;
+    auto ident = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; };
+    for (const std::string& n : missing) {
+        if (const size_t at = msl.find("[[user(" + n + ")]]"); at != std::string::npos) {
+            const size_t ls = msl.rfind('\n', at), le = msl.find('\n', at);
+            if (ls != std::string::npos && le != std::string::npos) msl.erase(ls, le - ls);
+        }
+        const std::string use = "in." + n;
+        for (size_t p = msl.find(use); p != std::string::npos; p = msl.find(use, p)) {
+            const size_t end = p + use.size();
+            if ((end < msl.size() && ident(msl[end])) || (p > 0 && ident(msl[p - 1]))) { p = end; continue; }
+            msl.replace(p, use.size(), "float4(0.0f)");
+            p += 12;
+        }
+    }
+    MTLCompileOptions* opts = [MTLCompileOptions new];
+    opts.fastMathEnabled = NO;
+    NSError* err = nil;
+    id<MTLLibrary> lib = [g->device newLibraryWithSource:[NSString stringWithUTF8String:msl.c_str()] options:opts error:&err];
+    id<MTLFunction> fn = lib != nil ? [lib newFunctionWithName:@"main0"] : nil;
+    if (fn == nil) UT_ERROR("gpu: pixel shader #%d without %s: %s", ps.serial, key.c_str() + 10, err ? [[err localizedDescription] UTF8String] : "?");
+    else {
+        static std::atomic<int> shown {0};
+        if (shown++ < 12) UT_INFO("gpu: pixel shader #%d with vertex shader #%d: inputs the vertex shader does not write read 0 (%s)", ps.serial, vs.serial, key.c_str() + 10);
+    }
+    ps.variants[key] = fn;
+    return fn;
+}
+
 id<MTLRenderPipelineState> PipelineFor(const DrawState& st, Shader& vs, Shader* ps, InputLayout* layout, const uint32_t strides[16]) {
     std::string key;
     key.reserve(512);
@@ -738,7 +793,7 @@ id<MTLRenderPipelineState> PipelineFor(const DrawState& st, Shader& vs, Shader* 
     MTLRenderPipelineDescriptor* d = [MTLRenderPipelineDescriptor new];
     d.vertexFunction = VariantFor(vs, classes);
     if (d.vertexFunction == nil) return nil;
-    d.fragmentFunction = ps ? ps->function : nil;
+    d.fragmentFunction = ps ? FragmentFor(vs, *ps) : nil;
     d.rasterSampleCount = samples;
     // Vertex layout.
     MTLVertexDescriptor* vd = [MTLVertexDescriptor vertexDescriptor];
