@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <unordered_map>
 #include <zlib.h>

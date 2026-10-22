@@ -93,6 +93,13 @@ void NoteImage(const std::string& image, uint64_t base) {
 
 uint64_t Export(const char* name) { return g_base != 0 ? FindExport(g_base, name) : 0; }
 
+bool InImage(uint64_t address) {
+    if (g_base == 0) return false;
+    const uint32_t nt = *reinterpret_cast<const uint32_t*>(g_base + 0x3c);
+    const uint32_t size = *reinterpret_cast<const uint32_t*>(g_base + nt + 0x18 + 0x38);   // OptionalHeader.SizeOfImage
+    return address >= g_base && address < g_base + size;
+}
+
 uint64_t Call(Kernel& k, uint64_t fn, std::initializer_list<uint64_t> args) { return Call(k, fn, std::vector<uint64_t>(args)); }
 
 uint64_t Call(Kernel& k, uint64_t fn, const std::vector<uint64_t>& args) {

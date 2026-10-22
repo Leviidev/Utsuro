@@ -25,6 +25,8 @@ struct Res {
     uint64_t next_try_frame {0};                  ///< a texture with no readable pages yet is looked at again from this frame on
     uint64_t placement_bytes {0};                ///< how much of the placement memory the texels occupy
     uint64_t content_hash {0}, checked_frame {~0ull};   ///< to notice texels the CPU rewrote without telling anyone
+    uint64_t next_check_frame {0};                ///< PlacementChanged backs off on textures that keep the same contents...
+    uint32_t check_interval {1};                  ///< ...doubling up to 8 frames; a Map or a cache flush over them resets it
     Res* base {nullptr};                         ///< a view's resource
     std::vector<RecordedDraw> recorded;          ///< a command list: what to replay
     std::vector<gpu::InputElement> elements;     ///< an input layout's elements
@@ -150,7 +152,7 @@ void OnCreate(Call& c, const winrt::Method& m, Obj& o) {
         r.usage = usage;
         r.bind = bind;
         r.texture = gpu::CreateTexture(d);
-        UT_INFO("d3d: Created %s %ux%u fmt %u placed=%d mtl=%p host_ptr=%#llx", n.c_str(), d.width, d.height, d.format, placed, r.texture ? r.texture.get() : nullptr, (unsigned long long)(placed ? c.Arg(3) : 0));
+        UT_INFO("d3d: Created %s %ux%u fmt %u placed=%d res=%p native=%p bind=%#x host_ptr=%#llx", n.c_str(), d.width, d.height, d.format, placed, &r, r.texture ? gpu::NativeOf(*r.texture) : nullptr, bind, (unsigned long long)(placed ? c.Arg(3) : 0));
         if (std::getenv("UTSURO_TEXLOG") != nullptr) {
             static std::atomic<int> shown {0};
             if (shown++ < 60) UT_INFO("d3d: %s %ux%u fmt %u mips %u array %u bind %#x usage %u misc %#x -> %s", n.c_str(), d.width, d.height, d.format, d.mips, d.array_size, bind, usage, misc, r.texture ? "ok" : "NO TEXTURE");
@@ -203,7 +205,7 @@ void OnCreate(Call& c, const winrt::Method& m, Obj& o) {
         Res* base = ResAt(c.Arg(0));
         if (base == nullptr || (!base->texture && !base->buffer)) return;
         auto v = std::make_shared<gpu::TextureView>();
-        UT_INFO("d3d: %s obj=%p base_res=%p tex=%p mtl=%p", n.c_str(), &o, base, base ? base->texture.get() : nullptr, (base && base->texture) ? base->texture.get() : nullptr);
+        UT_INFO("d3d: %s obj=%p base_res=%p native=%p view fmt %u", n.c_str(), &o, base, (base && base->texture) ? gpu::NativeOf(*base->texture) : nullptr, U32(desc, 0));
         v->texture = base->texture;
         v->buffer = base->buffer;
         r.base = base;
@@ -367,7 +369,7 @@ struct TileLevel { uint64_t base {0}, row_stride {0}, tile_bytes {0}; uint32_t w
 struct TileModel {
     bool ok {false};
     bool linear {false};           ///< rows (of elements) one pitch apart, rather than micro tiles
-    uint64_t computer {0};         ///< the XGTextureAddressComputer, kept for 2D tilings, whose CopyFromSubresource (vtable slot 6) detiles
+    uint64_t computer {0};         ///< the XGTextureAddressComputer, kept for 2D tilings, whose CopyFromSubresource (copy_fn) detiles
     uint64_t copy_fn {0};
     uint32_t bytes {0};            ///< per element
     uint32_t levels_per_slice {0};
@@ -400,9 +402,14 @@ TileModel BuildTileModel(const gpu::TextureDesc& info, uint32_t tile_mode, uint3
         static std::once_flag once;
         std::call_once(once, [&] { for (int i = 0; i < 16; ++i) UT_INFO("xg: computer vtable[%d] = %s", i, g_kernel->Describe(vtable[i]).c_str()); });
     }
-    const uint64_t offset_fn = vtable[6];
+    // The computer's methods moved between xg_x.dll versions: the older one (Forza Horizon 2, Minecraft) has eight, with
+    // GetTexelElementOffsetBytes at slot 4 and CopyFromSubresource at 6; newer ones (Rocket League, Sonic Mania) have twelve, the
+    // same two at 6 and 9. Past the last method the table runs into strings.
+    const bool wide = xg::InImage(vtable[8]) && xg::InImage(vtable[11]);
+    const uint64_t offset_fn = vtable[wide ? 6 : 4];
+    static const uint64_t bit_offset = Runtime::Get().AllocGuest(16, 16);
     auto at = [&](uint32_t mip, uint32_t x, uint32_t y, uint32_t slice) {
-        return xg::Call(*g_kernel, offset_fn, {comp, 0, mip, x, y, slice, 0});
+        return xg::Call(*g_kernel, offset_fn, {comp, 0, mip, x, y, slice, 0, bit_offset});
     };
     m.levels_per_slice = info.mips;
     const bool linear_layout = tile_mode == 0 || tile_mode == 1;
@@ -452,7 +459,7 @@ TileModel BuildTileModel(const gpu::TextureDesc& info, uint32_t tile_mode, uint3
         // 2D tilings (bank and pipe swizzled macro tiles): xg_x.dll copies them out itself. 1D thin tiling (mode 2) is
         // the Morton layout above, which the host does faster.
         m.computer = comp;
-        m.copy_fn = vtable[9];
+        m.copy_fn = vtable[wide ? 9 : 6];
     } else {
         xg::Call(*g_kernel, vtable[1], {comp});   // Release
     }
@@ -477,8 +484,13 @@ uint64_t HashWords(const uint8_t* p, size_t bytes, uint64_t h) {
 bool PlacementChanged(Res& r) {
     if (r.placement == 0 || r.placement_bytes == 0 || r.placement_bytes > (4u << 20) || (r.bind & 0x40) != 0) return false;
     const uint64_t frame = g_frame.load();
-    if (r.checked_frame == frame) return false;
-    r.checked_frame = frame;
+    if (frame < r.next_check_frame) return false;
+    {
+        // Several deferred contexts draw with the same textures at once: one of them hashes per frame.
+        std::atomic_ref<uint64_t> checked {r.checked_frame};
+        uint64_t seen = checked.load(std::memory_order_relaxed);
+        if (seen == frame || !checked.compare_exchange_strong(seen, frame)) return false;
+    }
     static thread_local std::vector<uint8_t> chunk(64 << 10);
     uint64_t h = 0x84222325CBF29CE4ull;
     for (uint64_t at = 0; at < r.placement_bytes; at += chunk.size()) {
@@ -494,7 +506,14 @@ bool PlacementChanged(Res& r) {
         }
         h = HashWords(chunk.data(), static_cast<size_t>(n & ~7ull), h);
     }
-    if (h == r.content_hash) return false;
+    if (h == r.content_hash) {
+        // Unchanged: look again less often. Textures the CPU really rewrites (glyph caches) keep being checked every frame.
+        r.check_interval = std::min<uint32_t>(r.check_interval * 2, 8);
+        r.next_check_frame = frame + r.check_interval;
+        return false;
+    }
+    r.check_interval = 1;
+    r.next_check_frame = frame + 1;
     r.placement_dirty = true;
     return true;
 }
@@ -779,7 +798,7 @@ void BindStream(CtxState& s, gpu::DrawState& d, gpu::DrawArgs& args) {
                 if (v == 0xFFFF && size == 2) continue;   // restart index
                 lo = std::min(lo, v); hi = std::max(hi, v);
             }
-            d.index_buffer = gpu::CreateBuffer(static_cast<uint32_t>(indices.size()), false, indices.data());
+            d.index_buffer = gpu::CreateTransientBuffer(static_cast<uint32_t>(indices.size()), indices.data());   // one draw's worth: the frame ring
             d.index_offset = 0;
             d.index_format = s.ib_format;
             args.start = 0;
@@ -1296,6 +1315,8 @@ void RegisterGpuOverrides() {
                     reinterpret_cast<uint32_t*>(out)[2] = static_cast<uint32_t>(lv.row_stride);
                     reinterpret_cast<uint32_t*>(out)[3] = static_cast<uint32_t>(size);
                     r->placement_dirty = true;
+                    r->check_interval = 1;
+                    r->next_check_frame = 0;
                     return 0;
                 }
             }
@@ -1400,25 +1421,73 @@ void RegisterGpuOverrides() {
             gpu::CopyBuffer(*dst->buffer, 0, *src->buffer, 0, std::min(gpu::BufferSize(*dst->buffer), gpu::BufferSize(*src->buffer)));
         } else if (dst->texture && src->texture) {
             const auto& d = gpu::TextureInfo(*src->texture);
+            if (static std::atomic<int> shown {0}; (d.format == 19 || d.format == 20 || d.format == 40 || d.format == 41 || d.format == 44 || d.format == 45) && shown++ < 8)
+                UT_INFO("d3d: CopyResource of a depth-format texture %ux%u fmt %u -> fmt %u", d.width, d.height, d.format, gpu::TextureInfo(*dst->texture).format);
             for (uint32_t a = 0; a < d.array_size; ++a)
                 for (uint32_t m = 0; m < d.mips; ++m) gpu::CopyTexture(*dst->texture, m, a, 0, 0, 0, *src->texture, m, a, nullptr);
         }
         return 0;
     });
     // CopySubresourceRegion(dst, dst sub, x, y, z, src, src sub, box*)
+    // DecompressResource(dst, dst sub, const D3D11X_POINT* dst point, src, src sub, const D3D11X_RECT* src rect, DXGI_FORMAT, flags): the
+    // console decompresses depth (HTILE) or colour (CMASK/FMASK) into a surface shaders can read. Here surfaces are never compressed,
+    // so it is a copy, converting depth into whatever the destination is. Rocket League reads its scene depth from such a copy
+    // (fog, soft particles, shadow projection): without it that texture stays zero and dynamic shadows black out whole boxes.
+    OverrideAll("DecompressResource", [](Call& c) -> uint32_t {
+        Res* dst = ResAt(c.Arg(0));
+        Res* src = ResAt(c.Arg(3));
+        static std::atomic<int> shown {0};
+        if (dst == nullptr || src == nullptr || !dst->texture || !src->texture) {
+            if (shown++ < 6) UT_INFO("d3d: DecompressResource(%#llx <- %#llx): not two textures", (unsigned long long)c.Arg(0), (unsigned long long)c.Arg(3));
+            return 0;
+        }
+        uint32_t dm, ds, sm, ss, row, rows, depth;
+        // UINT arguments: only the low 32 bits of the register are the value.
+        const uint32_t dst_sub = static_cast<uint32_t>(c.Arg(1)), src_sub = static_cast<uint32_t>(c.Arg(4));
+        {
+            static std::mutex m; static std::set<std::pair<Res*, Res*>> seen;
+            std::scoped_lock lock {m};
+            if (seen.insert({dst, src}).second && seen.size() < 40)
+                UT_INFO("d3d: DecompressResource pair: dst %p native %p fmt %u sub %u <- src %p native %p fmt %u sub %u, format %u flags %#x", dst, gpu::NativeOf(*dst->texture), gpu::TextureInfo(*dst->texture).format, dst_sub,
+                        src, gpu::NativeOf(*src->texture), gpu::TextureInfo(*src->texture).format, src_sub, static_cast<uint32_t>(c.Arg(6)), static_cast<uint32_t>(c.Arg(7)));
+        }
+        if (dst == src && dst_sub == src_sub) return 0;   // in place: surfaces here are never compressed
+        TextureShape(gpu::TextureInfo(*dst->texture), dst_sub, &dm, &ds, &row, &rows, &depth);
+        TextureShape(gpu::TextureInfo(*src->texture), src_sub, &sm, &ss, &row, &rows, &depth);
+        const auto* pt = c.Ptr<uint32_t>(2);
+        const auto* rc = c.Ptr<uint32_t>(5);
+        if (shown++ < 6) {
+            const auto& di = gpu::TextureInfo(*dst->texture); const auto& si = gpu::TextureInfo(*src->texture);
+            UT_INFO("d3d: DecompressResource %ux%u fmt %u (sub %u) <- %ux%u fmt %u (sub %u), point %s, rect %s, format %u flags %#x", di.width, di.height, di.format,
+                    dst_sub, si.width, si.height, si.format, src_sub, pt ? "yes" : "no", rc ? "yes" : "no", static_cast<uint32_t>(c.Arg(6)), static_cast<uint32_t>(c.Arg(7)));
+        }
+        gpu::DecompressCopy(*dst->texture, dm, ds, pt ? pt[0] : 0, pt ? pt[1] : 0, *src->texture, sm, ss, rc);
+        return 0;
+    });
     OverrideAll("CopySubresourceRegion", [](Call& c) -> uint32_t {
         Res* dst = ResAt(c.Arg(0));
-        Res* src = ResAt(c.Arg(4));
+        Res* src = ResAt(c.Arg(5));
         if (dst == nullptr || src == nullptr) return 0;
-        const auto* box = c.Ptr<uint32_t>(6);
+        const auto* box = c.Ptr<uint32_t>(7);
+        const uint32_t dx = static_cast<uint32_t>(c.Arg(2)), dy = static_cast<uint32_t>(c.Arg(3)), dz = static_cast<uint32_t>(c.Arg(4));
         if (dst->buffer && src->buffer) {
             const uint32_t left = box ? box[0] : 0, right = box ? box[3] : gpu::BufferSize(*src->buffer);
-            gpu::CopyBuffer(*dst->buffer, static_cast<uint32_t>(c.Arg(2)), *src->buffer, left, right - left);
+            if (right > left) gpu::CopyBuffer(*dst->buffer, dx, *src->buffer, left, right - left);
         } else if (dst->texture && src->texture) {
+            if (static const bool skip = std::getenv("UTSURO_NOTEXCOPY") != nullptr; skip) return 0;   // A/B switch for what texture copies cost
             uint32_t sm, ss, sr, srs, sd, dm, ds, dr, drs, dd;
-            TextureShape(gpu::TextureInfo(*src->texture), static_cast<uint32_t>(c.Arg(5)), &sm, &ss, &sr, &srs, &sd);
+            TextureShape(gpu::TextureInfo(*src->texture), static_cast<uint32_t>(c.Arg(6)), &sm, &ss, &sr, &srs, &sd);
             TextureShape(gpu::TextureInfo(*dst->texture), static_cast<uint32_t>(c.Arg(1)), &dm, &ds, &dr, &drs, &dd);
-            gpu::CopyTexture(*dst->texture, dm, ds, static_cast<uint32_t>(c.Arg(2)), static_cast<uint32_t>(c.Arg(3)), 0, *src->texture, sm, ss, box);
+            if (static const bool log = std::getenv("UTSURO_COPYLOG") != nullptr; log) {
+                static std::atomic<int> shown {0};
+                if (shown++ < 200) {
+                    const auto& di = gpu::TextureInfo(*dst->texture); const auto& si = gpu::TextureInfo(*src->texture);
+                    UT_INFO("d3d: CopySubresourceRegion tex %ux%u fmt %u mips %u placed %d mip %u slice %u at %u,%u <- %ux%u fmt %u mips %u placed %d mip %u slice %u box %s",
+                            di.width, di.height, di.format, di.mips, dst->placement != 0, dm, ds, dx, dy, si.width, si.height, si.format, si.mips, src->placement != 0, sm, ss,
+                            box ? (std::to_string(box[0]) + "," + std::to_string(box[1]) + "-" + std::to_string(box[3]) + "," + std::to_string(box[4])).c_str() : "none");
+                }
+            }
+            gpu::CopyTexture(*dst->texture, dm, ds, dx, dy, dz, *src->texture, sm, ss, box);
         } else if (static const bool log = std::getenv("UTSURO_COPYLOG") != nullptr; log) {
             static std::atomic<int> shown {0};
             if (shown++ < 30) {
@@ -1428,7 +1497,7 @@ void RegisterGpuOverrides() {
                     else std::snprintf(b, sizeof b, "buffer %u bytes host %#llx", r->host_size, (unsigned long long)r->host_ptr);
                     return b;
                 };
-                UT_INFO("d3d: CopySubresourceRegion %s <- %s (box %s, dst sub %llu, src sub %llu)", describe(dst).c_str(), describe(src).c_str(), box ? "yes" : "no", (unsigned long long)c.Arg(1), (unsigned long long)c.Arg(5));
+                UT_INFO("d3d: CopySubresourceRegion %s <- %s (box %s, dst sub %llu, src sub %llu)", describe(dst).c_str(), describe(src).c_str(), box ? "yes" : "no", (unsigned long long)c.Arg(1), (unsigned long long)c.Arg(6));
             }
         }
         return 0;
@@ -1476,7 +1545,7 @@ void RegisterGpuOverrides() {
         std::scoped_lock lock {g_res_mutex};
         int hit = 0;
         for (Res* r : g_placed)
-            if (r->placement < to && r->placement + r->host_size > from) { r->placement_dirty = true; r->next_try_frame = 0; ++hit; }
+            if (r->placement < to && r->placement + r->host_size > from) { r->placement_dirty = true; r->next_try_frame = 0; r->check_interval = 1; r->next_check_frame = 0; ++hit; }
         if (static const bool log = std::getenv("UTSURO_PLACE") != nullptr; log) {
             static std::atomic<int> total {0}, shown {0};
             ++total;

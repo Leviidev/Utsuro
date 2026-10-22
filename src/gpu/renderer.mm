@@ -29,6 +29,8 @@
 
 namespace utsuro::gpu {
 
+bool WritePngRGBA(const uint8_t* rgba, size_t w, size_t h, const char* path);
+
 // ---- objects -------------------------------------------------------------------------------
 
 struct Buffer {
@@ -74,12 +76,14 @@ constexpr size_t kRingBytes = 48u << 20;
 
 struct Ring {
     id<MTLBuffer> buffer {nil};
+    size_t capacity {0};
     size_t head {0};
     std::vector<std::weak_ptr<Buffer>> live;
 };
 
 struct Globals {
     std::recursive_mutex mutex;
+    std::mutex ring_mutex;   ///< the ring (g->frame, ring heads): taken alone, or inside `mutex`, never around it
     id<MTLDevice> device {nil};
     id<MTLCommandQueue> queue {nil};
     bool ready {false};
@@ -113,6 +117,7 @@ struct Globals {
     int draws_in_command {0};   ///< draws encoded into the current command buffer (it is committed every so many)
     const char* dir_or_empty() const { return dump_dir ? dump_dir : "."; }
     std::vector<std::shared_ptr<Texture>> trace_rts;   // render targets drawn to during the traced frame, dumped at its Present
+    std::vector<Texture*> trace_depths;               // depth textures sampled during the traced frame (their float copies are summarised at Present)
     std::string snapshot_path;
     std::string debug;   // UTSURO_GPUDEBUG: nodepth, nocull, noblend
     struct Stats { uint64_t draws {0}, no_vs {0}, bad_vs {0}, bad_ps {0}, no_pass {0}, no_pso {0}, bad_topology {0}, clears {0}, no_ib {0}; } stats;
@@ -812,9 +817,10 @@ MTLPrimitiveType Primitive(uint32_t topology, bool* ok) {
 
 /// Gives `b` fresh storage in the current ring slot.
 uint8_t* RingAlloc(const std::shared_ptr<Buffer>& b, uint32_t size) {
+    std::scoped_lock lock {g->ring_mutex};
     Ring& r = g->ring[g->frame];
     const size_t aligned = (size + 255) & ~size_t(255);
-    if (r.head + aligned > kRingBytes) return nullptr;
+    if (r.head + aligned > r.capacity) return nullptr;
     b->mtl = r.buffer;
     b->offset = (uint32_t)r.head;
     b->ring_frame = g->frame;
@@ -852,7 +858,7 @@ bool Init() {
         g->device = MTLCreateSystemDefaultDevice();
         if (g->device == nil) { UT_ERROR("gpu: no Metal device"); return false; }
         g->queue = [g->device newCommandQueue];
-        for (auto& r : g->ring) r.buffer = NewBuffer(kRingBytes);
+        for (auto& r : g->ring) { r.buffer = NewBuffer(kRingBytes); r.capacity = kRingBytes; }
         g->frames_in_flight = dispatch_semaphore_create(kRingFrames);
         g->null_buffer = NewBuffer(256);
         std::memset(g->null_buffer.contents, 0, 256);
@@ -873,7 +879,7 @@ bool Init() {
 bool Available() { return g != nullptr && g->ready; }
 
 std::shared_ptr<Buffer> CreateBuffer(uint32_t size, bool dynamic, const void* initial) {
-    std::scoped_lock lock {g->mutex};
+    // No renderer lock: nothing shared is touched, and deferred contexts on other threads create buffers while draws are encoded.
     auto b = std::make_shared<Buffer>();
     b->size = size;
     b->dynamic = dynamic;
@@ -886,7 +892,6 @@ std::shared_ptr<Buffer> CreateBuffer(uint32_t size, bool dynamic, const void* in
 /// A buffer that lives for this frame only (descriptor copies, per-draw constants): a slice of the frame's ring, or a buffer
 /// of its own when the ring is full.
 std::shared_ptr<Buffer> CreateTransientBuffer(uint32_t size, const void* initial) {
-    std::scoped_lock lock {g->mutex};
     auto b = std::make_shared<Buffer>();
     b->size = size;
     b->dynamic = false;
@@ -1023,21 +1028,116 @@ bool ReadbackTexture(Texture& t, uint32_t mip, uint32_t slice, void* dst, uint32
 }
 
 void CopyTexture(Texture& dst, uint32_t dmip, uint32_t dslice, uint32_t dx, uint32_t dy, uint32_t dz, Texture& src, uint32_t smip, uint32_t sslice, const uint32_t box[6]) {
-    std::scoped_lock lock {g->mutex};
     if (dst.mtl == nil || src.mtl == nil) return;
+    if (smip >= src.mtl.mipmapLevelCount || dmip >= dst.mtl.mipmapLevelCount || src.mtl.sampleCount != dst.mtl.sampleCount) return;
+    if (src.mtl.pixelFormat != dst.mtl.pixelFormat) {
+        // A blit needs one format on both sides. Depth into a colour or another depth format goes through the shader copy.
+        if (IsDepth(src.pixel_format) || IsDepth(dst.pixel_format)) {
+            const uint32_t rect[4] = {box ? box[0] : 0, box ? box[1] : 0, box ? box[3] : ~0u, box ? box[4] : ~0u};
+            DecompressCopy(dst, dmip, dslice, dx, dy, src, smip, sslice, rect);
+        } else if (static std::atomic<int> shown {0}; shown++ < 8) {
+            UT_INFO("gpu: texture copy between formats %lu -> %lu skipped", (unsigned long)src.mtl.pixelFormat, (unsigned long)dst.mtl.pixelFormat);
+        }
+        return;
+    }
+    const uint32_t mw = std::max<uint32_t>(1, (uint32_t)src.mtl.width >> smip), mh = std::max<uint32_t>(1, (uint32_t)src.mtl.height >> smip);
+    const uint32_t md = src.mtl.textureType == MTLTextureType3D ? std::max<uint32_t>(1, (uint32_t)src.mtl.depth >> smip) : 1;
+    const uint32_t dw = std::max<uint32_t>(1, (uint32_t)dst.mtl.width >> dmip), dh = std::max<uint32_t>(1, (uint32_t)dst.mtl.height >> dmip);
+    const uint32_t ddp = dst.mtl.textureType == MTLTextureType3D ? std::max<uint32_t>(1, (uint32_t)dst.mtl.depth >> dmip) : 1;
+    uint32_t l = 0, t = 0, f = 0, r = mw, b = mh, bk = md;
+    if (box != nullptr) { l = box[0]; t = box[1]; f = box[2]; r = std::min(box[3], mw); b = std::min(box[4], mh); bk = std::min(box[5], md); }
+    if (r <= l || b <= t || bk <= f || dx >= dw || dy >= dh || dz >= ddp) return;
+    const uint32_t w = std::min(r - l, dw - dx), h = std::min(b - t, dh - dy), d = std::min(bk - f, ddp - dz);
+    std::scoped_lock lock {g->mutex};
     EndEncoder();
     id<MTLBlitCommandEncoder> blit = [Command() blitCommandEncoder];
-    const uint32_t mw = std::max<uint32_t>(1, (uint32_t)src.mtl.width >> smip), mh = std::max<uint32_t>(1, (uint32_t)src.mtl.height >> smip);
-    const uint32_t md = std::max<uint32_t>(1, (uint32_t)src.mtl.depth >> smip);
-    uint32_t l = 0, t = 0, f = 0, r = mw, b = mh, bk = md;
-    if (box != nullptr) { l = box[0]; t = box[1]; f = box[2]; r = box[3]; b = box[4]; bk = box[5]; }
-    [blit copyFromTexture:src.mtl sourceSlice:sslice sourceLevel:smip sourceOrigin:MTLOriginMake(l, t, f) sourceSize:MTLSizeMake(r - l, b - t, bk - f)
+    [blit copyFromTexture:src.mtl sourceSlice:sslice sourceLevel:smip sourceOrigin:MTLOriginMake(l, t, f) sourceSize:MTLSizeMake(w, h, d)
                 toTexture:dst.mtl destinationSlice:dslice destinationLevel:dmip destinationOrigin:MTLOriginMake(dx, dy, dz)];
     [blit endEncoding];
     if (IsDepth(dst.pixel_format)) ++dst.depth_gen;
 }
 
+void DecompressCopy(Texture& dst, uint32_t dmip, uint32_t dslice, uint32_t dx, uint32_t dy, Texture& src, uint32_t smip, uint32_t sslice, const uint32_t rect[4]) {
+    if (dst.mtl == nil || src.mtl == nil) return;
+    const uint32_t sw = std::max<uint32_t>(1, (uint32_t)src.mtl.width >> smip), sh = std::max<uint32_t>(1, (uint32_t)src.mtl.height >> smip);
+    uint32_t l = 0, t = 0, r = sw, b = sh;
+    if (rect != nullptr) { l = rect[0]; t = rect[1]; r = std::min(rect[2], sw); b = std::min(rect[3], sh); }
+    if (r <= l || b <= t) return;
+    if (src.mtl == dst.mtl && smip == dmip && sslice == dslice) { if (IsDepth(dst.pixel_format)) ++dst.depth_gen; return; }   // in place: nothing to do here
+    const bool sd = IsDepth(src.pixel_format), dd = IsDepth(dst.pixel_format);
+    if (src.mtl.pixelFormat == dst.mtl.pixelFormat && src.mtl.sampleCount == dst.mtl.sampleCount) {
+        const uint32_t box[6] = {l, t, 0, r, b, 1};
+        CopyTexture(dst, dmip, dslice, dx, dy, 0, src, smip, sslice, box);
+        return;
+    }
+    std::scoped_lock lock {g->mutex};
+    EndEncoder();
+    @autoreleasepool {
+        // A full-screen triangle over the destination rectangle that reads the source texel for texel: depth -> depth writes
+        // [[depth(any)]], anything else writes colour.
+        static std::map<std::string, id<MTLRenderPipelineState>> pipelines;
+        const std::string key = std::to_string((unsigned long)dst.mtl.pixelFormat) + (sd ? "d" : "c");
+        id<MTLRenderPipelineState> pso = pipelines[key];
+        if (pso == nil) {
+            std::string fs = "#include <metal_stdlib>\nusing namespace metal;\nstruct V { float4 pos [[position]]; };\n"
+                             "vertex V vmain(uint vid [[vertex_id]]) { float2 p = float2((vid << 1) & 2, vid & 2); V o; o.pos = float4(p * 2.0 - 1.0, 0, 1); return o; }\n"
+                             "struct Off { int2 d; };\n";
+            const std::string read = sd ? "depth2d<float> t [[texture(0)]]" : "texture2d<float> t [[texture(0)]]";
+            const std::string val = sd ? "t.read(uint2(int2(in.pos.xy) + o.d), lod)" : "t.read(uint2(int2(in.pos.xy) + o.d), lod)";
+            if (dd) fs += "struct F { float d [[depth(any)]]; };\nfragment F fmain(V in [[stage_in]], " + read + ", constant Off& o [[buffer(0)]], constant uint& lod [[buffer(1)]]) { F f; f.d = float(" + val + (sd ? "" : ".r") + "); return f; }\n";
+            else fs += "fragment float4 fmain(V in [[stage_in]], " + read + ", constant Off& o [[buffer(0)]], constant uint& lod [[buffer(1)]]) { float4 v = float4(" + val + "); return " + (sd ? "float4(v.x, v.x, v.x, 1)" : "v") + "; }\n";
+            NSError* err = nil;
+            id<MTLLibrary> lib = [g->device newLibraryWithSource:[NSString stringWithUTF8String:fs.c_str()] options:nil error:&err];
+            if (lib == nil) { UT_ERROR("gpu: decompress copy shader: %s", [[err localizedDescription] UTF8String]); return; }
+            MTLRenderPipelineDescriptor* pd = [MTLRenderPipelineDescriptor new];
+            pd.vertexFunction = [lib newFunctionWithName:@"vmain"];
+            pd.fragmentFunction = [lib newFunctionWithName:@"fmain"];
+            if (dd) { pd.depthAttachmentPixelFormat = dst.mtl.pixelFormat; if (HasStencil(dst.mtl.pixelFormat)) pd.stencilAttachmentPixelFormat = dst.mtl.pixelFormat; }
+            else pd.colorAttachments[0].pixelFormat = dst.mtl.pixelFormat;
+            pso = [g->device newRenderPipelineStateWithDescriptor:pd error:&err];
+            if (pso == nil) { UT_ERROR("gpu: decompress copy pipeline: %s", [[err localizedDescription] UTF8String]); return; }
+            pipelines[key] = pso;
+        }
+        MTLTextureDescriptor* vd = nil; (void)vd;
+        id<MTLTexture> target = dst.mtl;
+        if (dst.mtl.mipmapLevelCount > 1 || dst.mtl.arrayLength > 1)
+            target = [dst.mtl newTextureViewWithPixelFormat:dst.mtl.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(dmip, 1) slices:NSMakeRange(dslice, 1)];
+        id<MTLTexture> source = src.mtl;
+        if (src.mtl.arrayLength > 1)
+            source = [src.mtl newTextureViewWithPixelFormat:src.mtl.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(0, src.mtl.mipmapLevelCount) slices:NSMakeRange(sslice, 1)];
+        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        if (dd) {
+            pass.depthAttachment.texture = target;
+            pass.depthAttachment.loadAction = MTLLoadActionLoad;
+            pass.depthAttachment.storeAction = MTLStoreActionStore;
+            if (HasStencil(target.pixelFormat)) { pass.stencilAttachment.texture = target; pass.stencilAttachment.loadAction = MTLLoadActionLoad; pass.stencilAttachment.storeAction = MTLStoreActionStore; }
+        } else {
+            pass.colorAttachments[0].texture = target;
+            pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+            pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        }
+        id<MTLRenderCommandEncoder> e = [Command() renderCommandEncoderWithDescriptor:pass];
+        [e setRenderPipelineState:pso];
+        if (dd) {
+            static id<MTLDepthStencilState> always = nil;
+            if (always == nil) { MTLDepthStencilDescriptor* d = [MTLDepthStencilDescriptor new]; d.depthCompareFunction = MTLCompareFunctionAlways; d.depthWriteEnabled = YES; always = [g->device newDepthStencilStateWithDescriptor:d]; }
+            [e setDepthStencilState:always];
+        }
+        MTLViewport vp {double(dx), double(dy), double(r - l), double(b - t), 0, 1};
+        [e setViewport:vp];
+        [e setScissorRect:MTLScissorRect {dx, dy, std::min<NSUInteger>(r - l, target.width - dx), std::min<NSUInteger>(b - t, target.height - dy)}];
+        const int32_t off[2] = {int32_t(l) - int32_t(dx), int32_t(t) - int32_t(dy)};
+        [e setFragmentBytes:off length:sizeof off atIndex:0];
+        [e setFragmentBytes:&smip length:sizeof smip atIndex:1];
+        [e setFragmentTexture:source atIndex:0];
+        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [e endEncoding];
+    }
+    if (dd) ++dst.depth_gen;
+}
+
 const TextureDesc& TextureInfo(const Texture& t) { return t.desc; }
+void* NativeOf(const Texture& t) { return (__bridge void*)t.mtl; }
 const ShaderReflection& Reflection(const Shader& s) { return s.translated.reflection; }
 
 void GenerateMips(Texture& t) {
@@ -1097,6 +1197,15 @@ id<MTLTexture> DepthAsFloat(Texture& t) {
         t.copy_gen = ~0ull;
     }
     if (t.copy_gen == t.depth_gen) return t.depth_copy;
+    {
+        static std::mutex m; static std::vector<void*> seen;
+        std::scoped_lock lock {m};
+        if (std::find(seen.begin(), seen.end(), (__bridge void*)t.mtl) == seen.end() && seen.size() < 32) {
+            seen.push_back((__bridge void*)t.mtl);
+            UT_INFO("gpu: depth copy source %p: %lux%lu format %lu type %lu samples %lu usage %#lx storage %lu mips %lu", (__bridge void*)t.mtl, (unsigned long)t.mtl.width, (unsigned long)t.mtl.height,
+                    (unsigned long)t.mtl.pixelFormat, (unsigned long)t.mtl.textureType, (unsigned long)t.mtl.sampleCount, (unsigned long)t.mtl.usage, (unsigned long)t.mtl.storageMode, (unsigned long)t.mtl.mipmapLevelCount);
+        }
+    }
     if (g->depth_copy_pipeline == nil) {
         NSString* src = @"#include <metal_stdlib>\nusing namespace metal;\n"
             "struct V { float4 pos [[position]]; float2 uv; };\n"
@@ -1135,7 +1244,11 @@ void Draw(const DrawState& st, const DrawArgs& args) {
     @autoreleasepool {
         for (int stage = 0; stage < 2; ++stage) {
             for (int i = 0; i < 16; ++i)
-                if (st.srv[stage][i] && st.srv[stage][i]->texture && IsDepth(st.srv[stage][i]->texture->pixel_format)) DepthAsFloat(*st.srv[stage][i]->texture);
+                if (st.srv[stage][i] && st.srv[stage][i]->texture && IsDepth(st.srv[stage][i]->texture->pixel_format)) {
+                    Texture* dt = st.srv[stage][i]->texture.get();
+                    DepthAsFloat(*dt);
+                    if (g->frame_count == g->trace_frame && std::find(g->trace_depths.begin(), g->trace_depths.end(), dt) == g->trace_depths.end()) g->trace_depths.push_back(dt);
+                }
             for (const auto& [slot, view] : st.extra_srv[stage])
                 if (view && view->texture && IsDepth(view->texture->pixel_format)) DepthAsFloat(*view->texture);
         }
@@ -1144,6 +1257,11 @@ void Draw(const DrawState& st, const DrawArgs& args) {
         if (static const bool census = std::getenv("UTSURO_RTCENSUS") != nullptr; census && st.rtv[0] && st.rtv[0]->texture) {
             char key[96];
             std::snprintf(key, sizeof key, "%p %lux%lu fmt %lu", (__bridge void*)st.rtv[0]->texture->mtl, (unsigned long)st.rtv[0]->texture->mtl.width, (unsigned long)st.rtv[0]->texture->mtl.height, (unsigned long)st.rtv[0]->texture->pixel_format);
+            ++g->rt_census[key];
+        }
+        if (static const bool census = std::getenv("UTSURO_RTCENSUS") != nullptr; census && st.dsv && st.dsv->texture) {
+            char key[96];
+            std::snprintf(key, sizeof key, "dsv %p %lux%lu", (__bridge void*)st.dsv->texture->mtl, (unsigned long)st.dsv->texture->mtl.width, (unsigned long)st.dsv->texture->mtl.height);
             ++g->rt_census[key];
         }
         if (static const bool census = std::getenv("UTSURO_RTCENSUS") != nullptr; census && st.rtv[0] && st.rtv[0]->texture) {
@@ -1271,6 +1389,8 @@ void Draw(const DrawState& st, const DrawArgs& args) {
             ++g->trace_draws;
             if (st.rtv[0] && st.rtv[0]->texture && std::find(g->trace_rts.begin(), g->trace_rts.end(), st.rtv[0]->texture) == g->trace_rts.end()) g->trace_rts.push_back(st.rtv[0]->texture);
             id<MTLTexture> rt0 = st.rtv[0] && st.rtv[0]->texture ? ViewOf(*st.rtv[0]->texture, st.rtv[0]->desc, true) : nil;
+            if (st.dsv && st.dsv->texture) UT_INFO("gpu:   dsv [%p] %lux%lu fmt %lu depth_gen %llu", (__bridge void*)st.dsv->texture->mtl, (unsigned long)st.dsv->texture->mtl.width, (unsigned long)st.dsv->texture->mtl.height,
+                                                    (unsigned long)st.dsv->texture->mtl.pixelFormat, (unsigned long long)st.dsv->texture->depth_gen);
             UT_INFO("gpu: draw %s count %u inst %u topo %u vs %p(#%d) ps %p(#%d) layout %p rt0 [%p] %ux%u fmt %lu depth %d vp %.0fx%.0f+%.0f,%.0f cb0 %p tex0 %p blend %zu", args.indexed ? "indexed" : "plain", args.count, args.instances, st.topology,
                     (void*)st.vs.get(), st.vs->serial, (void*)st.ps.get(), st.ps ? st.ps->serial : 0, (void*)st.layout.get(), st.rtv[0] && st.rtv[0]->texture ? (__bridge void*)st.rtv[0]->texture->mtl : nullptr, rt0 ? (unsigned)rt0.width : 0, rt0 ? (unsigned)rt0.height : 0, rt0 ? (unsigned long)rt0.pixelFormat : 0, has_depth,
                     st.num_viewports ? st.viewports[0].w : 0.f, st.num_viewports ? st.viewports[0].h : 0.f, st.num_viewports ? st.viewports[0].x : 0.f, st.num_viewports ? st.viewports[0].y : 0.f,
@@ -1292,6 +1412,14 @@ void Draw(const DrawState& st, const DrawArgs& args) {
                         std::string all;
                         for (size_t k = 0; k < count; ++k) { char t[32]; std::snprintf(t, sizeof t, "%g%s", reinterpret_cast<const float*>(dw)[k], (k % 4 == 3) ? " | " : " "); all += t; }
                         UT_INFO("gpu:   %s cb%d all: %s", stage ? "ps" : "vs", slot, all.c_str());
+                    } else {
+                        std::string regs;   // the registers that hold anything, by index
+                        for (size_t k = 0; k + 3 < count; k += 4) {
+                            if (!dw[k] && !dw[k + 1] && !dw[k + 2] && !dw[k + 3]) continue;
+                            const float* fv = reinterpret_cast<const float*>(dw + k);
+                            char t[96]; std::snprintf(t, sizeof t, " [%zu]=(%g %g %g %g)", k / 4, fv[0], fv[1], fv[2], fv[3]); regs += t;
+                        }
+                        UT_INFO("gpu:   %s cb%d non-zero registers:%s", stage ? "ps" : "vs", slot, regs.c_str());
                     }
                 }
                 const float* f = reinterpret_cast<const float*>(BufferData(*b.buffer) + b.offset);
@@ -1623,6 +1751,25 @@ void BuildPresentPipeline() {
 
 } // namespace
 
+/// Writes 8-bit RGBA pixels (alpha ignored) as a PNG.
+bool WritePngRGBA(const uint8_t* rgba, size_t w, size_t h, const char* path) {
+    @autoreleasepool {
+        std::vector<uint8_t> px(rgba, rgba + w * h * 4);
+        for (size_t i = 0; i < px.size(); i += 4) std::swap(px[i], px[i + 2]);   // CoreGraphics wants BGRA
+        CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+        CGContextRef ctx = CGBitmapContextCreate(px.data(), w, h, 8, w * 4, cs, kCGBitmapByteOrder32Little | kCGImageAlphaNoneSkipFirst);
+        CGImageRef img = CGBitmapContextCreateImage(ctx);
+        CFURLRef url = (__bridge CFURLRef)[NSURL fileURLWithPath:[NSString stringWithUTF8String:path]];
+        CGImageDestinationRef dest = CGImageDestinationCreateWithURL(url, (__bridge CFStringRef)UTTypePNG.identifier, 1, nullptr);
+        bool ok = false;
+        if (dest != nullptr) { CGImageDestinationAddImage(dest, img, nullptr); ok = CGImageDestinationFinalize(dest); CFRelease(dest); }
+        CGImageRelease(img);
+        CGContextRelease(ctx);
+        CGColorSpaceRelease(cs);
+        return ok;
+    }
+}
+
 bool SavePng(Texture& texture, const std::string& path) {
     @autoreleasepool {
         id<MTLTexture> t = texture.mtl;
@@ -1780,6 +1927,44 @@ void Present(const std::shared_ptr<Texture>& back, uint32_t sync_interval) {
             else std::snprintf(path, sizeof path, "%s/frame_%06llu.png", g->dump_dir, (unsigned long long)index);
             SavePng(*back, path);
         }
+        if (index == g->trace_frame + 1 && !g->trace_depths.empty()) {
+            // The depth textures the traced frame sampled, as their float copies hold them now: range, how much is exactly 0 or 1
+            // (a cleared or never-written depth map), and a grayscale picture of it.
+            [cmd waitUntilCompleted];
+            int n = 0;
+            for (Texture* dt : g->trace_depths) {
+                id<MTLTexture> c = dt->depth_copy;
+                if (c == nil) continue;
+                const NSUInteger w = c.width, h = c.height;
+                id<MTLBuffer> staging = [g->device newBufferWithLength:w * h * 4 options:MTLResourceStorageModeShared];
+                id<MTLCommandBuffer> cb = [g->queue commandBuffer];
+                id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+                [blit copyFromTexture:c sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:staging destinationOffset:0 destinationBytesPerRow:w * 4 destinationBytesPerImage:w * h * 4];
+                [blit endEncoding];
+                [cb commit];
+                [cb waitUntilCompleted];
+                const float* f = static_cast<const float*>(staging.contents);
+                float lo = 1e30f, hi = -1e30f; size_t zeros = 0, ones = 0;
+                for (size_t k = 0; k < w * h; ++k) { lo = std::min(lo, f[k]); hi = std::max(hi, f[k]); zeros += f[k] == 0.f; ones += f[k] == 1.f; }
+                UT_INFO("gpu: traced depth texture %p %lux%lu: min %g max %g, %.1f%% exactly 0, %.1f%% exactly 1", (__bridge void*)dt->mtl, (unsigned long)w, (unsigned long)h, lo, hi,
+                        100.0 * zeros / (w * h), 100.0 * ones / (w * h));
+                if (g->dump_dir != nullptr) {
+                    // Grayscale, stretched over the values that are not 1 (the far plane), so the content shows.
+                    float vlo = 1e30f, vhi = -1e30f;
+                    for (size_t k = 0; k < w * h; ++k) if (f[k] < 1.f) { vlo = std::min(vlo, f[k]); vhi = std::max(vhi, f[k]); }
+                    std::vector<uint8_t> px(w * h * 4);
+                    for (size_t k = 0; k < w * h; ++k) {
+                        const float v = f[k] >= 1.f ? 1.f : (vhi > vlo ? (f[k] - vlo) / (vhi - vlo) : 0.f);
+                        px[k * 4] = px[k * 4 + 1] = px[k * 4 + 2] = static_cast<uint8_t>(std::clamp(v, 0.f, 1.f) * 255.f);
+                        px[k * 4 + 3] = 255;
+                    }
+                    char path[512];
+                    std::snprintf(path, sizeof path, "%s/depth_%02d_%lux%lu.png", g->dump_dir, n++, (unsigned long)w, (unsigned long)h);
+                    WritePngRGBA(px.data(), w, h, path);
+                }
+            }
+            g->trace_depths.clear();
+        }
         if (index == g->trace_frame + 1 && g->dump_dir != nullptr && !g->trace_rts.empty()) {
             [cmd waitUntilCompleted];
             int n = 0;
@@ -1791,6 +1976,7 @@ void Present(const std::shared_ptr<Texture>& back, uint32_t sync_interval) {
             g->trace_rts.clear();
         }
         dispatch_semaphore_wait(g->frames_in_flight, DISPATCH_TIME_FOREVER);
+        std::scoped_lock ring_lock {g->ring_mutex};
         g->frame = (g->frame + 1) % kRingFrames;
         EvictRing(g->frame);
     }

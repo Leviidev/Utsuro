@@ -135,8 +135,13 @@ void UploadTexture(Texture& texture, uint32_t mip, uint32_t slice, const uint32_
 bool ReadbackTexture(Texture& texture, uint32_t mip, uint32_t slice, void* dst, uint32_t row_pitch);
 void CopyTexture(Texture& dst, uint32_t dst_mip, uint32_t dst_slice, uint32_t dx, uint32_t dy, uint32_t dz,
                  Texture& src, uint32_t src_mip, uint32_t src_slice, const uint32_t box[6]);
+/// D3D11.X DecompressResource: copies a (compressed, on the console) surface into another, converting where the formats differ --
+/// a depth buffer into a depth or R32 float texture a shader can sample. `rect` is {left, top, right, bottom} or null for all.
+void DecompressCopy(Texture& dst, uint32_t dst_mip, uint32_t dst_slice, uint32_t dx, uint32_t dy, Texture& src, uint32_t src_mip, uint32_t src_slice, const uint32_t rect[4]);
 void GenerateMips(Texture& texture);
 const TextureDesc& TextureInfo(const Texture& texture);
+/// The Metal texture behind `texture`, for logs (matches the pointers frame traces print).
+void* NativeOf(const Texture& texture);
 /// Sampled views start at this mip: the levels above it have no texels yet (a streamed texture).
 void SetMinMip(Texture& texture, uint32_t mip);
 
