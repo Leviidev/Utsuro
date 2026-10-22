@@ -1,7 +1,8 @@
 import SwiftUI
 import UIKit
 
-/// One game: its art, a Play button, the screenshots taken in it, how it is set up, and how to remove it.
+/// One game: its splash, whole, at the top; its name in serif; three rings for how it runs, how long it has been played and
+/// what it has saved; Play; then its screenshots, its controls, what it is, and removing it.
 struct GamePage: View {
     let game: InstalledGame
     @ObservedObject private var library = GameLibrary.shared
@@ -30,82 +31,68 @@ struct GamePage: View {
     private var settings: GameSettings { GameSettings(gameID: game.id) }
 
     var body: some View {
-        List {
-            Section {
-                PageHero(game: game, subtitle: subtitle) { primary }
-            } footer: {
-                if let error = session.launchError { Text(error).foregroundStyle(.orange) }
-            }
-            .listRowInsets(EdgeInsets())
-            .listRowBackground(Color.clear)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                GameBackdrop(game: game, pixels: 1600)
+                    .aspectRatio(16.0 / 10.5, contentMode: .fit)
+                    .clipShape(UnevenRoundedRectangle(bottomLeadingRadius: 30, bottomTrailingRadius: 30, style: .continuous))
 
-            Section("Screenshots") {
-                if screenshots.isEmpty {
-                    Label("In the game, tap the camera at the top of the screen to take one.", systemImage: "camera")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                } else {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 10) {
-                            ForEach(screenshots, id: \.self) { url in
-                                Button { viewing = url } label: {
-                                    FileImage(url: url, maxPixel: 700, contentMode: .fill)
-                                        .frame(width: 220, height: 124)
-                                        .background(Console.card)
-                                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                                }
-                                .buttonStyle(CardButtonStyle())
-                            }
-                        }
-                        .padding(.horizontal, 12)
-                    }
-                    .listRowInsets(EdgeInsets(top: 10, leading: 0, bottom: 10, trailing: 0))
+                VStack(alignment: .leading, spacing: 6) {
+                    Caps(["Xbox One", game.publisher].joined(separator: " · "))
+                    Text(game.title)
+                        .font(.title(36))
+                        .foregroundStyle(Ink.text)
+                        .lineLimit(3)
+                        .minimumScaleFactor(0.7)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-            }
+                .padding(.horizontal, 20)
+                .padding(.top, 18)
 
-            if !game.summary.isEmpty && game.summary != game.title {
-                Section("About") {
-                    Text(game.summary).font(.subheadline)
+                HStack(spacing: 0) {
+                    StatRing(value: game.compatibility.label, label: "Status", progress: game.readiness, color: game.compatibility.color)
+                    StatRing(value: shortPlayed, label: "Played", progress: min(settings.playSeconds / 36_000, 1))
+                    StatRing(value: saveSize > 0 ? ByteCountFormatter.string(fromByteCount: saveSize, countStyle: .file) : "None",
+                             label: "Saves", progress: min(Double(saveSize) / 50_000_000, 1), color: Ink.dim)
                 }
-            }
+                .padding(.horizontal, 10)
+                .padding(.top, 18)
 
-            Section {
-                Picker("Touch Controls", selection: $touch) {
-                    ForEach(GameSettings.TouchControls.allCases) { Text($0.title).tag($0) }
+                primary
+                    .padding(.horizontal, 16)
+                    .padding(.top, 20)
+                if let error = session.launchError {
+                    Text(error).font(.footnote).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 20).padding(.top, 10)
                 }
-                if touch != .off {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack { Text("Opacity"); Spacer(); Text("\(Int(opacity * 100))%").foregroundStyle(.secondary) }
-                        Slider(value: $opacity, in: 0.15...1)
-                    }
-                    Toggle("Haptic Feedback", isOn: $haptics)
-                }
-            } header: {
-                Text("Controls")
-            } footer: {
-                Text(touch == .auto ? "The touch controller hides while a physical controller is connected."
-                     : touch == .always ? "The touch controller is drawn even with a controller connected." : "The touch controller is never drawn.")
-            }
 
-            Section("Details") {
-                LabeledContent("Publisher", value: game.publisher)
-                if !game.version.isEmpty { LabeledContent("Version", value: game.version) }
-                if let id = game.titleId { LabeledContent("Title ID", value: id) }
-                if !game.executable.isEmpty { LabeledContent("Executable", value: game.executable) }
-                if let played = timePlayed { LabeledContent("Played", value: played) }
-                LabeledContent("Size", value: gameSize > 0 ? ByteCountFormatter.string(fromByteCount: gameSize, countStyle: .file) : "…")
-                LabeledContent("Saves", value: saveSize > 0 ? ByteCountFormatter.string(fromByteCount: saveSize, countStyle: .file) : "None")
+                screenshotsSection.padding(.top, 30)
+                if !game.summary.isEmpty && game.summary != game.title { aboutSection.padding(.top, 30) }
+                controlsSection.padding(.top, 30)
+                detailsSection.padding(.top, 30)
+                manageSection.padding(.top, 22)
             }
-
-            Section {
-                Button(role: .destructive) { confirmSaves = true } label: { Label("Delete Saves", systemImage: "trash") }
-                    .disabled(saveSize == 0)
-                Button(role: .destructive) { confirmRemove = true } label: { Label("Remove Game", systemImage: "xmark.bin") }
+            .padding(.bottom, 30)
+            .frame(maxWidth: 760)
+            .frame(maxWidth: .infinity)
+        }
+        .scrollIndicators(.hidden)
+        .ignoresSafeArea(edges: .top)
+        .background(Ink.page.ignoresSafeArea())
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(.hidden, for: .navigationBar)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button { session.play(game) } label: { Label("Play", systemImage: "play.fill") }
+                    Divider()
+                    Button(role: .destructive) { confirmSaves = true } label: { Label("Delete Saves", systemImage: "trash") }
+                        .disabled(saveSize == 0)
+                    Button(role: .destructive) { confirmRemove = true } label: { Label("Remove Game", systemImage: "xmark.bin") }
+                } label: { Image(systemName: "ellipsis") }
             }
         }
-        .listStyle(.insetGrouped)
-        .navigationTitle(game.title)
-        .navigationBarTitleDisplayMode(.inline)
         .sheet(item: Binding(get: { viewing.map { IdentifiedURL(url: $0) } }, set: { viewing = $0?.url })) { item in
             ScreenshotViewer(url: item.url) { url in
                 library.deleteScreenshot(url)
@@ -115,10 +102,7 @@ struct GamePage: View {
         .confirmationDialog("Delete the saves of \(game.title)?", isPresented: $confirmSaves, titleVisibility: .visible) {
             Button("Delete saves", role: .destructive) { library.deleteSaves(of: game); loadSizes() }
         } message: { Text("This cannot be undone.") }
-        .confirmationDialog("Remove \(game.title)?", isPresented: $confirmRemove, titleVisibility: .visible) {
-            Button("Remove game, keep saves", role: .destructive) { library.remove(game, saves: false); dismiss() }
-            Button("Remove game and saves", role: .destructive) { library.remove(game, saves: true); dismiss() }
-        } message: { Text("The game's files are deleted from this iPhone. You can add the dump again later.") }
+        .removeGameDialog(game, isPresented: $confirmRemove) { dismiss() }
         .id(jit.attachGeneration)
         .onAppear { refreshScreenshots(); loadSizes() }
         .onChange(of: touch) { settings.touchControls = $0 }
@@ -128,15 +112,11 @@ struct GamePage: View {
 
     // MARK: - Pieces
 
-    private var subtitle: String {
-        [game.publisher, game.lastPlayedText].compactMap { $0 }.joined(separator: " · ")
-    }
-
-    private var timePlayed: String? {
+    private var shortPlayed: String {
         let seconds = settings.playSeconds
-        guard seconds >= 60 else { return nil }
+        guard seconds >= 60 else { return "—" }
         let hours = Int(seconds) / 3600, minutes = (Int(seconds) % 3600) / 60
-        return hours > 0 ? "\(hours) h \(minutes) min" : "\(minutes) min"
+        return hours > 0 ? "\(hours)h \(minutes)m" : "\(minutes)m"
     }
 
     /// Play, or what stands in its way.
@@ -144,14 +124,137 @@ struct GamePage: View {
     private var primary: some View {
         if !JITControl.isOn {
             if jit.busy {
-                HStack(spacing: 10) { ProgressView(); Text(jit.status ?? "Turning on JIT…").foregroundStyle(.secondary) }
-                    .frame(maxWidth: .infinity).frame(height: 50)
+                HStack(spacing: 10) { ProgressView(); Text(jit.status ?? "Turning on JIT…").foregroundStyle(Ink.dim) }
+                    .frame(maxWidth: .infinity).frame(height: 54)
             } else {
-                BigButton(title: "Turn On JIT to Play", systemImage: "bolt.fill") { JITControl.turnOn(jit) }
+                Button { JITControl.turnOn(jit) } label: { Label("Turn On JIT to Play", systemImage: "bolt.fill") }
+                    .buttonStyle(PillButtonStyle())
             }
         } else {
-            BigButton(title: "Play", systemImage: "play.fill") { session.play(game) }
+            Button { session.play(game) } label: { Label("Play", systemImage: "play.fill") }
+                .buttonStyle(PillButtonStyle())
         }
+    }
+
+    private var screenshotsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionHeading(title: "Screenshots", count: screenshots.isEmpty ? nil : screenshots.count).padding(.horizontal, 20)
+            if screenshots.isEmpty {
+                Text("In the game, tap the camera at the top of the screen to keep a moment here.")
+                    .font(.subheadline).foregroundStyle(Ink.dim)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 20)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(screenshots, id: \.self) { url in
+                            Button { viewing = url } label: {
+                                FileImage(url: url, maxPixel: 700, contentMode: .fill)
+                                    .frame(width: 210, height: 118)
+                                    .background(Ink.card)
+                                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            }
+                            .buttonStyle(PressScale())
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                }
+            }
+        }
+    }
+
+    private var aboutSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeading(title: "About")
+            Text(game.summary).font(.system(size: 15)).foregroundStyle(Ink.text.opacity(0.85))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 20)
+    }
+
+    private var controlsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionHeading(title: "Controls").padding(.horizontal, 4)
+            VStack(spacing: 0) {
+                HStack {
+                    Text("Touch controls")
+                    Spacer()
+                    Picker("Touch controls", selection: $touch) {
+                        ForEach(GameSettings.TouchControls.allCases) { Text($0.title).tag($0) }
+                    }
+                    .labelsHidden()
+                    .tint(Ink.dim)
+                }
+                .padding(.vertical, 5)
+                if touch != .off {
+                    divider
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack { Text("Opacity"); Spacer(); Text("\(Int(opacity * 100))%").foregroundStyle(Ink.dim) }
+                        Slider(value: $opacity, in: 0.15...1)
+                    }
+                    .padding(.vertical, 10)
+                    divider
+                    Toggle("Haptic feedback", isOn: $haptics).padding(.vertical, 8)
+                }
+            }
+            .font(.system(size: 16))
+            .foregroundStyle(Ink.text)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 4)
+            .inkCard()
+            Text(touch == .auto ? "The touch controller steps aside while a physical controller is connected."
+                 : touch == .always ? "The touch controller is drawn even with a controller connected." : "The touch controller is never drawn.")
+                .font(.footnote).foregroundStyle(Ink.dim).padding(.horizontal, 6)
+        }
+        .padding(.horizontal, 16)
+    }
+
+    private var detailsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionHeading(title: "Details").padding(.horizontal, 4)
+            VStack(spacing: 0) {
+                detail("Publisher", game.publisher)
+                if !game.version.isEmpty { divider; detail("Version", game.version) }
+                if let id = game.titleId { divider; detail("Title ID", id) }
+                if !game.executable.isEmpty { divider; detail("Executable", game.executable) }
+                divider
+                detail("Size", gameSize > 0 ? ByteCountFormatter.string(fromByteCount: gameSize, countStyle: .file) : "…")
+                if let last = game.lastPlayedAgo { divider; detail("Last played", last.prefix(1).uppercased() + last.dropFirst()) }
+            }
+            .padding(.horizontal, 16)
+            .inkCard()
+        }
+        .padding(.horizontal, 16)
+    }
+
+    private var manageSection: some View {
+        VStack(spacing: 0) {
+            Button(role: .destructive) { confirmSaves = true } label: {
+                Label("Delete Saves", systemImage: "trash").frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 14)
+            }
+            .disabled(saveSize == 0)
+            divider
+            Button(role: .destructive) { confirmRemove = true } label: {
+                Label("Remove Game", systemImage: "xmark.bin").frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 14)
+            }
+        }
+        .font(.system(size: 16))
+        .foregroundStyle(.red)
+        .padding(.horizontal, 16)
+        .inkCard()
+        .padding(.horizontal, 16)
+    }
+
+    private var divider: some View { Rectangle().fill(Ink.hairline).frame(height: 0.5) }
+
+    private func detail(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label).foregroundStyle(Ink.dim)
+            Spacer(minLength: 16)
+            Text(value).foregroundStyle(Ink.text).multilineTextAlignment(.trailing).lineLimit(2)
+        }
+        .font(.system(size: 15))
+        .padding(.vertical, 12)
     }
 
     // MARK: - Data
@@ -168,63 +271,6 @@ struct GamePage: View {
 }
 
 private struct IdentifiedURL: Identifiable { let url: URL; var id: URL { url } }
-
-/// The top of a game's page: its splash, its box art and name over it, and the one thing to do as a big button.
-private struct PageHero<Action: View>: View {
-    let game: InstalledGame
-    let subtitle: String
-    @ViewBuilder var action: Action
-
-    var body: some View {
-        VStack(spacing: 0) {
-            ZStack(alignment: .bottomLeading) {
-                GameBackdrop(game: game, fallback: Color(uiColor: .tertiarySystemFill))
-                LinearGradient(colors: [.clear, .black.opacity(0.7)], startPoint: .top, endPoint: .bottom)
-                HStack(alignment: .bottom, spacing: 14) {
-                    GameIcon(game: game, size: 84)
-                        .shadow(color: .black.opacity(0.35), radius: 12, y: 5)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(game.title)
-                            .font(.system(.title2, design: .rounded).weight(.heavy))
-                            .lineLimit(2)
-                            .minimumScaleFactor(0.8)
-                        Text(subtitle)
-                            .font(.subheadline)
-                            .foregroundStyle(.white.opacity(0.75))
-                            .lineLimit(2)
-                    }
-                    .foregroundStyle(.white)
-                    Spacer(minLength: 0)
-                }
-                .padding(16)
-            }
-            .frame(height: 210)
-            action
-                .padding(14)
-        }
-        .background(Color(uiColor: .secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-    }
-}
-
-/// The page's main button.
-private struct BigButton: View {
-    let title: String
-    let systemImage: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Label(title, systemImage: systemImage)
-                .font(.system(.headline, design: .rounded))
-                .frame(maxWidth: .infinity)
-                .frame(height: 50)
-                .foregroundStyle(Color.white)
-                .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-        }
-        .buttonStyle(CardButtonStyle())
-    }
-}
 
 /// A screenshot, full size, with share and delete.
 struct ScreenshotViewer: View {

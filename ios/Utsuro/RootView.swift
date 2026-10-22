@@ -17,7 +17,7 @@ struct RootView: View {
             } else {
                 TabView(selection: $router.tab) {
                     HomeView()
-                        .tabItem { Label("Home", systemImage: "house.fill") }
+                        .tabItem { Label("Home", image: "TabEnso") }
                         .tag(AppRouter.Tab.home)
                     LibraryView()
                         .tabItem { Label("Library", systemImage: "square.grid.2x2.fill") }
@@ -54,15 +54,12 @@ struct RootView: View {
 
 // MARK: - Home
 
-/// Home as a console's home screen: the selected game's artwork across the top, a shelf of every game (the one played last
-/// first), what the selected one is and Play, then what was added lately.
+/// Home: the game to go back to, whole, with Play in its ring; then the rest as a list, each one a tap from playing.
 struct HomeView: View {
     @ObservedObject private var router = AppRouter.shared
     @ObservedObject private var library = GameLibrary.shared
     @ObservedObject private var session = Session.shared
     @ObservedObject private var jit = JITCoordinator.shared
-    /// The tile the shelf has selected; nil means the first (the one played last).
-    @State private var selectedID: String?
 
     /// Most recently played first; never-played ones after, by name.
     private var games: [InstalledGame] {
@@ -78,369 +75,210 @@ struct HomeView: View {
 
     var body: some View {
         NavigationStack(path: $router.home) {
-            GeometryReader { geo in
+            ScrollView {
                 let games = self.games
-                let selected = games.first { $0.id == selectedID } ?? games.first
-                let heroHeight = (geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom) * 0.55
-                ZStack(alignment: .top) {
-                    Console.page.ignoresSafeArea()
-                    HomeHero(game: selected, width: geo.size.width, height: heroHeight)
-                        .ignoresSafeArea(edges: .top)
+                VStack(alignment: .leading, spacing: 0) {
+                    header
+                        .padding(.horizontal, 2)
+                        .padding(.bottom, 14)
 
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 0) {
-                            topBar
-                                .padding(.horizontal, 20)
-                                .padding(.top, 6)
-                                .environment(\.colorScheme, .dark)
-                            notices
-                                .padding(.horizontal, 20)
+                    if library.importing { BusyStrip(text: library.importProgress ?? "Copying the game…").padding(.bottom, 12) }
+                    if !JITControl.isOn { JITStrip().padding(.bottom, 16) }
+
+                    if let first = games.first {
+                        featured(first)
+                        if let error = session.launchError {
+                            Text(error)
+                                .font(.footnote)
+                                .foregroundStyle(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
                                 .padding(.top, 10)
-                                // over the artwork: drawn as on dark in either appearance
-                                .environment(\.colorScheme, .dark)
-
-                            if let selected {
-                                Color.clear.frame(height: max(12, heroHeight - geo.safeAreaInsets.top - 62 - 150))
-                                shelf(games, selected: selected)
-                                details(selected)
-                                    .padding(.horizontal, 20)
-                                    .padding(.top, 14)
-                                recentlyAdded(games)
-                                    .padding(.top, 30)
-                            } else {
-                                Color.clear.frame(height: max(12, heroHeight - geo.safeAreaInsets.top - 62 - 200))
-                                WelcomeCard().padding(.horizontal, 20)
-                            }
+                                .padding(.horizontal, 4)
                         }
-                        .padding(.bottom, 24)
-                        .id(jit.attachGeneration)
+                        if games.count > 1 { others(Array(games.dropFirst())) }
+                    } else {
+                        WelcomeCard()
                     }
-                    .scrollIndicators(.hidden)
                 }
+                .padding(.horizontal, 16)
+                .padding(.top, 4)
+                .padding(.bottom, 28)
+                .id(jit.attachGeneration)
             }
-            .background(Console.page.ignoresSafeArea())
+            .scrollIndicators(.hidden)
+            .background(Ink.page.ignoresSafeArea())
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: InstalledGame.self) { GamePage(game: $0) }
         }
     }
 
-    // MARK: top bar
+    // MARK: header
 
-    private var topBar: some View {
-        HStack(spacing: 10) {
-            Text("Utsuro")
-                .font(.system(size: 24, weight: .heavy, design: .rounded))
-                .foregroundStyle(.white)
-                .fixedSize()
-            Spacer(minLength: 4)
-            HomeAvatar()
+    private var header: some View {
+        HStack(spacing: 9) {
+            UtsuroMark(size: 30)
+            Wordmark()
+            Spacer(minLength: 8)
+            HomeMenu()
         }
         .frame(height: 44)
     }
 
-    /// An import under way, and JIT when it is off.
-    @ViewBuilder
-    private var notices: some View {
-        VStack(spacing: 8) {
-            if library.importing { BusyStrip(text: library.importProgress ?? "Copying the game…") }
-            if !JITControl.isOn { JITNotice() }
-        }
-    }
+    // MARK: the game to go back to
 
-    // MARK: shelf
-
-    private func shelf(_ games: [InstalledGame], selected: InstalledGame) -> some View {
-        ScrollViewReader { proxy in
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(alignment: .center, spacing: 12) {
-                    ForEach(games) { game in
-                        let isSelected = game == selected
-                        Button {
-                            if isSelected {
-                                session.play(game)
-                            } else {
-                                withAnimation(.snappy(duration: 0.25)) { selectedID = game.id }
-                            }
-                        } label: {
-                            ShelfTile(game: game, selected: isSelected)
-                        }
-                        .buttonStyle(CardButtonStyle())
-                        .id(game.id)
-                        .accessibilityLabel(game.title)
-                        .accessibilityHint(isSelected ? "Plays it" : "Selects it")
-                        .gameMenu(game) { router.home.append($0) }
-                    }
-                    if games.count > 1 {
-                        Button { router.tab = .library } label: {
-                            VStack(spacing: 6) {
-                                Image(systemName: "square.grid.2x2.fill").font(.system(size: 20, weight: .semibold))
-                                Text("All").font(.system(size: 12, weight: .semibold))
-                            }
-                            .foregroundStyle(Console.text.opacity(0.8))
-                            .frame(width: 72, height: 72)
-                            .background(Console.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                        }
-                        .buttonStyle(CardButtonStyle())
-                        .accessibilityLabel("Open the Library")
-                    }
-                }
-                .padding(.horizontal, 20)
-                .frame(height: 112)
-            }
-            .onChange(of: selectedID) { id in
-                guard let id else { return }
-                withAnimation(.snappy(duration: 0.3)) { proxy.scrollTo(id, anchor: .center) }
-            }
-        }
-    }
-
-    // MARK: details
-
-    private func details(_ game: InstalledGame) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Text("XBOX ONE")
-                    .font(.system(size: 12, weight: .bold))
-                    .tracking(0.8)
-                    .foregroundStyle(Console.textDim)
-                let status = game.compatibility
-                if status != .untested {
-                    HStack(spacing: 5) {
-                        StatusDot(status: status)
-                        Text(status.label)
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(status.color)
-                    }
-                }
-            }
-            Text(game.title)
-                .font(.system(size: 32, weight: .heavy))
-                .foregroundStyle(Console.text)
-                .lineLimit(2)
-                .minimumScaleFactor(0.7)
-                .fixedSize(horizontal: false, vertical: true)
-            if let used = game.lastPlayedText {
-                Text(used)
-                    .font(.system(size: 15))
-                    .foregroundStyle(Console.textDim)
-            }
-            HStack(spacing: 10) {
-                Button { session.play(game) } label: { Label("Play", systemImage: "play.fill") }
-                    .buttonStyle(ConsolePlayButtonStyle())
-                    .accessibilityLabel("Play " + game.title)
-                HomeMoreButton(game: game)
-            }
-            .padding(.top, 10)
-            if let error = session.launchError {
-                Text(error)
-                    .font(.footnote)
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, 4)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .animation(nil, value: game.id)
-    }
-
-    // MARK: recently added
-
-    @ViewBuilder
-    private func recentlyAdded(_ games: [InstalledGame]) -> some View {
-        let added = games.compactMap { g in g.addedDate.map { (g, $0) } }
-            .sorted { $0.1 > $1.1 }
-            .prefix(10)
-            .map(\.0)
-        if !added.isEmpty {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Recently added")
-                    .font(.system(size: 20, weight: .bold))
-                    .foregroundStyle(Console.text)
-                    .padding(.horizontal, 20)
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 12) {
-                        ForEach(added) { game in
-                            NavigationLink(value: game) { WideCard(game: game) }
-                                .buttonStyle(CardButtonStyle())
-                                .accessibilityLabel(game.title)
-                                .gameMenu(game) { router.home.append($0) }
-                        }
-                    }
-                    .padding(.horizontal, 20)
-                }
-            }
-        }
-    }
-}
-
-/// What fills the top of Home: the selected game's splash art, dimmed with plain black and faded into the page at its bottom edge.
-private struct HomeHero: View {
-    let game: InstalledGame?
-    let width: CGFloat
-    let height: CGFloat
-
-    var body: some View {
-        ZStack {
-            Color.black
-            if let game {
-                GameBackdrop(game: game, pixels: 1600, fallback: .black)
-                    .id(game.id)
-                    .transition(.opacity)
-            }
-            Color.black.opacity(0.45)
-            VStack(spacing: 0) {
-                Spacer(minLength: 0)
-                LinearGradient(colors: [.clear, Console.page], startPoint: .top, endPoint: .bottom)
-                    .frame(height: height * 0.32)
-            }
-        }
-        .frame(width: width, height: height)
-        .clipped()
-        .allowsHitTesting(false)
-        .animation(.easeInOut(duration: 0.35), value: game?.id)
-    }
-}
-
-/// One tile on Home's shelf: the box art, larger with a white ring when selected.
-private struct ShelfTile: View {
-    let game: InstalledGame
-    let selected: Bool
-
-    var body: some View {
-        let size: CGFloat = selected ? 92 : 72
-        GameIcon(game: game, size: size)
-            .padding(selected ? 4 : 0)
-            .overlay {
-                if selected {
-                    RoundedRectangle(cornerRadius: size * 0.225 + 4, style: .continuous)
-                        .strokeBorder(Console.text, lineWidth: 3)
-                }
-            }
-            .shadow(color: .black.opacity(selected ? 0.5 : 0.3), radius: selected ? 12 : 6, y: 4)
-            .opacity(selected ? 1 : 0.85)
-            .contentShape(Rectangle())
-    }
-}
-
-/// A wide card in "Recently added": the game's splash, its tile and its name.
-private struct WideCard: View {
-    let game: InstalledGame
-
-    var body: some View {
-        ZStack(alignment: .bottomLeading) {
-            GameBackdrop(game: game, pixels: 800)
-            Color.black.opacity(0.35)
-            HStack(spacing: 10) {
-                GameIcon(game: game, size: 38)
-                VStack(alignment: .leading, spacing: 2) {
+    private func featured(_ game: InstalledGame) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Caps(GameSettings(gameID: game.id).lastPlayed == nil ? "Start playing" : "Continue playing")
+                .padding(.horizontal, 4)
+                .padding(.bottom, 10)
+            Button { router.home.append(game) } label: { SplashCard(game: game) }
+                .buttonStyle(PressScale())
+                .gameMenu(game) { router.home.append($0) }
+                .accessibilityLabel(game.title)
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 6) {
                     Text(game.title)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                    Text("Xbox One")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.7))
-                        .lineLimit(1)
+                        .font(.title(30))
+                        .foregroundStyle(Ink.text)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.75)
+                    statusLine(game, detail: game.timePlayed.map { "\($0) played" } ?? game.publisher)
                 }
-                Spacer(minLength: 0)
-                if game.compatibility != .untested { StatusDot(status: game.compatibility, size: 8) }
+                Spacer(minLength: 8)
+                RingPlayButton { session.play(game) }
             }
-            .padding(12)
+            .padding(.top, 14)
+            .padding(.horizontal, 4)
         }
-        .frame(width: 250, height: 140)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Console.hairline, lineWidth: 0.5))
-        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    // MARK: the rest
+
+    private func others(_ games: [InstalledGame]) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionHeading(title: "Your games", count: library.games.count, link: "See all") { router.tab = .library }
+                .padding(.horizontal, 4)
+            VStack(spacing: 0) {
+                ForEach(Array(games.prefix(6).enumerated()), id: \.element.id) { index, game in
+                    if index > 0 { Rectangle().fill(Ink.hairline).frame(height: 0.5).padding(.leading, 83).padding(.trailing, 14) }
+                    GameRow(game: game) { router.home.append(game) } play: { session.play(game) }
+                }
+            }
+            .padding(.vertical, 4)
+            .inkCard(24)
+        }
+        .padding(.top, 28)
+    }
+
+    private func statusLine(_ game: InstalledGame, detail: String?) -> some View {
+        HStack(spacing: 5) {
+            if game.compatibility != .untested {
+                StatusDot(status: game.compatibility)
+                Text(game.compatibility.label)
+            }
+            if let detail {
+                Text((game.compatibility != .untested ? "· " : "") + detail)
+            }
+        }
+        .font(.system(size: 13))
+        .foregroundStyle(Ink.dim)
+        .lineLimit(1)
     }
 }
 
-/// The square "⋯" beside Play: the same actions as a long press on the tile.
-private struct HomeMoreButton: View {
+/// A game in Home's list: its box art, name and how it runs, and a Play of its own.
+private struct GameRow: View {
     let game: InstalledGame
+    let open: () -> Void
+    let play: () -> Void
     @ObservedObject private var router = AppRouter.shared
-    @State private var confirmRemove = false
 
     var body: some View {
-        Menu {
-            GameActions(game: game, open: { router.home.append($0) }) { confirmRemove = true }
-        } label: {
-            MoreButtonLabel()
+        HStack(spacing: 13) {
+            Button(action: open) {
+                HStack(spacing: 13) {
+                    GameIcon(game: game, size: 56)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(game.title).font(.system(size: 16, weight: .semibold)).foregroundStyle(Ink.text).lineLimit(1)
+                        HStack(spacing: 5) {
+                            if game.compatibility != .untested { StatusDot(status: game.compatibility) }
+                            Text([game.compatibility != .untested ? game.compatibility.label : nil, game.lastPlayedAgo ?? "never played"]
+                                .compactMap { $0 }.joined(separator: " · "))
+                        }
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(Ink.dim)
+                        .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(PressScale())
+            .gameMenu(game) { router.home.append($0) }
+            MiniPlayButton(action: play)
         }
-        .accessibilityLabel("More for \(game.title)")
-        .removeGameDialog(game, isPresented: $confirmRemove)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
     }
 }
 
-/// The round button in Home's corner: adding a game, JIT and Settings. Its dot is JIT: green on, orange off.
-private struct HomeAvatar: View {
+/// The JIT ring in Home's corner, and what it opens: turning JIT on, adding a game, Settings.
+private struct HomeMenu: View {
     @ObservedObject private var router = AppRouter.shared
     @ObservedObject private var jit = JITCoordinator.shared
 
     var body: some View {
         Menu {
-            Button { router.addGame() } label: { Label("Add a Game", systemImage: "plus") }
-            Divider()
             Button {
                 if JITControl.isOn { jit.showSetup = true } else { JITControl.turnOn(jit) }
             } label: {
-                Label(JITControl.isOn ? "JIT On (\(JITControl.via(jit)))" : "Turn On JIT", systemImage: "bolt.fill")
+                Label(JITControl.isOn ? "JIT is on (\(JITControl.via(jit)))" : "Turn On JIT", systemImage: "bolt.fill")
             }
             .disabled(jit.busy)
+            Button { router.addGame() } label: { Label("Add a Game", systemImage: "plus") }
             Button { router.tab = .settings } label: { Label("Settings", systemImage: "gearshape") }
         } label: {
-            ZStack(alignment: .topTrailing) {
-                Image(systemName: "person.fill")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 36, height: 36)
-                    .background(Console.raised, in: Circle())
-                    .overlay(Circle().stroke(Color.white.opacity(0.15), lineWidth: 0.5))
-                Circle()
-                    .fill(JITControl.isOn ? Color.green : Color.orange)
-                    .frame(width: 10, height: 10)
-                    .overlay(Circle().stroke(Color.black, lineWidth: 2))
-                    .offset(x: 1, y: -1)
-            }
+            JITRing(size: 24)
+                .frame(width: 38, height: 38)
+                .background(Ink.raised, in: Circle())
         }
-        .accessibilityLabel("Menu")
+        .accessibilityLabel(JITControl.isOn ? "JIT is on. Menu" : "JIT is off. Menu")
     }
 }
 
-/// JIT is off: say so, and the way to turn it on.
-private struct JITNotice: View {
+/// JIT is off: the open ring, what that means, and the way to turn it on.
+private struct JITStrip: View {
     @ObservedObject private var jit = JITCoordinator.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Button { JITControl.turnOn(jit) } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: "bolt.fill")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.orange)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("JIT is off").font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
-                        Text(jit.busy ? (jit.status ?? "Turning on…") : "Games need it. Tap to turn it on.")
-                            .font(.system(size: 12)).foregroundStyle(Console.textDim).lineLimit(1)
-                    }
-                    Spacer(minLength: 0)
-                    if jit.busy { ProgressView() } else {
-                        Text("Turn On")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundStyle(.black)
-                            .padding(.horizontal, 12).frame(height: 28)
-                            .background(Color.white, in: Capsule())
-                    }
+            HStack(spacing: 12) {
+                JITRing(size: 26)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("JIT is off").font(.system(size: 15, weight: .semibold)).foregroundStyle(Ink.text)
+                    Text(jit.busy ? (jit.status ?? "Turning on…") : "Games need it to run.")
+                        .font(.system(size: 12.5)).foregroundStyle(Ink.dim).lineLimit(1)
                 }
-                .padding(.horizontal, 12).padding(.vertical, 10)
-                .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Console.hairline, lineWidth: 0.5))
+                Spacer(minLength: 0)
+                if jit.busy {
+                    ProgressView()
+                } else {
+                    Button { JITControl.turnOn(jit) } label: {
+                        Text("Turn On")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 14).frame(height: 32)
+                            .background(Theme.accent, in: Capsule())
+                    }
+                    .buttonStyle(PressScale())
+                }
             }
-            .buttonStyle(CardButtonStyle())
-            .disabled(jit.busy)
             if let error = jit.error {
                 Text(error).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
             }
         }
+        .padding(.horizontal, 14).padding(.vertical, 12)
+        .inkCard(20)
     }
 }
 
@@ -450,21 +288,20 @@ private struct WelcomeCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            UtsuroMark(size: 60)
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Add your first game")
-                    .font(.system(size: 26, weight: .heavy))
-                    .foregroundStyle(Console.text)
+            UtsuroMark(size: 52)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Add your first game").font(.title(28)).foregroundStyle(Ink.text)
                 Text("Utsuro runs a decrypted Xbox One dump: the folder that holds Mount and EmbeddedXvd. Pick it and Utsuro copies "
                    + "it in, or put it in On My iPhone › Utsuro › Games with the Files app.")
                     .font(.subheadline)
-                    .foregroundStyle(Console.textDim)
+                    .foregroundStyle(Ink.dim)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Button { router.addGame() } label: { Text("Add a Game") }
-                .buttonStyle(ConsolePlayButtonStyle())
+            Button { router.addGame() } label: { Label("Add a Game", systemImage: "plus") }
+                .buttonStyle(PillButtonStyle())
         }
         .padding(20)
-        .background(Console.card, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .inkCard(26)
+        .padding(.top, 20)
     }
 }

@@ -14,21 +14,22 @@ struct SettingsView: View {
         NavigationStack {
             List {
                 Section {
-                    NavigationLink { AboutSettings() } label: { appCard }
+                    NavigationLink { AboutSettings() } label: { header }
+                        .listRowBackground(Color.clear)
                 }
 
                 Section {
-                    NavigationLink { JITSettings() } label: { row("bolt.fill", JITControl.isOn ? .green : .orange, "JIT", jitLine) }
-                    Toggle(isOn: $jitAtLaunch) {
-                        row("bolt.badge.automatic.fill", .yellow, "Turn on JIT at launch", "StikJIT, as soon as Utsuro opens")
+                    NavigationLink { JITSettings() } label: {
+                        Self.row(icon: AnyView(JITRing(size: 18)), JITControl.isOn ? "JIT is on" : "JIT is off", jitLine)
                     }
-                    .tint(Theme.accent)
+                    Toggle(isOn: $jitAtLaunch) {
+                        row("bolt.badge.automatic.fill", .yellow, "Turn on at launch", "As soon as Utsuro opens")
+                    }
                     .disabled(!UtsuroBuiltInJIT.isAvailable)
                     if JITBootstrap.isInstalledWithTrollStore {
                         Toggle(isOn: $trollStoreAuto) {
                             row("shippingbox.fill", .orange, "Ask TrollStore at launch", "This Utsuro was installed with TrollStore")
                         }
-                        .tint(Theme.accent)
                     }
                 } header: {
                     Text("JIT")
@@ -37,56 +38,65 @@ struct SettingsView: View {
                          ? "Games need JIT. StikJIT, built into Utsuro, turns it on without a computer; with the switch on it happens by itself every time Utsuro opens, once it is paired."
                          : "Games need JIT. Built-in StikJIT needs iOS 26; on this iPhone Utsuro uses StikDebug, TrollStore or a jailbreak instead.")
                 }
+                .listRowBackground(Ink.card)
 
                 Section("General") {
                     NavigationLink { AppearanceSettings() } label: { row("paintbrush.fill", .pink, "Appearance", "Light or dark, accent colour") }
                     NavigationLink { ControllerSettings() } label: { row("gamecontroller.fill", .green, "Controllers", "Connected pads and the touch controls") }
                     NavigationLink { PerformanceSettings() } label: { row("speedometer", .orange, "Performance", "Frame pacing and rendering") }
                     NavigationLink { StorageSettings() } label: { row("internaldrive.fill", .blue, "Storage", "\(library.games.count) game\(library.games.count == 1 ? "" : "s")") }
-                    NavigationLink { HelpSettings() } label: { row("questionmark.circle.fill", .teal, "Help", "What to do when something does not run") }
+                    NavigationLink { HelpSettings() } label: { row("questionmark", .teal, "Help", "What to do when something does not run") }
                 }
+                .listRowBackground(Ink.card)
 
                 Section("Support") {
                     NavigationLink { LogsSettings() } label: { row("doc.text.fill", .gray, "Logs", "Share Utsuro's log with a bug report") }
                 }
+                .listRowBackground(Ink.card)
             }
             .listStyle(.insetGrouped)
-            .navigationTitle("Settings")
-            .navigationBarTitleDisplayMode(.large)
+            .scrollContentBackground(.hidden)
+            .background(Ink.page.ignoresSafeArea())
+            .toolbar(.hidden, for: .navigationBar)
         }
     }
 
     /// What JIT is doing, in a line under its row.
     private var jitLine: String {
-        if JITControl.isOn { return "On, with \(JITControl.via(jit))" }
+        if JITControl.isOn { return "With \(JITControl.via(jit))" }
         if jit.busy { return jit.status ?? "Turning on…" }
-        return "Off. Games need it: tap to turn it on"
+        return "Games need it: tap to turn it on"
     }
 
-    private var appCard: some View {
-        HStack(spacing: 14) {
-            UtsuroMark(size: 58)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Utsuro").font(.title3.weight(.semibold))
-                Text("Version \(SettingsView.versionLine)").font(.subheadline).foregroundStyle(.secondary)
-                Text("Xbox One games on iPhone").font(.caption).foregroundStyle(.secondary)
-            }
+    /// The app at the top, centred: its icon, its name as the wordmark sets it, and the build.
+    private var header: some View {
+        VStack(spacing: 0) {
+            UtsuroAppIcon(size: 78)
+                .shadow(color: Theme.accent.opacity(0.35), radius: 18, y: 6)
+            Wordmark(size: 26).padding(.top, 12)
+            Text("Version \(SettingsView.versionLine)").font(.system(size: 13)).foregroundStyle(Ink.dim).padding(.top, 3)
         }
-        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity)
+        .padding(.top, 8)
+        .padding(.bottom, 4)
     }
 
-    /// A row with a coloured icon tile, as the iOS Settings app draws them.
+    /// A row with a round icon in the accent, the title, and a line under it.
     static func row(_ symbol: String, _ color: Color, _ title: String, _ detail: String) -> some View {
+        row(icon: AnyView(Image(systemName: symbol).font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.accent)), title, detail)
+    }
+
+    static func row(icon: AnyView, _ title: String, _ detail: String) -> some View {
         Label {
             VStack(alignment: .leading, spacing: 1) {
                 Text(title)
                 Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
         } icon: {
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(color.gradient)
-                .frame(width: 30, height: 30)
-                .overlay { Image(systemName: symbol).font(.system(size: 14, weight: .medium)).foregroundStyle(.white) }
+            Circle()
+                .fill(Theme.accent.opacity(0.18))
+                .frame(width: 32, height: 32)
+                .overlay { icon }
         }
     }
 
