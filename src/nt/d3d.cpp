@@ -793,9 +793,13 @@ void StartCallStats(Kernel& kernel) {
                 std::this_thread::sleep_for(std::chrono::seconds(3));
                 std::scoped_lock lock {g_calls_mutex};
                 std::string line;
-                for (auto& [name, n] : g_calls) if (n != last[name]) line += " " + name + "=" + std::to_string(n - last[name]);
+                for (auto& [name, n] : g_calls) {
+                    if (n == last[name]) continue;
+                    line += " " + name + "=" + std::to_string(n - last[name]);
+                    if (line.size() > 1500) { UT_INFO("d3d/3s:%s", line.c_str()); line.clear(); }   // the log cuts long lines
+                }
                 last = g_calls;
-                UT_INFO("d3d/3s:%s", line.c_str());
+                if (!line.empty()) UT_INFO("d3d/3s:%s", line.c_str());
             }
         }).detach();
     }
