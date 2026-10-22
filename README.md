@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/icon.png" width="128" alt="Utsuro"></p>
+<p align="center"><img src="docs/brand/wordmark.png" width="360" alt="Utsuro"></p>
 
 # Utsuro
 
