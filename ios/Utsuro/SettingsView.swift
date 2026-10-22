@@ -18,7 +18,7 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    JITCard().listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
+                    NavigationLink { JITSettings() } label: { row("bolt.fill", JITControl.isOn ? .green : .orange, "JIT", jitLine) }
                     Toggle(isOn: $jitAtLaunch) {
                         row("bolt.badge.automatic.fill", .yellow, "Turn on JIT at launch", "StikJIT, as soon as Utsuro opens")
                     }
@@ -30,7 +30,6 @@ struct SettingsView: View {
                         }
                         .tint(Theme.accent)
                     }
-                    NavigationLink { JITSettings() } label: { row("wand.and.stars", .yellow, "JIT details", "Method, pairing, what is attached") }
                 } header: {
                     Text("JIT")
                 } footer: {
@@ -51,24 +50,26 @@ struct SettingsView: View {
                     NavigationLink { LogsSettings() } label: { row("doc.text.fill", .gray, "Logs", "Share Utsuro's log with a bug report") }
                 }
             }
-            .scrollContentBackground(.hidden)
-            .background(Theme.backdrop)
+            .listStyle(.insetGrouped)
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.large)
         }
     }
 
+    /// What JIT is doing, in a line under its row.
+    private var jitLine: String {
+        if JITControl.isOn { return "On, with \(JITControl.via(jit))" }
+        if jit.busy { return jit.status ?? "Turning on…" }
+        return "Off. Games need it: tap to turn it on"
+    }
+
     private var appCard: some View {
         HStack(spacing: 14) {
-            Image(uiImage: UIImage(named: "AppIcon") ?? UIImage())
-                .resizable().aspectRatio(contentMode: .fit)
-                .frame(width: 58, height: 58)
-                .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-                .background(RoundedRectangle(cornerRadius: 13, style: .continuous).fill(Theme.accent))
-            VStack(alignment: .leading, spacing: 3) {
+            UtsuroMark(size: 58)
+            VStack(alignment: .leading, spacing: 2) {
                 Text("Utsuro").font(.title3.weight(.semibold))
                 Text("Version \(SettingsView.versionLine)").font(.subheadline).foregroundStyle(.secondary)
-                Text("Xbox One games on arm64").font(.caption).foregroundStyle(.secondary)
+                Text("Xbox One games on iPhone").font(.caption).foregroundStyle(.secondary)
             }
         }
         .padding(.vertical, 6)
@@ -83,7 +84,7 @@ struct SettingsView: View {
             }
         } icon: {
             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(color)
+                .fill(color.gradient)
                 .frame(width: 30, height: 30)
                 .overlay { Image(systemName: symbol).font(.system(size: 14, weight: .medium)).foregroundStyle(.white) }
         }

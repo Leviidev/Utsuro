@@ -1,102 +1,129 @@
 import SwiftUI
-import UniformTypeIdentifiers
+import UIKit
 
-/// Every game found, as tiles; a tile opens the game's page.
+/// Every game: search, and a grid of box art; a tile opens the game's page.
 struct LibraryView: View {
     @ObservedObject private var library = GameLibrary.shared
-    @State private var picking = false
-    @State private var path: [InstalledGame] = []
+    @ObservedObject private var router = AppRouter.shared
+    @State private var query = ""
 
-    private let columns = [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 14)]
+    private var columns: [GridItem] {
+        Array(repeating: GridItem(.flexible(), spacing: 14, alignment: .top),
+              count: UIDevice.current.userInterfaceIdiom == .pad ? 6 : 3)
+    }
 
     var body: some View {
-        NavigationStack(path: $path) {
+        NavigationStack(path: $router.library) {
             ScrollView {
-                VStack(spacing: 18) {
-                    JITCard(compact: true)
-                    if library.games.isEmpty && !library.importing {
-                        emptyState
-                    } else {
-                        LazyVGrid(columns: columns, spacing: 14) {
-                            ForEach(library.games) { game in
-                                NavigationLink(value: game) { GameTile(game: game) }
-                                    .buttonStyle(CardButtonStyle())
-                            }
-                            addTile
-                        }
+                VStack(alignment: .leading, spacing: 16) {
+                    SearchField(text: $query, prompt: "Search games")
+                    if library.importing { BusyStrip(text: library.importProgress ?? "Copying the game…") }
+                    if let failure = library.importError {
+                        Text(failure).font(.footnote).foregroundStyle(Theme.danger).frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    if library.importing {
-                        HStack(spacing: 10) { ProgressView().tint(Theme.accentBright); Text(library.importProgress ?? "Copying…").font(.subheadline).foregroundStyle(Theme.textDim) }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    if let failure = library.importError { Text(failure).font(.footnote).foregroundStyle(Theme.danger).frame(maxWidth: .infinity, alignment: .leading) }
+
+                    let games = library.games.filter { matches(query, $0.title) }
+                    section("Xbox One", games)
+                    if !query.isEmpty, games.isEmpty { NoResults(query: query) }
                 }
-                .padding(16)
-                .frame(maxWidth: 900)
-                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 20)
+                .padding(.top, 8)
+                .padding(.bottom, 24)
             }
-            .background(Theme.backdrop)
+            .scrollIndicators(.hidden)
+            .scrollDismissesKeyboard(.immediately)
+            .background(Console.page.ignoresSafeArea())
             .navigationTitle("Library")
             .navigationBarTitleDisplayMode(.large)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { router.addGame() } label: { Image(systemName: "plus") }
+                        .disabled(library.importing)
+                        .accessibilityLabel("Add a Game")
+                }
+            }
             .navigationDestination(for: InstalledGame.self) { GamePage(game: $0) }
         }
-        .fileImporter(isPresented: $picking, allowedContentTypes: [.folder]) { result in
-            switch result {
-            case .success(let url): library.importDump(from: url)
-            case .failure(let failure): library.importError = failure.localizedDescription
-            }
-        }
     }
 
-    private var addTile: some View {
-        Button { picking = true } label: {
-            VStack(spacing: 10) {
-                Image(systemName: "plus").font(.system(size: 34, weight: .semibold)).foregroundStyle(Theme.accentBright)
-                    .frame(maxWidth: .infinity).aspectRatio(1, contentMode: .fit)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: Theme.cardCorner, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: Theme.cardCorner, style: .continuous).strokeBorder(Theme.hairline, style: StrokeStyle(lineWidth: 1.5, dash: [6, 5])))
-                Text("Add game").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.textDim)
+    @ViewBuilder
+    private func section(_ title: String, _ games: [InstalledGame]) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(title).font(.system(size: 21, weight: .bold)).foregroundStyle(Console.text)
+                Text("\(games.count)").font(.system(size: 15, weight: .medium)).foregroundStyle(Console.textDim)
+            }
+            if games.isEmpty {
+                if query.isEmpty && !library.importing { emptyCard }
+            } else {
+                LazyVGrid(columns: columns, spacing: 20) {
+                    ForEach(games) { game in
+                        NavigationLink(value: game) { LibraryCell(game: game) }
+                            .buttonStyle(CardButtonStyle())
+                            .accessibilityLabel(game.title)
+                            .gameMenu(game) { router.library.append($0) }
+                    }
+                }
             }
         }
-        .buttonStyle(CardButtonStyle())
-        .disabled(library.importing)
+        .padding(.top, 8)
     }
 
-    private var emptyState: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "shippingbox").font(.system(size: 46)).foregroundStyle(Theme.textDim)
-            Text("No games yet").font(.system(size: 22, weight: .bold))
-            Text("Utsuro runs a decrypted Xbox One dump: the folder that holds Mount and EmbeddedXvd. Pick it here and Utsuro copies it in, "
-                 + "or put it in Utsuro's folder in the Files app (On My iPhone › Utsuro › Games).")
-                .font(.subheadline).foregroundStyle(Theme.textDim).multilineTextAlignment(.center)
-            Button { picking = true } label: { Label("Add game", systemImage: "plus") }
-                .buttonStyle(PrimaryButtonStyle())
-                .frame(maxWidth: 280)
+    private var emptyCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("No games yet").font(.system(size: 17, weight: .semibold)).foregroundStyle(Console.text)
+            Text("Utsuro runs a decrypted Xbox One dump: the folder that holds Mount and EmbeddedXvd. Add it with the + button, or put "
+               + "it in On My iPhone › Utsuro › Games with the Files app.")
+                .font(.subheadline)
+                .foregroundStyle(Console.textDim)
+                .fixedSize(horizontal: false, vertical: true)
+            Button { router.addGame() } label: { Label("Add a Game", systemImage: "plus") }
+                .buttonStyle(ConsolePlayButtonStyle())
+                .padding(.top, 4)
         }
-        .padding(.top, 50)
-        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(Console.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func matches(_ query: String, _ title: String) -> Bool {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        return q.isEmpty || title.localizedCaseInsensitiveContains(q)
     }
 }
 
-/// A game's tile: its logo on the colour its manifest gives, and its name.
-struct GameTile: View {
+/// One game in the grid: its box art, and its name with the status dot.
+private struct LibraryCell: View {
     let game: InstalledGame
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ZStack {
-                game.tileColor
-                FileImage(url: game.logo, maxPixel: 400).padding(16)
-            }
-            .frame(maxWidth: .infinity).aspectRatio(1, contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: Theme.cardCorner, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: Theme.cardCorner, style: .continuous).stroke(Color.white.opacity(0.12), lineWidth: 0.5))
-            .shadow(color: Color.black.opacity(0.08), radius: 6, x: 0, y: 3)
-            Text(game.title).font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.text).lineLimit(2).multilineTextAlignment(.leading)
+            Color.clear
+                .aspectRatio(1, contentMode: .fit)
+                .overlay { GeometryReader { geo in GameIcon(game: game, size: geo.size.width) } }
+                .shadow(color: .black.opacity(0.25), radius: 6, y: 3)
             HStack(spacing: 5) {
-                Circle().fill(game.compatibility.color).frame(width: 7, height: 7)
-                Text(game.compatibility.label).font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.textDim)
+                if game.compatibility != .untested { StatusDot(status: game.compatibility) }
+                Text(game.title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Console.text)
+                    .lineLimit(1)
             }
         }
+        .contentShape(Rectangle())
+    }
+}
+
+/// Nothing matches the search.
+private struct NoResults: View {
+    let query: String
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "magnifyingglass").font(.system(size: 28, weight: .light)).foregroundStyle(.secondary)
+            Text("No Results").font(.headline)
+            Text("No game here is called “\(query)”.").font(.subheadline).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 48)
     }
 }

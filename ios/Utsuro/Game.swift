@@ -20,6 +20,17 @@ struct InstalledGame: Identifiable, Hashable {
     let wideLogo: URL?
     let splash: URL?
 
+    /// The square picture for tiles: the console's 480-pixel tile art (full-bleed box art), else the smaller logos.
+    var icon: URL? { wideLogo ?? logo }
+    /// The wide picture behind the title on Home and the game's page: the 1920x1080 splash screen.
+    var artwork: URL? { splash }
+
+    /// When the dump was added: what "Recently added" sorts by.
+    var addedDate: Date? {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: dump.path)
+        return (attrs?[.creationDate] as? Date) ?? (attrs?[.modificationDate] as? Date)
+    }
+
     /// How this game runs, as a dot and a word: this iPhone's own record first (it was played here), then what the
     /// project knows about the title. Nothing fancier: the list lives in this file and moves with each release.
     var compatibility: GameCompatibility {
@@ -49,17 +60,27 @@ struct InstalledGame: Identifiable, Hashable {
         titleId = m.titleId
         ratings = m.ratings
         tileColor = Color(hex: m.backgroundColor) ?? Theme.surfaceHigh
-        let files = (try? FileManager.default.contentsOfDirectory(atPath: mount.path)) ?? []
         func asset(_ names: [String?]) -> URL? {
             for case let name? in names {
-                // The manifest's case need not match the file's (widelogo.png / WideLogo.png).
-                if let hit = files.first(where: { $0.lowercased() == name.lowercased() }) { return mount.appendingPathComponent(hit) }
+                if let hit = Self.resolve(name, in: mount) { return hit }
             }
             return nil
         }
         logo = asset([m.logo, "Logo.png", m.storeLogo, "StoreLogo.png"])
         wideLogo = asset([m.wideLogo, "WideLogo.png"])
         splash = asset([m.splash, "SplashScreen.png"])
+    }
+
+    /// A manifest path (`Media\Logos\Logo.png`) as a file under `root`. Windows paths: either slash, and any case, since the
+    /// manifest's case need not match the files' (widelogo.png / WideLogo.png).
+    static func resolve(_ path: String, in root: URL) -> URL? {
+        var at = root
+        for part in path.split(whereSeparator: { $0 == "\\" || $0 == "/" }) {
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: at.path)) ?? []
+            guard let hit = names.first(where: { $0.lowercased() == part.lowercased() }) else { return nil }
+            at = at.appendingPathComponent(hit)
+        }
+        return at == root ? nil : at
     }
 }
 
@@ -144,8 +165,7 @@ struct GameCompatibility: Equatable {
     /// What the project has seen of the titles it ships notes for (PROJECT.md section 2).
     static func known(title: String, executable: String) -> GameCompatibility {
         let t = title.lowercased(), e = executable.lowercased()
-        if t.contains("minecraft") || t.contains("sonic mania") { return .plays }
-        if t.contains("rocket league") || e.contains("tagame") { return .ingame }
+        if t.contains("minecraft") || t.contains("sonic mania") || t.contains("rocket league") || e.contains("tagame") { return .plays }
         if t.contains("forza horizon 2") || e.contains("forza_durango") { return .opens }
         if t.contains("puyo") || t.contains("mega man") || t.contains("overcooked") || t.contains("peggle") { return .opens }
         if t.contains("trackmania") { return .broken }

@@ -15,14 +15,13 @@ final class AppTheme: ObservableObject {
         let color: Color
     }
 
-    /// Xbox Green - the default Utsuro accent.
+    /// The ensō's indigo: the default accent.
+    static let utsuro = Color(red: 0.416, green: 0.384, blue: 0.961)
     static let xbox = Color(red: 0.063, green: 0.486, blue: 0.063)
-    /// Husk's signature indigo.
-    static let husk = Color(red: 0.353, green: 0.322, blue: 0.945)
 
     static let presets: [Preset] = [
+        Preset(id: "utsuro", name: "Utsuro Indigo", color: utsuro),
         Preset(id: "xbox", name: "Xbox Green", color: xbox),
-        Preset(id: "husk", name: "Husk Indigo", color: husk),
         Preset(id: "blue", name: "Electric Blue", color: Color(red: 0.0, green: 0.48, blue: 1.0)),
         Preset(id: "cyan", name: "Neon Cyan", color: Color(red: 0.0, green: 0.75, blue: 0.95)),
         Preset(id: "purple", name: "Deep Purple", color: Color(red: 0.61, green: 0.31, blue: 0.87)),
@@ -43,11 +42,11 @@ final class AppTheme: ObservableObject {
         if let hex = UserDefaults.standard.string(forKey: Self.key), let color = Color(themeHex: hex) {
             accentColor = color
         } else {
-            accentColor = Self.xbox
+            accentColor = Self.utsuro
         }
     }
 
-    func reset() { accentColor = Self.xbox }
+    func reset() { accentColor = Self.utsuro }
 
     private func persist() {
         UserDefaults.standard.set(accentColor.themeHex, forKey: Self.key)
