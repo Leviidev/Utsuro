@@ -1315,7 +1315,7 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
         src << (vs ? "vertex VSOut main0(VSIn in [[stage_in]]" : "fragment PSOut main0(PSIn in [[stage_in]]");
         if (!vs && t.uses_front_face) src << ", bool front_facing [[front_facing]]";
         if (vs && t.uses_vertex_id) src << ", uint vertex_id [[vertex_id]]";
-        if (vs && t.uses_instance_id) src << ", uint instance_id [[instance_id]]";
+        if (vs && t.uses_instance_id) src << ", uint instance_id [[instance_id]], uint base_instance [[base_instance]]";
         for (uint32_t b = 0; b < 16; ++b)
             if (t.refl.constant_buffers & (1u << b)) src << ", device const float4* cb" << b << " [[buffer(" << b << ")]]";
         for (auto& r : resource_decls) src << ", " << r;
@@ -1334,7 +1334,7 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
         const auto sv = t.input_sgv.count(reg) ? t.input_sgv[reg] : 0u;
         if (vs) {
             if (sv == 6) src << "    v" << reg << ".x = as_type<float>(vertex_id);\n";
-            else if (sv == 8) src << "    v" << reg << ".x = as_type<float>(instance_id);\n";
+            else if (sv == 8) src << "    v" << reg << ".x = as_type<float>(instance_id - base_instance);\n";   // D3D counts from the draw's first instance
             else if (input_class(reg) != 0) src << "    v" << reg << " = as_type<float4>(in.a" << reg << ");\n";
             else src << "    v" << reg << " = in.a" << reg << ";\n";
         } else {
