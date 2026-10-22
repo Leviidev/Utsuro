@@ -86,7 +86,7 @@ void SignalEvent(Kernel& k, uint64_t handle) {
     if (!e) return;
     std::scoped_lock lock {k.WaitMutex()};
     e->signaled = true;
-    k.NotifyAll();
+    k.Notify(*e);
 }
 
 /// The device clock: drains `queued` at the output rate and wakes the title every period.

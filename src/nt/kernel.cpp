@@ -159,7 +159,7 @@ Kernel::Kernel(KernelOptions options) : options_ {std::move(options)} {
 
 Kernel::~Kernel() {
     exiting = true;
-    wait_cv_.notify_all();
+    { std::scoped_lock lock {wait_mutex_}; NotifyAll(); }
     if (timer_thread_.joinable()) timer_thread_.join();
 }
 
@@ -248,6 +248,15 @@ std::string FindCaseInsensitive(const std::string& dir, const std::string& name)
 }
 
 } // namespace
+
+void Kernel::NotifyAll() {
+    wait_cv_.notify_all();
+    for (NtThread* t : sleepers_) t->wake_cv.notify_all();
+}
+
+void Kernel::Notify(Object& o) {
+    for (NtThread* t : o.waiters) t->wake_cv.notify_all();
+}
 
 bool Kernel::ResolvePath(const std::string& nt_in, std::string* host_path, bool* exists, bool create_parent_ok) {
     std::string p = nt_in;

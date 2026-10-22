@@ -189,8 +189,7 @@ uint64_t SignalOnVblank(Kernel& k, NtThread&, SyscallArgs& a) {
                 std::vector<std::shared_ptr<EventObject>> list;
                 { std::scoped_lock l {mutex}; list = events; }
                 std::scoped_lock wait {k.WaitMutex()};
-                for (auto& e : list) e->signaled = true;
-                k.NotifyAll();
+                for (auto& e : list) { e->signaled = true; k.Notify(*e); }
             }
         }).detach();
     }

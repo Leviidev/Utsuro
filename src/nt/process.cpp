@@ -820,8 +820,8 @@ void Kernel::ExitThread(NtThread& thread, int32_t status) {
         thread.exit_status = status;
         thread.terminated = true;
         thread.signaled = true;
+        NotifyAll();   // its waiters, and whatever else waits for threads to go (rare enough to wake everyone)
     }
-    wait_cv_.notify_all();
     // Release the stack and TEB, except for the one thread running on the stack we would
     // be freeing; it has already left the guest.
     uint64_t b = thread.stack_alloc_base, s = 0;

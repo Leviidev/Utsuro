@@ -113,7 +113,7 @@ uint64_t Call(Kernel& k, uint64_t fn, const std::vector<uint64_t>& args) {
     {
         std::scoped_lock wait {k.WaitMutex()};
         g_request->signaled = true;
-        k.NotifyAll();
+        k.Notify(*g_request);
     }
     const auto start = std::chrono::steady_clock::now();
     while (g_job->done == 0) {

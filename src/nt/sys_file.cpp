@@ -84,7 +84,7 @@ void PostCompletion(Kernel& k, SyscallArgs& a, IO_STATUS_BLOCK* iosb, int event_
         if (auto e = k.Get<EventObject>(ev, ObjType::Event)) {
             std::scoped_lock lock {k.WaitMutex()};
             e->signaled = true;
-            k.NotifyAll();
+            k.Notify(*e);
         }
     }
     (void)apc_arg;

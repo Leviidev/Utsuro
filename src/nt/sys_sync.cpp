@@ -135,12 +135,19 @@ NTSTATUS WaitLocked(Kernel& k, NtThread& thread, std::unique_lock<std::mutex>& l
             return STATUS_USER_APC;
         }
         if (k.exiting) return STATUS_THREAD_IS_TERMINATING;
-        if (dl.infinite) {
-            k.WaitCv().wait(lock);
-        } else {
-            if (Clock::now() >= dl.when) return STATUS_TIMEOUT;
-            k.WaitCv().wait_until(lock, dl.when);
-        }
+        if (!dl.infinite && Clock::now() >= dl.when) return STATUS_TIMEOUT;
+        // Sleep on this thread's own condition variable, listed with each object it waits on, so that signalling an object
+        // wakes only its waiters. (One condition variable for everything woke all of a title's waiting threads -- Forza Horizon 2
+        // has ~130 -- on every event, and they queued on the wait mutex to find nothing for them: most of its CPU time.)
+        for (auto& o : objects) if (o) o->waiters.push_back(&thread);
+        k.Sleepers().push_back(&thread);
+        if (dl.infinite) thread.wake_cv.wait(lock);
+        else thread.wake_cv.wait_until(lock, dl.when);
+        auto drop = [&thread](std::vector<NtThread*>& list) {
+            if (auto it = std::find(list.begin(), list.end(), &thread); it != list.end()) list.erase(it);
+        };
+        for (auto& o : objects) if (o) drop(o->waiters);
+        drop(k.Sleepers());
     }
 }
 
@@ -204,7 +211,7 @@ NTSTATUS SignalObject(Kernel& k, NtThread& t, Object& o) {
     }
     default: return STATUS_OBJECT_TYPE_MISMATCH;
     }
-    k.NotifyAll();
+    k.Notify(o);
     return STATUS_SUCCESS;
 }
 
@@ -259,7 +266,7 @@ NTSTATUS NtSetEvent(Kernel& k, NtThread&, SyscallArgs& a) {
     std::scoped_lock lock {k.WaitMutex()};
     if (auto* prev = a.Ptr<int32_t>(1)) *prev = e->signaled ? 1 : 0;
     e->signaled = true;
-    k.NotifyAll();
+    k.Notify(*e);
     return STATUS_SUCCESS;
 }
 
@@ -289,7 +296,7 @@ NTSTATUS NtPulseEvent(Kernel& k, NtThread&, SyscallArgs& a) {
     if (!e) return STATUS_INVALID_HANDLE;
     std::unique_lock lock {k.WaitMutex()};
     e->signaled = true;
-    k.NotifyAll();
+    k.Notify(*e);
     // Let the waiters run before it clears again.
     lock.unlock();
     sched_yield();
@@ -334,7 +341,7 @@ NTSTATUS NtReleaseSemaphore(Kernel& k, NtThread&, SyscallArgs& a) {
     if (auto* prev = a.Ptr<int32_t>(2)) *prev = s->count;
     s->count += n;
     s->signaled = true;
-    k.NotifyAll();
+    k.Notify(*s);
     return STATUS_SUCCESS;
 }
 
@@ -372,7 +379,7 @@ NTSTATUS NtReleaseMutant(Kernel& k, NtThread& t, SyscallArgs& a) {
     if (m->owner_tid != t.tid_) return STATUS_MUTANT_NOT_OWNED;
     if (auto* prev = a.Ptr<int32_t>(1)) *prev = m->recursion - 1;
     if (--m->recursion == 0) { m->owner_tid = 0; m->signaled = true; }
-    k.NotifyAll();
+    k.Notify(*m);
     return STATUS_SUCCESS;
 }
 
@@ -695,8 +702,10 @@ void Kernel::CheckTimersLocked() {
     for (auto& t : timers_) {
         if (t->due_ns < 0 || t->due_ns > now) continue;
         t->signaled = true;
+        Notify(*t);
         if (t->apc_routine != 0) {
             if (auto th = FindThread(t->apc_tid)) {
+                th->wake_cv.notify_all();   // an alertable wait in WaitLocked runs the APC
                 // Timer APC routine: (Context, TimerLow, TimerHigh)
                 const int64_t st = NtSystemTime();
                 th->apcs.push_back(PendingApc {t->apc_routine, t->apc_context, static_cast<uint64_t>(st) & 0xFFFFFFFF,
@@ -752,7 +761,8 @@ void Kernel::TimerThreadMain() {
 void Kernel::QueueApc(NtThread& target, const PendingApc& apc) {
     std::scoped_lock lock {wait_mutex_};
     target.apcs.push_back(apc);
-    wait_cv_.notify_all();
+    target.wake_cv.notify_all();   // alertable in WaitLocked
+    wait_cv_.notify_all();         // alertable elsewhere (delay, alert-by-id)
 }
 
 bool Kernel::DeliverUserApc(NtThread& thread) {
@@ -843,7 +853,12 @@ NTSTATUS NtAssociateWaitCompletionPacket(Kernel& k, NtThread&, SyscallArgs& a) {
             k.CheckTimersLocked();
             const NTSTATUS r = TryAcquire(*target, waiter);
             if (r == STATUS_WAIT_0 || r == STATUS_ABANDONED_WAIT_0) break;
-            k.WaitCv().wait_for(lock, std::chrono::milliseconds(20));
+            // Listed as a waiter of the target, like WaitLocked, so its signal wakes this at once (20 ms is for timers).
+            target->waiters.push_back(&waiter);
+            k.Sleepers().push_back(&waiter);
+            waiter.wake_cv.wait_for(lock, std::chrono::milliseconds(20));
+            for (auto* list : {&target->waiters, &k.Sleepers()})
+                if (auto it = std::find(list->begin(), list->end(), &waiter); it != list->end()) list->erase(it);
         }
         pkt->state = 2;
         port->queue.push_back(delivery);

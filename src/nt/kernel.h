@@ -60,6 +60,8 @@ struct Object : std::enable_shared_from_this<Object> {
     std::string name;
     /// Waitable state, guarded by Kernel::wait_mutex_.
     bool signaled {false};
+    /// The threads sleeping in WaitLocked on this object (guarded by wait_mutex_): Kernel::Notify wakes just them.
+    std::vector<NtThread*> waiters;
     virtual bool IsWaitable() const { return false; }
 };
 
@@ -205,6 +207,8 @@ struct GuestFrame {
 
 class NtThread : public Object, public SyscallSink {
 public:
+    /// What this thread sleeps on in WaitLocked (with Kernel::wait_mutex_), so a signal can wake it alone.
+    std::condition_variable wake_cv;
     NtThread(Kernel& kernel, uint64_t tid) : Object(ObjType::Thread), kernel_ {kernel}, tid_ {tid} {}
     bool IsWaitable() const override { return true; }
 
@@ -330,7 +334,12 @@ public:
     // Waiting
     std::mutex& WaitMutex() { return wait_mutex_; }
     std::condition_variable& WaitCv() { return wait_cv_; }
-    void NotifyAll() { wait_cv_.notify_all(); }
+    /// Wakes every waiting thread: the global condition variable, and each thread asleep in WaitLocked on its own. For changes that
+    /// are not one object's (alerts, APCs, resume, exit) and object kinds also waited on outside WaitLocked. Wait mutex held.
+    void NotifyAll();
+    /// Wakes only the threads in WaitLocked on `o` (events, semaphores, mutants). Wait mutex held.
+    void Notify(Object& o);
+    std::vector<NtThread*>& Sleepers() { return sleepers_; }
 
     // Time helpers
     static int64_t MonotonicNs();
@@ -425,6 +434,7 @@ private:
 
     std::mutex wait_mutex_;
     std::condition_variable wait_cv_;
+    std::vector<NtThread*> sleepers_;   ///< threads asleep in WaitLocked, guarded by wait_mutex_
 
     std::unordered_map<uint32_t, std::pair<std::string, SyscallFn>> syscalls_;
     std::unordered_map<std::string, SyscallFn> handlers_;
