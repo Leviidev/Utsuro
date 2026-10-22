@@ -66,8 +66,10 @@ struct AcpCommand {
     };
 };
 struct QueueEntry { uint32_t state; AcpCommand command; uint8_t pad[120]; };
-// What AcpHal's PopMessage copies out of a ring entry: 24 bytes from the entry's +4, the payload at +8 (FMOD reads a completed
-// command's id as the qword at +0xc).
+// A message as the emulation builds it; Flush lays it into the ring the way the title's AcpHal reads it back. AcpHal's PopMessage
+// copies from the entry's +4: older ones (Forza Horizon 2's, Minecraft's) 24 bytes {type, dropped, payload @+8} -- FMOD reads a
+// completed command's id as the qword at +0xc --, newer ones (Rocket League's, Sonic Mania's) 28 bytes with a time field before the
+// payload {type, dropped, time, payload @+0xc}.
 struct AcpMessage {
     uint32_t type, dropped;
     union {
@@ -76,7 +78,7 @@ struct AcpMessage {
         uint32_t raw[4];
     };
 };
-struct MessageEntry { uint32_t state; AcpMessage message; uint8_t pad[228]; };
+struct MessageEntry { uint32_t state; uint8_t bytes[252]; };
 
 struct InIoctlAllocMap { uint32_t size, flags; uint64_t address; uint64_t reserved[2]; };
 struct OutIoctlAllocMap { uint32_t allocated, reserved0; uint64_t address; uint32_t apu_address; uint32_t reserved1[3]; };
@@ -85,7 +87,7 @@ struct InIoctlDriverMemory { uint32_t type; };
 struct OutIoctlDriverMemory { uint64_t address; uint32_t size; uint32_t apu_address; uint32_t reserved[2]; };
 #pragma pack(pop)
 static_assert(sizeof(QueueEntry) == 256 && sizeof(MessageEntry) == 256 && sizeof(LoganCommand) == 256, "ACP ring entries are 256 bytes");
-static_assert(sizeof(AcpMessage) == 24, "an ACP message is 24 bytes");
+static_assert(sizeof(AcpMessage) == 24, "type, dropped and a 16-byte payload");
 
 struct Mapping { uint32_t apu; uint32_t size; uint64_t va; };
 
@@ -128,6 +130,7 @@ struct AcpEmulator {
     uint32_t flowgraphs_pending {0};   ///< flowgraphs the title has submitted that the ACP has not run yet
     uint64_t sent {0};
     std::deque<AcpMessage> waiting[4];   ///< messages for a client whose ring is full
+    bool timed_messages {false};         ///< the title's AcpHal reads messages with a time field (see AcpMessage)
     std::chrono::steady_clock::time_point last_report {};
 };
 AcpEmulator g_acp;
@@ -139,7 +142,12 @@ void Flush(MessageEntry* queue, AcpState* state, uint32_t client) {
     while (!waiting.empty()) {
         const uint32_t slot = state->client_message_write_pointer[client];
         if (queue[slot].state != 0) return;
-        queue[slot].message = waiting.front();
+        const AcpMessage& m = waiting.front();
+        uint8_t* b = queue[slot].bytes;
+        std::memset(b, 0, 32);
+        std::memcpy(b, &m.type, 4);
+        std::memcpy(b + 4, &m.dropped, 4);
+        std::memcpy(b + (g_acp.timed_messages ? 12 : 8), m.raw, 16);
         waiting.pop_front();
         ++g_acp.sent;
         std::atomic_thread_fence(std::memory_order_release);
@@ -264,15 +272,18 @@ void RunChannel(Channel* channel) {
                     // for 1, 2, 3... and sends the rest (registering messages, loading flowgraphs) as 0. It takes any id out of turn as
                     // one that came late, which leaves its count of outstanding commands wrong for good -- and the game stops, as it
                     // holds its lock while it waits.
-                    const bool report = (g_acp.enabled_messages & kMsgCommandCompleted) != 0 && c.command_id != 0;
+                    // (With the newer AcpHal -- Wwise in Rocket League -- every command is reported once messages are on, a command
+                    // without an id under a running number: that is what it was brought up with.)
+                    bool report = (g_acp.enabled_messages & kMsgCommandCompleted) != 0 && c.command_id != 0;
                     DispatchClient(c);
-                    ++g_acp.completed;
+                    const uint64_t sequence = ++g_acp.completed;
+                    if (g_acp.timed_messages) report = (g_acp.enabled_messages & kMsgCommandCompleted) != 0;
                     if (report) {
                         AcpMessage m {};
                         m.type = kMsgCommandCompleted;
                         m.dropped = g_acp.dropped;
                         m.command_completed.command_type = c.command_type;
-                        m.command_completed.command_id = c.command_id;
+                        m.command_completed.command_id = c.command_id != 0 || !g_acp.timed_messages ? c.command_id : sequence;
                         m.command_completed.audio_frame = g_acp.audio_frame;
                         Send(m, messages, state, i);
                     }
@@ -307,6 +318,31 @@ void RunChannel(Channel* channel) {
 }
 
 } // namespace
+
+/// Whether the loaded AcpHal.dll's PopMessage converts a time field (cvtsi2sd xmm0, rax ... divsd xmm0, [rip+x]): the newer message
+/// layout. Older HALs (2014-era titles) copy {type, dropped, payload} and have no floating-point code at all.
+bool AcpHalTimesMessages(Kernel& kernel) {
+    uint64_t base = 0;
+    {
+        std::scoped_lock lock {kernel.image_mutex};
+        for (const auto& [b, name] : kernel.image_names) {
+            std::string low = name.substr(name.find_last_of("\\/") + 1);
+            for (auto& ch : low) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            if (low == "acphal.dll") { base = b; break; }
+        }
+    }
+    if (base == 0) return true;   // unknown: the newer layout, as most titles have
+    const auto* p = reinterpret_cast<const uint8_t*>(base);
+    uint32_t lfanew = 0, size = 0;
+    std::memcpy(&lfanew, p + 0x3c, 4);
+    std::memcpy(&size, p + lfanew + 0x50, 4);   // SizeOfImage
+    static const uint8_t cvt[] = {0xf2, 0x48, 0x0f, 0x2a, 0xc0}, div[] = {0xf2, 0x0f, 0x5e, 0x05};
+    for (uint32_t i = 0; i + 32 < size; ++i)
+        if (std::memcmp(p + i, cvt, sizeof cvt) == 0)
+            for (uint32_t j = i + sizeof cvt; j < i + 32; ++j)
+                if (std::memcmp(p + j, div, sizeof div) == 0) return true;
+    return false;
+}
 
 bool IsDevicePath(const std::string& nt_path) {
     std::string low = nt_path;
@@ -363,6 +399,10 @@ NTSTATUS Ioctl(Kernel& kernel, uint32_t code, const uint8_t* in, uint32_t in_len
         Channel* channel = HostAs<Channel>(req->apu_address);
         if (channel == nullptr) return STATUS_INVALID_PARAMETER;
         UT_INFO("logan: channel attached for core %u", req->core);
+        if (req->core == 0x03) {
+            g_acp.timed_messages = AcpHalTimesMessages(kernel);
+            UT_INFO("logan: the title's AcpHal reads %s messages", g_acp.timed_messages ? "28-byte (timed)" : "24-byte");
+        }
         // Only the ACP's channel carries the command rings the emulation serves; the others (ASP, AVP) are accepted and ignored.
         if (req->core == 0x03 && !g_acp_running.exchange(true)) std::thread(RunChannel, channel).detach();
         return STATUS_SUCCESS;
