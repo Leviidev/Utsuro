@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <thread>
@@ -65,15 +66,17 @@ struct AcpCommand {
     };
 };
 struct QueueEntry { uint32_t state; AcpCommand command; uint8_t pad[120]; };
+// What AcpHal's PopMessage copies out of a ring entry: 24 bytes from the entry's +4, the payload at +8 (FMOD reads a completed
+// command's id as the qword at +0xc).
 struct AcpMessage {
-    uint32_t type, dropped, usec;
+    uint32_t type, dropped;
     union {
         struct { uint32_t flowgraph; } flowgraph_completed;
         struct { uint32_t command_type; uint64_t command_id; uint32_t audio_frame; } command_completed;
         uint32_t raw[4];
     };
 };
-struct MessageEntry { uint32_t state; AcpMessage message; uint8_t pad[224]; };
+struct MessageEntry { uint32_t state; AcpMessage message; uint8_t pad[228]; };
 
 struct InIoctlAllocMap { uint32_t size, flags; uint64_t address; uint64_t reserved[2]; };
 struct OutIoctlAllocMap { uint32_t allocated, reserved0; uint64_t address; uint32_t apu_address; uint32_t reserved1[3]; };
@@ -82,6 +85,7 @@ struct InIoctlDriverMemory { uint32_t type; };
 struct OutIoctlDriverMemory { uint64_t address; uint32_t size; uint32_t apu_address; uint32_t reserved[2]; };
 #pragma pack(pop)
 static_assert(sizeof(QueueEntry) == 256 && sizeof(MessageEntry) == 256 && sizeof(LoganCommand) == 256, "ACP ring entries are 256 bytes");
+static_assert(sizeof(AcpMessage) == 24, "an ACP message is 24 bytes");
 
 struct Mapping { uint32_t apu; uint32_t size; uint64_t va; };
 
@@ -123,18 +127,31 @@ struct AcpEmulator {
     uint32_t flowgraph {0};
     uint32_t flowgraphs_pending {0};   ///< flowgraphs the title has submitted that the ACP has not run yet
     uint64_t sent {0};
+    std::deque<AcpMessage> waiting[4];   ///< messages for a client whose ring is full
     std::chrono::steady_clock::time_point last_report {};
 };
 AcpEmulator g_acp;
 
+/// Moves waiting messages into the client's ring while it has free entries. Nothing is dropped: the title counts completed commands
+/// by id, and one that never arrives leaves it waiting for good (FMOD holds its lock while it waits, and the whole game stops).
+void Flush(MessageEntry* queue, AcpState* state, uint32_t client) {
+    auto& waiting = g_acp.waiting[client];
+    while (!waiting.empty()) {
+        const uint32_t slot = state->client_message_write_pointer[client];
+        if (queue[slot].state != 0) return;
+        queue[slot].message = waiting.front();
+        waiting.pop_front();
+        ++g_acp.sent;
+        std::atomic_thread_fence(std::memory_order_release);
+        queue[slot].state = 1;
+        state->client_message_write_pointer[client] = slot + 1 < g_acp.clients[client].num_messages ? slot + 1 : 0;
+    }
+}
+
 void Send(const AcpMessage& message, MessageEntry* queue, AcpState* state, uint32_t client) {
-    const uint32_t slot = state->client_message_write_pointer[client];
-    if (queue[slot].state != 0) { ++g_acp.dropped; return; }
-    queue[slot].message = message;
-    ++g_acp.sent;
-    std::atomic_thread_fence(std::memory_order_release);
-    queue[slot].state = 1;
-    state->client_message_write_pointer[client] = slot + 1 < g_acp.clients[client].num_messages ? slot + 1 : 0;
+    if (g_acp.waiting[client].size() >= 65536) { ++g_acp.dropped; return; }   // a title that stopped reading its messages
+    g_acp.waiting[client].push_back(message);
+    Flush(queue, state, client);
 }
 
 void DispatchInternal(const AcpCommand& c) {
@@ -146,7 +163,10 @@ void DispatchInternal(const AcpCommand& c) {
             UT_INFO("logan: client %u connected (%u commands, %u messages)", c.connect.index, c.connect.num_commands, c.connect.num_messages);
         }
         break;
-    case kInternalRegisterContextArrays: UT_INFO("logan: context arrays registered"); break;
+    case kInternalRegisterContextArrays:
+        UT_INFO("logan: context arrays registered: %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x", c.raw[0], c.raw[1], c.raw[2], c.raw[3], c.raw[4],
+                c.raw[5], c.raw[6], c.raw[7], c.raw[8], c.raw[9], c.raw[10], c.raw[11], c.raw[12], c.raw[13], c.raw[14], c.raw[15]);
+        break;
     case kInternalDisconnect: case kInternalEventLogInit: case kInternalEventLogEnable: case kInternalEventLogDisable: case kInternalTerminate: break;
     default: UT_INFO("logan: unknown internal ACP command %#x", c.command_type);
     }
@@ -157,10 +177,24 @@ void DispatchClient(const AcpCommand& c) {
         static uint32_t counts[64] {};
         const uint32_t type = c.command_type < 64 ? c.command_type : 63;
         if (counts[type]++ == 0) UT_INFO("logan: first client command of type %#x (message mask now %#x)", c.command_type, g_acp.enabled_messages);
+        static int shown = 0;
+        if (shown++ < 16) UT_INFO("logan: client command type %#x id %llu notification %#x frame %u: %08x %08x %08x %08x", c.command_type, (unsigned long long)c.command_id, c.notification, c.frame, c.raw[0], c.raw[1], c.raw[2], c.raw[3]);
     }
     if (c.command_type == kCmdRegisterMessage) g_acp.enabled_messages |= c.message;
     else if (c.command_type == kCmdUnregisterMessage) g_acp.enabled_messages &= ~c.message;
-    else if (c.command_type == 0x1) { g_acp.flowgraph = c.raw[1]; ++g_acp.flowgraphs_pending; }   // LOAD_SHAPE_FLOWGRAPH: {numCommands, flowgraph, ...}
+    else if (c.command_type == 0x1) {   // LOAD_SHAPE_FLOWGRAPH: {numCommands, flowgraph, ...}
+        g_acp.flowgraph = c.raw[1];
+        ++g_acp.flowgraphs_pending;
+        static int shown = 0;
+        if (shown++ < 6) {
+            UT_INFO("logan: flowgraph %#x %#x %#x %#x", c.raw[0], c.raw[1], c.raw[2], c.raw[3]);
+            for (uint32_t k = 0; k < 4; ++k)
+                if (const auto* w = HostAs<uint32_t>(c.raw[k], 64)) {
+                    for (int row = 0; row < 4; ++row)
+                        UT_INFO("logan:   [%u] +%02x: %08x %08x %08x %08x %08x %08x %08x %08x", k, row * 32, w[row * 8], w[row * 8 + 1], w[row * 8 + 2], w[row * 8 + 3], w[row * 8 + 4], w[row * 8 + 5], w[row * 8 + 6], w[row * 8 + 7]);
+                }
+        }
+    }
     // Everything else (XMA, DMA, SRC, EQ, filter contexts) is accepted without being acted on: there is no audio path behind it yet.
 }
 
@@ -218,6 +252,7 @@ void RunChannel(Channel* channel) {
                 auto* queue = HostAs<QueueEntry>(cc.command_queue, cc.num_commands);
                 auto* messages = HostAs<MessageEntry>(cc.message_queue, cc.num_messages);
                 if (queue == nullptr || messages == nullptr) continue;
+                Flush(messages, state, i);
                 while (state->client_read_counter[i] != state->client_send_counter[i]) {
                     std::atomic_thread_fence(std::memory_order_acquire);
                     const AcpCommand c = queue[state->client_read_pointer[i]].command;
@@ -225,14 +260,19 @@ void RunChannel(Channel* channel) {
                     state->client_read_pointer[i] = state->client_read_pointer[i] + 1 >= cc.num_commands ? 0 : state->client_read_pointer[i] + 1;
                     ++state->client_read_counter[i];
                     if (c.command_type == 0) continue;
+                    // Only a command with an id is reported, and with the id the title gave it: FMOD numbers the commands it waits
+                    // for 1, 2, 3... and sends the rest (registering messages, loading flowgraphs) as 0. It takes any id out of turn as
+                    // one that came late, which leaves its count of outstanding commands wrong for good -- and the game stops, as it
+                    // holds its lock while it waits.
+                    const bool report = (g_acp.enabled_messages & kMsgCommandCompleted) != 0 && c.command_id != 0;
                     DispatchClient(c);
-                    const uint64_t sequence = ++g_acp.completed;
-                    if (g_acp.enabled_messages & kMsgCommandCompleted) {
+                    ++g_acp.completed;
+                    if (report) {
                         AcpMessage m {};
                         m.type = kMsgCommandCompleted;
                         m.dropped = g_acp.dropped;
                         m.command_completed.command_type = c.command_type;
-                        m.command_completed.command_id = c.command_id != 0 ? c.command_id : sequence;
+                        m.command_completed.command_id = c.command_id;
                         m.command_completed.audio_frame = g_acp.audio_frame;
                         Send(m, messages, state, i);
                     }
@@ -257,8 +297,8 @@ void RunChannel(Channel* channel) {
             if (g_acp.last_report == std::chrono::steady_clock::time_point {}) g_acp.last_report = now;
             if (now - g_acp.last_report > std::chrono::seconds(3)) {
                 g_acp.last_report = now;
-                UT_INFO("logan: %llu messages sent, %u dropped, frame %u, %llu commands completed, client0 write %u / title read %u", (unsigned long long)g_acp.sent,
-                        g_acp.dropped, g_acp.audio_frame, (unsigned long long)g_acp.completed,
+                UT_INFO("logan: %llu messages sent, %zu waiting, frame %u, %llu commands completed, client0 write %u / title read %u", (unsigned long long)g_acp.sent,
+                        g_acp.waiting[0].size(), g_acp.audio_frame, (unsigned long long)g_acp.completed,
                         state ? state->client_message_write_pointer[0] : 0u, state ? state->client_read_counter[0] : 0u);
             }
         }
