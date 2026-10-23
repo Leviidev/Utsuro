@@ -1,5 +1,6 @@
 #include <atomic>
 #include <set>
+#include <mutex>
 #include "nt/winrt.h"
 #include "nt/safe_mem.h"
 
@@ -474,7 +475,16 @@ bool Runtime::Dispatch(NtThread& thread, uint32_t number, SyscallArgs& args, uin
             p = block;
         }
         if (p == 0) {
-            UT_INFO("winrt: %s does not implement %s (caller %s)", obj->class_name.c_str(), iid.ToString().c_str(), args.rsp != 0 ? kernel_->Describe(*reinterpret_cast<uint64_t*>(args.rsp)).c_str() : "?");
+            static std::set<std::pair<std::string, std::string>> seen_missing;
+            static std::mutex missing_mutex;
+            bool first = false;
+            {
+                std::scoped_lock lock {missing_mutex};
+                first = seen_missing.emplace(obj->class_name, iid.ToString()).second;
+            }
+            if (first) {
+                UT_INFO("winrt: %s does not implement %s (caller %s)", obj->class_name.c_str(), iid.ToString().c_str(), args.rsp != 0 ? kernel_->Describe(*reinterpret_cast<uint64_t*>(args.rsp)).c_str() : "?");
+            }
             *reinterpret_cast<uint64_t*>(args[2]) = 0;
             *result = kENoInterface;
         } else {

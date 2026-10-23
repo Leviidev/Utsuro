@@ -740,6 +740,28 @@ NTSTATUS Kernel::MapImageSection(SectionObject& section, uint64_t* base_io, uint
         std::string lower = pe.path.substr(pe.path.rfind('/') + 1);
         for (auto& ch : lower) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
         ApplyHleHooks(lower, base);
+        if (lower == "forza_durango_release_final.exe") {
+            // Null dereference guard at 0x5e468a:
+            // When track nav mesh asset is absent or not yet loaded, [rsp + 0x40] is null.
+            // Original code at 0x5e4680 checks operator new's rax, then unconditionally dereferences [rsp+0x40]:
+            //   48 85 c0          test rax, rax
+            //   74 19             je 0x5e469e
+            //   48 8b 54 24 40    mov rdx, [rsp+0x40]
+            //   44 8b 42 08       mov r8d, [rdx+8]
+            // If [rsp+0x40] is null, mov r8d, [rdx+8] faults at 0x8.
+            // Patch (exact 10 bytes):
+            //   48 8b 54 24 40    mov rdx, [rsp+0x40]
+            //   48 85 d2          test rdx, rdx
+            //   74 14             je 0x5e469e
+            //   44 8b 42 08       mov r8d, [rdx+8]
+            uint8_t* p = reinterpret_cast<uint8_t*>(base + 0x5e4680);
+            const uint8_t orig[10] = {0x48, 0x85, 0xc0, 0x74, 0x19, 0x48, 0x8b, 0x54, 0x24, 0x40};
+            if (std::memcmp(p, orig, sizeof(orig)) == 0) {
+                const uint8_t patch[10] = {0x48, 0x8b, 0x54, 0x24, 0x40, 0x48, 0x85, 0xd2, 0x74, 0x14};
+                std::memcpy(p, patch, sizeof(patch));
+                UT_INFO("patch: applied nav mesh null guard at forza_durango_release_final.exe+0x5e4680");
+            }
+        }
         if (lower != "ntdll.dll") InstallTracepointsFor(lower, base);
     }
     section.last_base = base;

@@ -41,9 +41,43 @@ void RegisterInput(Runtime& rt) {
         fn("get_Type", [](Call& c) -> uint32_t { *c.Ptr<uint64_t>(0) = Runtime::Get().MakeHString(u"Windows.Xbox.Input.Gamepad"); return 0; }),
         fn("get_User", [](Call& c) -> uint32_t { *c.Ptr<uint64_t>(0) = CurrentUserPointer(); return 0; }),
     });
+    Iface& nav_reading_iface = rt.DefineInterface("INavigationReading", "AACAAAAB-ADAA-AAAA-AAAA-AAAAAAAACAAA", {
+        fn("get_Timestamp", [](Call& c) -> uint32_t { *c.Ptr<uint64_t>(0) = c.obj.u64["time"]; return 0; }),
+        fn("get_Buttons", [](Call& c) -> uint32_t { *c.Ptr<uint32_t>(0) = static_cast<uint32_t>(c.obj.u64["buttons"]); return 0; }),
+        fn("get_IsUpPressed", [](Call& c) -> uint32_t { *c.Ptr<uint8_t>(0) = (c.obj.u64["buttons"] & 0x100) != 0; return 0; }),
+        fn("get_IsDownPressed", [](Call& c) -> uint32_t { *c.Ptr<uint8_t>(0) = (c.obj.u64["buttons"] & 0x200) != 0; return 0; }),
+        fn("get_IsLeftPressed", [](Call& c) -> uint32_t { *c.Ptr<uint8_t>(0) = (c.obj.u64["buttons"] & 0x400) != 0; return 0; }),
+        fn("get_IsRightPressed", [](Call& c) -> uint32_t { *c.Ptr<uint8_t>(0) = (c.obj.u64["buttons"] & 0x800) != 0; return 0; }),
+        fn("get_IsMenuPressed", [](Call& c) -> uint32_t { *c.Ptr<uint8_t>(0) = (c.obj.u64["buttons"] & 0x4) != 0; return 0; }),
+        fn("get_IsViewPressed", [](Call& c) -> uint32_t { *c.Ptr<uint8_t>(0) = (c.obj.u64["buttons"] & 0x8) != 0; return 0; }),
+        fn("get_IsPreviousPagePressed", [](Call& c) -> uint32_t { *c.Ptr<uint8_t>(0) = (c.obj.u64["buttons"] & 0x1000) != 0; return 0; }),
+        fn("get_IsNextPagePressed", [](Call& c) -> uint32_t { *c.Ptr<uint8_t>(0) = (c.obj.u64["buttons"] & 0x2000) != 0; return 0; }),
+        fn("get_IsAcceptPressed", [](Call& c) -> uint32_t { *c.Ptr<uint8_t>(0) = (c.obj.u64["buttons"] & 0x10) != 0; return 0; }),
+        fn("get_IsCancelPressed", [](Call& c) -> uint32_t { *c.Ptr<uint8_t>(0) = (c.obj.u64["buttons"] & 0x20) != 0; return 0; }),
+        fn("get_IsXPressed", [](Call& c) -> uint32_t { *c.Ptr<uint8_t>(0) = (c.obj.u64["buttons"] & 0x40) != 0; return 0; }),
+        fn("get_IsYPressed", [](Call& c) -> uint32_t { *c.Ptr<uint8_t>(0) = (c.obj.u64["buttons"] & 0x80) != 0; return 0; }),
+    }, false);
     Iface& navigation = rt.DefineInterface("INavigationController", "AACAAAAB-AAAA-AAAA-AAAA-CDAAAAAACAAA", {
-        fn("GetNavigationReading", [](Call& c) -> uint32_t { *c.Ptr<uint64_t>(0) = 0; return 0; }),
-        fn("GetRawNavigationReading", [](Call& c) -> uint32_t { std::memset(c.Ptr<void>(0), 0, 16); return 0; }),
+        fn("GetNavigationReading", [&nav_reading_iface](Call& c) -> uint32_t {
+            Runtime& r = Runtime::Get();
+            Obj* o = r.NewObject("Windows.Xbox.Input.NavigationReading", {&nav_reading_iface});
+            o->recycle = true;
+            const input::PadState s = input::Poll();
+            o->u64["buttons"] = s.buttons & 0x3f3c;
+            o->u64["time"] = NowMicros();
+            *c.Ptr<uint64_t>(0) = r.Pointer(*o, nav_reading_iface);
+            return 0;
+        }),
+        fn("GetRawNavigationReading", [](Call& c) -> uint32_t {
+            auto* out = c.Ptr<uint8_t>(0);
+            std::memset(out, 0, 16);
+            const uint64_t t = NowMicros();
+            std::memcpy(out, &t, 8);
+            const input::PadState s = input::Poll();
+            const uint32_t nav = s.buttons & 0x3f3c;
+            std::memcpy(out + 8, &nav, 4);
+            return 0;
+        }),
     }, false);
     // A guessed interface adopts whichever IID a title asks for next (see Runtime QueryInterface); titles built later call methods well past
     // the two known ones, so the vtable is padded with logged no-ops instead of garbage.
@@ -64,8 +98,8 @@ void RegisterInput(Runtime& rt) {
 
     rt.Override("IGamepad", "GetRawCurrentReading", [](Call& c) -> uint32_t {
         static uint64_t count = 0;
-        if ((count++ % 300) == 0) UT_INFO("winrt: GetRawCurrentReading called #%llu", (unsigned long long)count);
         const input::PadState s = input::Poll();
+        if ((count++ % 300) == 0) UT_INFO("winrt: GetRawCurrentReading called #%llu buttons=%#x", (unsigned long long)count, (unsigned)s.buttons);
         auto* out = c.Ptr<uint8_t>(0);
         std::memset(out, 0, 40);
         const uint64_t t = NowMicros();
@@ -81,12 +115,12 @@ void RegisterInput(Runtime& rt) {
     });
     rt.Override("IGamepad", "GetCurrentReading", [](Call& c) -> uint32_t {
         static uint64_t count = 0;
-        if ((count++ % 300) == 0) UT_INFO("winrt: GetCurrentReading called #%llu", (unsigned long long)count);
+        const input::PadState s = input::Poll();
+        if ((count++ % 300) == 0) UT_INFO("winrt: GetCurrentReading called #%llu buttons=%#x", (unsigned long long)count, (unsigned)s.buttons);
         Runtime& r = Runtime::Get();
         Iface* reading = r.FindInterface("IGamepadReading");
         Obj* o = r.NewObject("Windows.Xbox.Input.GamepadReading", {reading});
         o->recycle = true;
-        const input::PadState s = input::Poll();
         o->u64["buttons"] = s.buttons;
         o->u64["lt"] = Bits(s.left_trigger);
         o->u64["rt"] = Bits(s.right_trigger);
