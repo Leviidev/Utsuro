@@ -474,7 +474,7 @@ bool Runtime::Dispatch(NtThread& thread, uint32_t number, SyscallArgs& args, uin
             p = block;
         }
         if (p == 0) {
-            UT_INFO("winrt: %s does not implement %s", obj->class_name.c_str(), iid.ToString().c_str());
+            UT_INFO("winrt: %s does not implement %s (caller %s)", obj->class_name.c_str(), iid.ToString().c_str(), args.rsp != 0 ? kernel_->Describe(*reinterpret_cast<uint64_t*>(args.rsp)).c_str() : "?");
             *reinterpret_cast<uint64_t*>(args[2]) = 0;
             *result = kENoInterface;
         } else {

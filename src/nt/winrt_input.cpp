@@ -44,7 +44,7 @@ void RegisterInput(Runtime& rt) {
     Iface& navigation = rt.DefineInterface("INavigationController", "AACAAAAB-AAAA-AAAA-AAAA-CDAAAAAACAAA", {
         fn("GetNavigationReading", [](Call& c) -> uint32_t { *c.Ptr<uint64_t>(0) = 0; return 0; }),
         fn("GetRawNavigationReading", [](Call& c) -> uint32_t { std::memset(c.Ptr<void>(0), 0, 16); return 0; }),
-    }, true);
+    }, false);
     // A guessed interface adopts whichever IID a title asks for next (see Runtime QueryInterface); titles built later call methods well past
     // the two known ones, so the vtable is padded with logged no-ops instead of garbage.
     for (int i = 0; i < 40; ++i) navigation.methods.push_back(fn(("slot" + std::to_string(6 + navigation.methods.size())).c_str(), [](Call& c) -> uint32_t {
@@ -63,6 +63,8 @@ void RegisterInput(Runtime& rt) {
     g_pad = rt.NewObject("Windows.Xbox.Input.Gamepad", {gamepad, &controller, &navigation});
 
     rt.Override("IGamepad", "GetRawCurrentReading", [](Call& c) -> uint32_t {
+        static uint64_t count = 0;
+        if ((count++ % 300) == 0) UT_INFO("winrt: GetRawCurrentReading called #%llu", (unsigned long long)count);
         const input::PadState s = input::Poll();
         auto* out = c.Ptr<uint8_t>(0);
         std::memset(out, 0, 40);
@@ -78,9 +80,12 @@ void RegisterInput(Runtime& rt) {
         return 0;
     });
     rt.Override("IGamepad", "GetCurrentReading", [](Call& c) -> uint32_t {
+        static uint64_t count = 0;
+        if ((count++ % 300) == 0) UT_INFO("winrt: GetCurrentReading called #%llu", (unsigned long long)count);
         Runtime& r = Runtime::Get();
         Iface* reading = r.FindInterface("IGamepadReading");
         Obj* o = r.NewObject("Windows.Xbox.Input.GamepadReading", {reading});
+        o->recycle = true;
         const input::PadState s = input::Poll();
         o->u64["buttons"] = s.buttons;
         o->u64["lt"] = Bits(s.left_trigger);
