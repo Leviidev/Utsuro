@@ -936,7 +936,7 @@ bool Init() {
         sd.supportArgumentBuffers = NO;
         g->default_sampler = [g->device newSamplerStateWithDescriptor:sd];
         g->last_present = std::chrono::steady_clock::now();
-        g->dump_dir = std::getenv("UTSURO_DUMPFRAMES");
+        const char* ddir = std::getenv("UTSURO_DUMPFRAMES"); if (!ddir) ddir = std::getenv("UTSURO_DUMP_DIR"); g->dump_dir = ddir;
         if (const char* d = std::getenv("UTSURO_GPUDEBUG")) g->debug = d;
         if (const char* d = std::getenv("UTSURO_TRACEFRAME")) g->trace_frame = std::strtoull(d, nullptr, 10);
         if (const char* d = std::getenv("UTSURO_TRACECAP")) g->trace_cap = static_cast<uint32_t>(std::strtoul(d, nullptr, 10));
@@ -1508,9 +1508,12 @@ void Draw(const DrawState& st, const DrawArgs& args) {
             [e setVertexBuffer:st.vb[i].buffer->mtl offset:st.vb[i].buffer->offset + st.vb[i].offset atIndex:15 + i];
         }
 
-        if (g->frame_count == g->trace_frame && g->trace_draws < g->trace_cap) {
-            ++g->trace_draws;
-            if (st.rtv[0] && st.rtv[0]->texture && std::find(g->trace_rts.begin(), g->trace_rts.end(), st.rtv[0]->texture) == g->trace_rts.end()) g->trace_rts.push_back(st.rtv[0]->texture);
+        if (g->frame_count == g->trace_frame) {
+            for (int i = 0; i < 8; ++i)
+                if (st.rtv[i] && st.rtv[i]->texture && std::find(g->trace_rts.begin(), g->trace_rts.end(), st.rtv[i]->texture) == g->trace_rts.end()) g->trace_rts.push_back(st.rtv[i]->texture);
+            if (st.dsv && st.dsv->texture && std::find(g->trace_depths.begin(), g->trace_depths.end(), st.dsv->texture.get()) == g->trace_depths.end()) g->trace_depths.push_back(st.dsv->texture.get());
+            if (g->trace_draws < g->trace_cap) {
+                ++g->trace_draws;
             id<MTLTexture> rt0 = st.rtv[0] && st.rtv[0]->texture ? ViewOf(*st.rtv[0]->texture, st.rtv[0]->desc, true) : nil;
             if (st.dsv && st.dsv->texture) UT_INFO("gpu:   dsv [%p] %lux%lu fmt %lu depth_gen %llu", (__bridge void*)st.dsv->texture->mtl, (unsigned long)st.dsv->texture->mtl.width, (unsigned long)st.dsv->texture->mtl.height,
                                                     (unsigned long)st.dsv->texture->mtl.pixelFormat, (unsigned long long)st.dsv->texture->depth_gen);
@@ -1518,6 +1521,7 @@ void Draw(const DrawState& st, const DrawArgs& args) {
                     (void*)st.vs.get(), st.vs->serial, (void*)st.ps.get(), st.ps ? st.ps->serial : 0, (void*)st.layout.get(), st.rtv[0] && st.rtv[0]->texture ? (__bridge void*)st.rtv[0]->texture->mtl : nullptr, rt0 ? (unsigned)rt0.width : 0, rt0 ? (unsigned)rt0.height : 0, rt0 ? (unsigned long)rt0.pixelFormat : 0, has_depth,
                     st.num_viewports ? st.viewports[0].w : 0.f, st.num_viewports ? st.viewports[0].h : 0.f, st.num_viewports ? st.viewports[0].x : 0.f, st.num_viewports ? st.viewports[0].y : 0.f,
                     (void*)st.cb[0][0].buffer.get(), (void*)st.srv[1][0].get(), st.blend.bytes.size());
+            }
         }
         if (g->frame_count == g->trace_frame && g->trace_draws <= g->trace_cap && g->trace_draws > 0 && std::getenv("UTSURO_TRACEPIXELS")) {
             for (int stage = 0; stage < 2; ++stage) for (int slot = 0; slot < 14; ++slot) {
@@ -2182,6 +2186,8 @@ void Present(const std::shared_ptr<Texture>& back, uint32_t sync_interval) {
             [cmd waitUntilCompleted];
             int n = 0;
             for (Texture* dt : g->trace_depths) {
+                if (!dt || !dt->mtl) continue;
+                DepthAsFloat(*dt);
                 id<MTLTexture> c = dt->depth_copy;
                 if (c == nil) continue;
                 const NSUInteger w = c.width, h = c.height;
@@ -2216,6 +2222,7 @@ void Present(const std::shared_ptr<Texture>& back, uint32_t sync_interval) {
         }
         if (index == g->trace_frame + 1 && g->dump_dir != nullptr && !g->trace_rts.empty()) {
             [cmd waitUntilCompleted];
+            if (back && back->mtl && std::find(g->trace_rts.begin(), g->trace_rts.end(), back) == g->trace_rts.end()) g->trace_rts.push_back(back);
             int n = 0;
             for (const auto& rt : g->trace_rts) {
                 char path[512];
