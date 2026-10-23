@@ -145,7 +145,16 @@ void FormatShape(uint32_t fmt, uint32_t width, uint32_t height, uint32_t* pitch,
 /// What the title has bound on a context. Getters read it back; a renderer reads it at draw time.
 struct Viewport { float x, y, w, h, min_depth, max_depth; };
 /// A draw a deferred context recorded: replayed, with the immediate context's render targets, when its command list executes.
-struct RecordedDraw { gpu::DrawState state; gpu::DrawArgs args; };
+struct RecordedDraw {
+    gpu::DrawState state;
+    gpu::DrawArgs args;
+    uint64_t cb_addr[2][14] {};
+    uint32_t cb_size[2][14] {};
+    uint64_t vb_addr[8] {};
+    uint32_t vb_size[8] {};
+    uint64_t ib_addr {0};
+    uint32_t ib_size {0};
+};
 struct CtxState {
     uint64_t cb[6][16] {}, srv[6][128] {}, sampler[6][16] {}, shader[6] {};
     uint64_t rtv[8] {}, dsv {}, uav[64] {};

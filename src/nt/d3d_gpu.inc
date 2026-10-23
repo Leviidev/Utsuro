@@ -731,7 +731,7 @@ bool PagesKnownReadable(uint64_t address, uint32_t bytes) {
     return true;
 }
 
-std::shared_ptr<gpu::Buffer> CopyOfHost(uint64_t address, uint32_t bytes) {
+std::shared_ptr<gpu::Buffer> CopyOfHost(uint64_t address, uint32_t bytes, bool persistent = false) {
     if (address == 0 || bytes == 0) return nullptr;
     static thread_local std::vector<uint8_t> data;
     const uint32_t target_size = std::max<uint32_t>(bytes, 16);
@@ -757,6 +757,7 @@ std::shared_ptr<gpu::Buffer> CopyOfHost(uint64_t address, uint32_t bytes) {
     } else if (bytes < target_size) {
         std::memset(data.data() + bytes, 0, target_size - bytes);
     }
+    if (persistent) return gpu::CreateBuffer(static_cast<uint32_t>(data.size()), false, data.data());
     return gpu::CreateTransientBuffer(static_cast<uint32_t>(data.size()), data.data());
 }
 
@@ -787,7 +788,7 @@ void ParseStream(Obj& ctx, CtxState& s) {
 }
 
 /// Resolves what the packets bound into the draw: vertex streams, constant buffers, textures and samplers.
-void BindStream(CtxState& s, gpu::DrawState& d, gpu::DrawArgs& args) {
+void BindStream(CtxState& s, gpu::DrawState& d, gpu::DrawArgs& args, bool deferred = false, RecordedDraw* rd = nullptr) {
     if (s.regs.empty()) return;
     auto get = [&](uint32_t reg) -> const CtxState::Reg* { auto it = s.regs.find(reg); return it == s.regs.end() ? nullptr : &it->second; };
     auto address = [](const CtxState::Reg& r) { return static_cast<uint64_t>(r.dw[0]) | (static_cast<uint64_t>(r.dw[1] & 0xFFFF) << 32); };
@@ -814,7 +815,10 @@ void BindStream(CtxState& s, gpu::DrawState& d, gpu::DrawArgs& args) {
                 if (v == 0xFFFF && size == 2) continue;   // restart index
                 lo = std::min(lo, v); hi = std::max(hi, v);
             }
-            d.index_buffer = gpu::CreateTransientBuffer(static_cast<uint32_t>(indices.size()), indices.data());   // one draw's worth: the frame ring
+            if (deferred)
+                d.index_buffer = gpu::CreateBuffer(static_cast<uint32_t>(indices.size()), false, indices.data());
+            else
+                d.index_buffer = gpu::CreateTransientBuffer(static_cast<uint32_t>(indices.size()), indices.data());
             d.index_offset = 0;
             d.index_format = s.ib_format;
             args.start = 0;
@@ -822,6 +826,10 @@ void BindStream(CtxState& s, gpu::DrawState& d, gpu::DrawArgs& args) {
                 first_vertex = static_cast<int64_t>(lo) + args.base_vertex;
                 last_vertex = static_cast<int64_t>(hi) + args.base_vertex;
                 args.base_vertex = -static_cast<int32_t>(lo);
+            }
+            if (rd) {
+                rd->ib_addr = at;
+                rd->ib_size = static_cast<uint32_t>(args.count) * size;
             }
         }
     } else if (!args.indexed) {
@@ -844,9 +852,13 @@ void BindStream(CtxState& s, gpu::DrawState& d, gpu::DrawArgs& args) {
         if (per_instance) { lo = 0; hi = indirect ? size : std::min<uint64_t>(size, (static_cast<uint64_t>(args.start_instance) + args.instances) * stride); }
         else { lo = static_cast<uint64_t>(std::max<int64_t>(first_vertex, 0)) * stride; hi = std::min<uint64_t>(size, static_cast<uint64_t>(std::max<int64_t>(last_vertex + 1, 0)) * stride); }
         if (hi <= lo) continue;
-        d.vb[k].buffer = CopyOfHost(base + lo, static_cast<uint32_t>(hi - lo));
+        d.vb[k].buffer = CopyOfHost(base + lo, static_cast<uint32_t>(hi - lo), deferred);
         d.vb[k].stride = stride;
         d.vb[k].offset = 0;
+        if (rd) {
+            rd->vb_addr[k] = base + lo;
+            rd->vb_size[k] = static_cast<uint32_t>(hi - lo);
+        }
     }
     for (int stage = 0; stage < 2; ++stage) {
         const auto& sh = stage == 0 ? d.vs : d.ps;
@@ -868,7 +880,7 @@ void BindStream(CtxState& s, gpu::DrawState& d, gpu::DrawArgs& args) {
             }
             uint32_t size = std::min<uint32_t>(v->dw[2], 65536);
             if (rf.cb_size[k] != 0) size = std::min<uint32_t>(size, rf.cb_size[k] * 16);   // the shader reads no more than it declared
-            d.cb[stage][k].buffer = CopyOfHost(address(*v), size);
+            d.cb[stage][k].buffer = CopyOfHost(address(*v), size, deferred);
             if (!d.cb[stage][k].buffer) {
                 static std::atomic<int> shown {0};
                 if (std::getenv("UTSURO_REGLOG") != nullptr && shown++ < 12)
@@ -876,6 +888,10 @@ void BindStream(CtxState& s, gpu::DrawState& d, gpu::DrawArgs& args) {
             }
             d.cb[stage][k].offset = 0;
             d.cb[stage][k].size = size;
+            if (rd) {
+                rd->cb_addr[stage][k] = address(*v);
+                rd->cb_size[stage][k] = size;
+            }
         }
         for (uint32_t k = 0; k < 16; ++k) {
             if (rf.textures & (1u << k)) {
@@ -894,7 +910,7 @@ void BindStream(CtxState& s, gpu::DrawState& d, gpu::DrawArgs& args) {
     }
 }
 
-gpu::DrawState Snapshot(Obj& ctx, CtxState& s, gpu::DrawArgs& args) {
+gpu::DrawState Snapshot(Obj& ctx, CtxState& s, gpu::DrawArgs& args, RecordedDraw* rd = nullptr) {
     gpu::DrawState d;
     if (!ctx.blocks.empty()) {
         const auto* u = reinterpret_cast<const uint8_t*>(ctx.blocks[0] + kUserDataOffset);
@@ -981,7 +997,8 @@ gpu::DrawState Snapshot(Obj& ctx, CtxState& s, gpu::DrawArgs& args) {
     std::memcpy(d.viewports, s.viewports, sizeof d.viewports);
     d.num_scissors = s.num_scissors;
     std::memcpy(d.scissors, s.scissors, sizeof d.scissors);
-    BindStream(s, d, args);
+    const bool deferred = ctx.u64["deferred"] != 0;
+    BindStream(s, d, args, deferred, rd);
     return d;
 }
 
@@ -1017,7 +1034,10 @@ void DoDraw(Obj& ctx, const gpu::DrawArgs& args_in) {
     gpu::DrawArgs args = args_in;
     CtxState& state = StateOf(ctx);
     ParseStream(ctx, state);
-    const gpu::DrawState d = Snapshot(ctx, state, args);
+    const bool deferred = ctx.u64["deferred"] != 0;
+    RecordedDraw rd_storage;
+    RecordedDraw* rd_ptr = deferred ? &rd_storage : nullptr;
+    const gpu::DrawState d = Snapshot(ctx, state, args, rd_ptr);
     if (static const bool log = std::getenv("UTSURO_STREAMLOG") != nullptr; log) {
         static std::atomic<int> n {0};
         if (n++ < 14 && d.vs && d.ps) {
@@ -1067,7 +1087,9 @@ void DoDraw(Obj& ctx, const gpu::DrawArgs& args_in) {
         }
     }
     if (ctx.u64["deferred"] != 0) {
-        state.recorded.push_back({d, args});
+        rd_storage.state = d;
+        rd_storage.args = args;
+        state.recorded.push_back(std::move(rd_storage));
         Tally("~draws recorded");
         if (state.recorded.size() == 2048) UT_WARN("d3d: deferred context %llu holds 2048 draws and was never finished", (unsigned long long)ctx.id);
         return;
@@ -1648,6 +1670,27 @@ void RegisterGpuOverrides() {
             if (d.num_viewports == 0) {
                 d.num_viewports = imm.num_viewports;
                 std::memcpy(d.viewports, imm.viewports, sizeof d.viewports);
+            }
+            // Dynamic re-snapshot of constant buffers from guest memory for the current frame
+            for (int stage = 0; stage < 2; ++stage) {
+                for (int k = 0; k < 14; ++k) {
+                    if (rd.cb_addr[stage][k] != 0 && rd.cb_size[stage][k] != 0) {
+                        if (auto b = CopyOfHost(rd.cb_addr[stage][k], rd.cb_size[stage][k])) {
+                            d.cb[stage][k].buffer = b;
+                            d.cb[stage][k].offset = 0;
+                            d.cb[stage][k].size = rd.cb_size[stage][k];
+                        }
+                    }
+                }
+            }
+            // Dynamic re-snapshot of vertex buffers from guest memory
+            for (int k = 0; k < 8; ++k) {
+                if (rd.vb_addr[k] != 0 && rd.vb_size[k] != 0) {
+                    if (auto b = CopyOfHost(rd.vb_addr[k], rd.vb_size[k])) {
+                        d.vb[k].buffer = b;
+                        d.vb[k].offset = 0;
+                    }
+                }
             }
             gpu::Draw(d, rd.args);
         }
