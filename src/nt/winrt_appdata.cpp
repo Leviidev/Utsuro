@@ -101,7 +101,9 @@ void RegisterAppData(Runtime& rt) {
     // Windows.Xbox.Networking.SecureDeviceAssociationTemplate.GetTemplateByName: the templates the title's manifest declares. The
     // title registers for incoming associations on them at start-up; there is no secure-device network behind them here.
     rt.Override("ISecureDeviceAssociationTemplateStatics", "GetTemplateByName", [](Call& c) -> uint32_t {
+        static std::mutex m;
         static std::map<std::u16string, Obj*> templates;
+        std::scoped_lock lock {m};
         Runtime& r = Runtime::Get();
         const std::u16string name = Runtime::ReadHString(c.Arg(0));
         Obj*& o = templates[name];

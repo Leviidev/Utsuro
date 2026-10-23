@@ -431,7 +431,7 @@ bool Runtime::Dispatch(NtThread& thread, uint32_t number, SyscallArgs& args, uin
     auto [iface, slot] = method_table_[number - kBase];
     const uint64_t self = args[0];
     Obj* obj = nullptr;
-    if (self > 0x10000) {
+    if (self > 0x10000 && kernel_->Vm().Contains(self, 16)) {
         const uint64_t id = reinterpret_cast<const uint64_t*>(self)[1];
         std::scoped_lock lock {mutex_};
         auto it = objects_.find(id);

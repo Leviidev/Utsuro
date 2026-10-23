@@ -207,8 +207,10 @@ std::map<std::string, uint64_t> g_state_cache;   // identical state descriptions
 uint32_t Fallback(Call& c) {
     const winrt::Method& m = c.iface.methods[c.slot];
     {
-        static std::map<std::string, bool> seen;
-        if (seen.emplace(c.iface.name + "::" + m.name, true).second) UT_INFO("d3d: first call of %s::%s from %s", c.iface.name.c_str(), m.name.c_str(), c.args.rsp != 0 ? c.kernel.Describe(*reinterpret_cast<uint64_t*>(c.args.rsp)).c_str() : "?");
+        static std::mutex seen_mutex;
+        static std::set<std::string> seen;
+        std::scoped_lock lock {seen_mutex};
+        if (seen.insert(c.iface.name + "::" + m.name).second) UT_INFO("d3d: first call of %s::%s from %s", c.iface.name.c_str(), m.name.c_str(), c.args.rsp != 0 ? c.kernel.Describe(*reinterpret_cast<uint64_t*>(c.args.rsp)).c_str() : "?");
     }
     if (m.out_index >= 0 && g_defs.count(m.out_type)) {
         auto* out = c.Ptr<uint64_t>(m.out_index);
@@ -355,6 +357,17 @@ static void Setup(Runtime& rt, uint32_t os_timestamp, bool old_abi) {
     if (g_ifaces.count("ID3D11PerformanceContextX") && g_ifaces.count("ID3D11UserDefinedAnnotationX"))
         g_ifaces["ID3D11PerformanceContextX"]->aliases.push_back(g_ifaces["ID3D11UserDefinedAnnotationX"]->iid);
 
+    OverrideAll("GarbageCollect", [](Call&) -> uint32_t { return kSOk; });
+    OverrideAll("SetGammaControl", [](Call&) -> uint32_t { return kSOk; });
+    OverrideAll("GetGammaControl", [](Call&) -> uint32_t { return kSOk; });
+    OverrideAll("GetGammaControlCapabilities", [](Call& c) -> uint32_t {
+        if (auto* caps = c.Ptr<uint32_t>(0)) {
+            std::memset(caps, 0, 4116);
+            caps[0] = 1;
+            caps[3] = 1025;
+        }
+        return kSOk;
+    });
     OverrideAll("GetFeatureLevel", [](Call&) -> uint32_t { return kFeatureLevel11_1; });
     OverrideAll("GetCreationFlags", [](Call&) -> uint32_t { return 0; });
     OverrideAll("GetImmediateContext", [](Call& c) -> uint32_t {
