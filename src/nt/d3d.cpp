@@ -611,26 +611,36 @@ static void Setup(Runtime& rt, uint32_t os_timestamp, bool old_abi) {
     OverrideAll("IASetIndexBuffer", [](Call& c) -> uint32_t {
         auto& s = StateOf(c.obj);
         // Older console builds take the format first; from 6.2.13xxx the buffer comes first. A host object pointer tells them apart.
-        const bool buffer_first = Runtime::Get().FromPointer(c.Arg(0)) != nullptr;
+        // A format is small (0, 1, 42, 57), while a buffer pointer is a memory address (> 0x10000).
+        const bool buffer_first = Runtime::Get().FromPointer(c.Arg(0)) != nullptr || c.Arg(0) > 100;
         const uint64_t buffer = buffer_first ? c.Arg(0) : c.Arg(1);
         const uint64_t format = buffer_first ? c.Arg(1) : c.Arg(0);
         s.ib = buffer;
         s.ib_address = 0;
-        s.ib_format = (format & 0xFF) == 0 ? 57 : 42;
+        s.ib_format = ((format & 0xFF) == 0 || (format & 0xFF) == 57) ? 57 : 42;
         s.ib_offset = static_cast<uint32_t>(c.Arg(2));
-        if (Res* r = ResAt(s.ib); r != nullptr && !r->buffer && r->host_ptr != 0) s.ib_address = r->host_ptr + s.ib_offset;
+        if (Res* r = ResAt(s.ib)) {
+            if (!r->buffer && r->host_ptr != 0) s.ib_address = r->host_ptr + s.ib_offset;
+        } else if (s.ib > 0x10000) {
+            s.ib_address = s.ib + s.ib_offset;
+        }
         return 0;
     });
     // IASetFastIndexBuffer(HardwareIndexFormat, pIndexBuffer): the same without an offset.
     OverrideAll("IASetFastIndexBuffer", [](Call& c) -> uint32_t {
         auto& s = StateOf(c.obj);
-        const bool buffer_first = Runtime::Get().FromPointer(c.Arg(0)) != nullptr;
+        const bool buffer_first = Runtime::Get().FromPointer(c.Arg(0)) != nullptr || c.Arg(0) > 100;
         s.ib = buffer_first ? c.Arg(0) : c.Arg(1);
+        const uint64_t format = buffer_first ? c.Arg(1) : c.Arg(0);
         s.ib_address = 0;
-        s.ib_format = ((buffer_first ? c.Arg(1) : c.Arg(0)) & 0xFF) == 0 ? 57 : 42;
+        s.ib_format = ((format & 0xFF) == 0 || (format & 0xFF) == 57) ? 57 : 42;
         s.ib_offset = 0;
         // A placement buffer has no host GPU buffer of its own: its indices are read from its memory at draw time.
-        if (Res* r = ResAt(s.ib); r != nullptr && !r->buffer && r->host_ptr != 0) s.ib_address = r->host_ptr;
+        if (Res* r = ResAt(s.ib)) {
+            if (!r->buffer && r->host_ptr != 0) s.ib_address = r->host_ptr;
+        } else if (s.ib > 0x10000) {
+            s.ib_address = s.ib;
+        }
         return 0;
     });
     OverrideAll("IAGetIndexBuffer", [](Call& c) -> uint32_t {

@@ -413,6 +413,7 @@ MTLSamplerAddressMode Address(uint32_t a) {
 std::string Key(const void* p, size_t n) { return std::string(static_cast<const char*>(p), n); }
 
 id<MTLBuffer> NewBuffer(size_t size) {
+    if (g == nullptr || g->device == nil) return nil;
     id<MTLBuffer> b = [g->device newBufferWithLength:std::max<size_t>(size, 16) options:MTLResourceStorageModeShared];
     return b;
 }
@@ -430,7 +431,7 @@ id<MTLCommandBuffer> Command() {
 /// A counter word for append/consume UAVs bound without one (their counts go nowhere).
 id<MTLBuffer> ScratchCounter() {
     static id<MTLBuffer> b = nil;
-    if (b == nil) { b = NewBuffer(256); std::memset(b.contents, 0, 256); }
+    if (b == nil) { b = NewBuffer(256); if (b && b.contents) std::memset(b.contents, 0, 256); }
     return b;
 }
 
@@ -903,10 +904,12 @@ void EvictRing(int f) {
         auto b = w.lock();
         if (!b || b->ring_frame != f) continue;
         id<MTLBuffer> own = NewBuffer(b->size);
-        std::memcpy(own.contents, static_cast<uint8_t*>(b->mtl.contents) + b->offset, b->size);
-        b->mtl = own;
-        b->offset = 0;
-        b->ring_frame = -1;
+        if (own != nil && own.contents != nullptr && b->mtl != nil && b->mtl.contents != nullptr) {
+            std::memcpy(own.contents, static_cast<uint8_t*>(b->mtl.contents) + b->offset, b->size);
+            b->mtl = own;
+            b->offset = 0;
+            b->ring_frame = -1;
+        }
     }
     r.live.clear();
     r.head = 0;
@@ -952,8 +955,10 @@ std::shared_ptr<Buffer> CreateBuffer(uint32_t size, bool dynamic, const void* in
     b->size = size;
     b->dynamic = dynamic;
     b->mtl = NewBuffer(size);
-    if (initial != nullptr) std::memcpy(b->mtl.contents, initial, size);
-    else std::memset(b->mtl.contents, 0, size);
+    if (b->mtl != nil && b->mtl.contents != nullptr) {
+        if (initial != nullptr) std::memcpy(b->mtl.contents, initial, size);
+        else std::memset(b->mtl.contents, 0, size);
+    }
     return b;
 }
 
@@ -964,15 +969,22 @@ std::shared_ptr<Buffer> CreateTransientBuffer(uint32_t size, const void* initial
     b->size = size;
     b->dynamic = false;
     if (uint8_t* at = RingAlloc(b, size)) {
-        std::memcpy(at, initial, size);
+        if (initial != nullptr) std::memcpy(at, initial, size);
+        else std::memset(at, 0, size);
         return b;
     }
     b->mtl = NewBuffer(size);
-    std::memcpy(b->mtl.contents, initial, size);
+    if (b->mtl != nil && b->mtl.contents != nullptr) {
+        if (initial != nullptr) std::memcpy(b->mtl.contents, initial, size);
+        else std::memset(b->mtl.contents, 0, size);
+    }
     return b;
 }
 
-uint8_t* BufferData(Buffer& b) { return static_cast<uint8_t*>(b.mtl.contents) + b.offset; }
+uint8_t* BufferData(Buffer& b) {
+    if (b.mtl == nil || b.mtl.contents == nullptr) return nullptr;
+    return static_cast<uint8_t*>(b.mtl.contents) + b.offset;
+}
 uint32_t BufferSize(Buffer& b) { return b.size; }
 
 uint8_t* RenameBuffer(const std::shared_ptr<Buffer>& bp, bool keep) {
@@ -981,16 +993,19 @@ uint8_t* RenameBuffer(const std::shared_ptr<Buffer>& bp, bool keep) {
     uint8_t* old = BufferData(b);
     const uint32_t size = b.size;
     if (uint8_t* fresh = RingAlloc(bp, size)) {
-        if (keep) std::memcpy(fresh, old, size);
+        if (keep && old != nullptr) std::memcpy(fresh, old, size);
         return fresh;
     }
     // Ring exhausted: storage of its own.
     id<MTLBuffer> own = NewBuffer(size);
-    if (keep) std::memcpy(own.contents, old, size);
-    b.mtl = own;
-    b.offset = 0;
-    b.ring_frame = -1;
-    return static_cast<uint8_t*>(own.contents);
+    if (own != nil && own.contents != nullptr) {
+        if (keep && old != nullptr) std::memcpy(own.contents, old, size);
+        b.mtl = own;
+        b.offset = 0;
+        b.ring_frame = -1;
+        return static_cast<uint8_t*>(own.contents);
+    }
+    return nullptr;
 }
 
 std::shared_ptr<Texture> CreateTexture(const TextureDesc& desc) {
@@ -1423,17 +1438,17 @@ void Draw(const DrawState& st, const DrawArgs& args) {
                 const BufferBinding& b = st.cb[stage][i];
                 id<MTLBuffer> buf = b.buffer ? b.buffer->mtl : g->zero_cb;
                 NSUInteger off = b.buffer ? b.buffer->offset + b.offset : 0;
-                if (buf == nil) { if (g->zero_cb == nil) { g->zero_cb = NewBuffer(65536); std::memset(g->zero_cb.contents, 0, 65536); } buf = g->zero_cb; off = 0; }
+                if (buf == nil) { if (g->zero_cb == nil) { g->zero_cb = NewBuffer(65536); if (g->zero_cb && g->zero_cb.contents) std::memset(g->zero_cb.contents, 0, 65536); } buf = g->zero_cb; off = 0; }
                 if (stage == 0) [e setVertexBuffer:buf offset:off atIndex:i];
                 else [e setFragmentBuffer:buf offset:off atIndex:i];
             }
             if (stage == 1 && rf.uavs != 0) {
                 // Pixel-shader UAVs: textures at 64 + slot, buffers at their pooled index.
-                if (g->zero_cb == nil) { g->zero_cb = NewBuffer(65536); std::memset(g->zero_cb.contents, 0, 65536); }
+                if (g->zero_cb == nil) { g->zero_cb = NewBuffer(65536); if (g->zero_cb && g->zero_cb.contents) std::memset(g->zero_cb.contents, 0, 65536); }
                 for (int i = 0; i < 64; ++i) {
                     if (!(rf.uavs & (1u << i))) continue;
                     const auto& v = st.ps_uav[i];
-                    if (rf.uav_index[i] != 0) [e setFragmentBuffer:(v && v->buffer) ? v->buffer->mtl : g->zero_cb offset:(v && v->buffer) ? v->buffer->offset : 0 atIndex:rf.uav_index[i]];
+                    if (rf.uav_index[i] != 0) [e setFragmentBuffer:(v && v->buffer && v->buffer->mtl != nil) ? v->buffer->mtl : g->zero_cb offset:(v && v->buffer && v->buffer->mtl != nil) ? v->buffer->offset : 0 atIndex:rf.uav_index[i]];
                     else if (v && v->texture) [e setFragmentTexture:ViewOf(*v->texture, v->desc, false) atIndex:64 + i];
                     else [e setFragmentTexture:DummyTexture(3) atIndex:64 + i];
                     if (rf.counter_index[i] != 0) {
@@ -1447,7 +1462,7 @@ void Draw(const DrawState& st, const DrawArgs& args) {
                 if (rf.texture_dimension[i] == 12) {
                     id<MTLBuffer> buf = (st.srv[stage][i] && st.srv[stage][i]->buffer) ? st.srv[stage][i]->buffer->mtl : g->zero_cb;
                     NSUInteger off = (st.srv[stage][i] && st.srv[stage][i]->buffer) ? st.srv[stage][i]->buffer->offset : 0;
-                    if (buf == nil) { if (g->zero_cb == nil) { g->zero_cb = NewBuffer(65536); std::memset(g->zero_cb.contents, 0, 65536); } buf = g->zero_cb; off = 0; }
+                    if (buf == nil) { if (g->zero_cb == nil) { g->zero_cb = NewBuffer(65536); if (g->zero_cb && g->zero_cb.contents) std::memset(g->zero_cb.contents, 0, 65536); } buf = g->zero_cb; off = 0; }
                     const uint32_t buf_idx = rf.buffer_index[i] != 0 ? rf.buffer_index[i] : ((stage == 0) ? (24 + i) : (14 + i));
                     if (stage == 0) [e setVertexBuffer:buf offset:off atIndex:buf_idx];
                     else [e setFragmentBuffer:buf offset:off atIndex:buf_idx];
@@ -1466,7 +1481,7 @@ void Draw(const DrawState& st, const DrawArgs& args) {
                 if (rf.texture_dimension[slot] == 12) {
                     id<MTLBuffer> buf = (view && view->buffer) ? view->buffer->mtl : nil;
                     NSUInteger off = (view && view->buffer) ? view->buffer->offset : 0;
-                    if (buf == nil) { if (g->zero_cb == nil) { g->zero_cb = NewBuffer(65536); std::memset(g->zero_cb.contents, 0, 65536); } buf = g->zero_cb; off = 0; }
+                    if (buf == nil) { if (g->zero_cb == nil) { g->zero_cb = NewBuffer(65536); if (g->zero_cb && g->zero_cb.contents) std::memset(g->zero_cb.contents, 0, 65536); } buf = g->zero_cb; off = 0; }
                     if (stage == 0) [e setVertexBuffer:buf offset:off atIndex:rf.buffer_index[slot]];
                     else [e setFragmentBuffer:buf offset:off atIndex:rf.buffer_index[slot]];
                 } else {
@@ -1486,7 +1501,10 @@ void Draw(const DrawState& st, const DrawArgs& args) {
         }
         [e setVertexBuffer:g->null_buffer offset:0 atIndex:14];
         for (int i = 0; i < 16; ++i) {
-            if (!st.vb[i].buffer) continue;
+            if (!st.vb[i].buffer || st.vb[i].buffer->mtl == nil) {
+                [e setVertexBuffer:g->null_buffer offset:0 atIndex:15 + i];
+                continue;
+            }
             [e setVertexBuffer:st.vb[i].buffer->mtl offset:st.vb[i].buffer->offset + st.vb[i].offset atIndex:15 + i];
         }
 
@@ -1584,7 +1602,7 @@ void Draw(const DrawState& st, const DrawArgs& args) {
         if (args.indirect && args.indirect->mtl != nil) {
             // D3D's indirect argument records are laid out as Metal's MTLDraw(Indexed)PrimitivesIndirectArguments.
             if (args.indexed) {
-                if (!st.index_buffer) { ++g->stats.no_ib; return; }
+                if (!st.index_buffer || st.index_buffer->mtl == nil) { ++g->stats.no_ib; return; }
                 const bool wide = st.index_format == 42;
                 [e drawIndexedPrimitives:prim indexType:wide ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16 indexBuffer:st.index_buffer->mtl
                        indexBufferOffset:st.index_buffer->offset + st.index_offset indirectBuffer:args.indirect->mtl
@@ -1593,13 +1611,24 @@ void Draw(const DrawState& st, const DrawArgs& args) {
                 [e drawPrimitives:prim indirectBuffer:args.indirect->mtl indirectBufferOffset:args.indirect->offset + args.indirect_offset];
             }
         } else if (args.indexed) {
-            if (!st.index_buffer) { ++g->stats.no_ib; return; }
+            if (!st.index_buffer || st.index_buffer->mtl == nil) { ++g->stats.no_ib; return; }
+            if (args.count == 0) return;
             const bool wide = st.index_format == 42;
             const NSUInteger isize = wide ? 4 : 2;
+            const NSUInteger offset = st.index_buffer->offset + st.index_offset + args.start * isize;
+            const NSUInteger required = offset + args.count * isize;
+            if (st.index_buffer->mtl.length < required) {
+                static std::atomic<int> shown {0};
+                if (shown++ < 10) UT_WARN("gpu: index buffer too small: length %lu < required %lu (offset %lu count %u)",
+                                          (unsigned long)st.index_buffer->mtl.length, (unsigned long)required, (unsigned long)offset, args.count);
+                ++g->stats.no_ib;
+                return;
+            }
             [e drawIndexedPrimitives:prim indexCount:args.count indexType:wide ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16
-                         indexBuffer:st.index_buffer->mtl indexBufferOffset:st.index_buffer->offset + st.index_offset + args.start * isize
+                         indexBuffer:st.index_buffer->mtl indexBufferOffset:offset
                        instanceCount:args.instances baseVertex:args.base_vertex baseInstance:args.start_instance];
         } else {
+            if (args.count == 0) return;
             [e drawPrimitives:prim vertexStart:args.start vertexCount:args.count instanceCount:args.instances baseInstance:args.start_instance];
         }
         if (++g->draws_in_command >= 1000) {
@@ -1720,7 +1749,7 @@ void Dispatch(const DispatchState& st, uint32_t x, uint32_t y, uint32_t z) {
             id<MTLBuffer> buf = b.buffer ? b.buffer->mtl : g->zero_cb;
             NSUInteger off = b.buffer ? b.buffer->offset + b.offset : 0;
             if (buf == nil) {
-                if (g->zero_cb == nil) { g->zero_cb = NewBuffer(65536); std::memset(g->zero_cb.contents, 0, 65536); }
+                if (g->zero_cb == nil) { g->zero_cb = NewBuffer(65536); if (g->zero_cb && g->zero_cb.contents) std::memset(g->zero_cb.contents, 0, 65536); }
                 buf = g->zero_cb; off = 0;
             }
             [ce setBuffer:buf offset:off atIndex:i];
@@ -1733,7 +1762,7 @@ void Dispatch(const DispatchState& st, uint32_t x, uint32_t y, uint32_t z) {
                 id<MTLBuffer> buf = (st.srv[i] && st.srv[i]->buffer) ? st.srv[i]->buffer->mtl : g->zero_cb;
                 NSUInteger off = (st.srv[i] && st.srv[i]->buffer) ? st.srv[i]->buffer->offset : 0;
                 if (buf == nil) {
-                    if (g->zero_cb == nil) { g->zero_cb = NewBuffer(65536); std::memset(g->zero_cb.contents, 0, 65536); }
+                    if (g->zero_cb == nil) { g->zero_cb = NewBuffer(65536); if (g->zero_cb && g->zero_cb.contents) std::memset(g->zero_cb.contents, 0, 65536); }
                     buf = g->zero_cb; off = 0;
                 }
                 [ce setBuffer:buf offset:off atIndex:(rf.buffer_index[i] != 0 ? rf.buffer_index[i] : 14 + i)];
@@ -1752,7 +1781,7 @@ void Dispatch(const DispatchState& st, uint32_t x, uint32_t y, uint32_t z) {
             if (rf.texture_dimension[slot] == 12) {
                 id<MTLBuffer> buf = (view && view->buffer) ? view->buffer->mtl : nil;
                 NSUInteger off = (view && view->buffer) ? view->buffer->offset : 0;
-                if (buf == nil) { if (g->zero_cb == nil) { g->zero_cb = NewBuffer(65536); std::memset(g->zero_cb.contents, 0, 65536); } buf = g->zero_cb; off = 0; }
+                if (buf == nil) { if (g->zero_cb == nil) { g->zero_cb = NewBuffer(65536); if (g->zero_cb && g->zero_cb.contents) std::memset(g->zero_cb.contents, 0, 65536); } buf = g->zero_cb; off = 0; }
                 [ce setBuffer:buf offset:off atIndex:rf.buffer_index[slot]];
             } else {
                 id<MTLTexture> tex = nil;
@@ -1782,7 +1811,7 @@ void Dispatch(const DispatchState& st, uint32_t x, uint32_t y, uint32_t z) {
                     [ce setTexture:tex atIndex:64 + i];
                 }
             } else {
-                if (g->zero_cb == nil) { g->zero_cb = NewBuffer(65536); std::memset(g->zero_cb.contents, 0, 65536); }
+                if (g->zero_cb == nil) { g->zero_cb = NewBuffer(65536); if (g->zero_cb && g->zero_cb.contents) std::memset(g->zero_cb.contents, 0, 65536); }
                 [ce setBuffer:g->zero_cb offset:0 atIndex:(rf.uav_index[i] != 0 ? rf.uav_index[i] : 20 + i)];
                 [ce setTexture:DummyTexture(3) atIndex:64 + i];
             }

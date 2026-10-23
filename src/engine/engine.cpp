@@ -621,11 +621,16 @@ bool EndFaultedGuestThread(int signal, siginfo_t* info, void* raw_context) {
             UT_WARN("fault (signal %d) inside the emulator at %p while running guest "
                         "code; ending this guest process",
                         signal, info == nullptr ? nullptr : info->si_addr);
-            if (std::getenv("UTSURO_HOSTBT") != nullptr) {
-                // Debugging aid (not signal-safe): where in the host this happened.
+            {
+                // Where in the host this happened.
                 void* frames[40];
                 const int n = backtrace(frames, 40);
                 backtrace_symbols_fd(frames, n, 2);
+                char** strs = backtrace_symbols(frames, n);
+                if (strs) {
+                    for (int i = 0; i < n; ++i) UT_WARN("  host #%d %s", i, strs[i]);
+                    free(strs);
+                }
             }
             // The dispatcher has spilled the guest registers to the frame by the time the
             // decoder runs, so they are current here.

@@ -789,9 +789,6 @@ void ParseStream(Obj& ctx, CtxState& s) {
 
 /// Resolves what the packets bound into the draw: vertex streams, constant buffers, textures and samplers.
 void BindStream(CtxState& s, gpu::DrawState& d, gpu::DrawArgs& args, bool deferred = false, RecordedDraw* rd = nullptr) {
-    if (s.regs.empty()) return;
-    auto get = [&](uint32_t reg) -> const CtxState::Reg* { auto it = s.regs.find(reg); return it == s.regs.end() ? nullptr : &it->second; };
-    auto address = [](const CtxState::Reg& r) { return static_cast<uint64_t>(r.dw[0]) | (static_cast<uint64_t>(r.dw[1] & 0xFFFF) << 32); };
 
     // The indices the draw reads, and with them the vertices. (An indirect draw's counts are on the GPU: whole streams.)
     const bool indirect = args.indirect != nullptr;
@@ -835,6 +832,9 @@ void BindStream(CtxState& s, gpu::DrawState& d, gpu::DrawArgs& args, bool deferr
     } else if (!args.indexed) {
         args.start = 0;
     }
+    if (s.regs.empty()) return;
+    auto get = [&](uint32_t reg) -> const CtxState::Reg* { auto it = s.regs.find(reg); return it == s.regs.end() ? nullptr : &it->second; };
+    auto address = [](const CtxState::Reg& r) { return static_cast<uint64_t>(r.dw[0]) | (static_cast<uint64_t>(r.dw[1] & 0xFFFF) << 32); };
     Res* layout = ResAt(s.layout);
     for (uint32_t k = 0; k < 8; ++k) {
         const auto* v = get(kRegVertex + 0x10 * k);
@@ -961,14 +961,26 @@ gpu::DrawState Snapshot(Obj& ctx, CtxState& s, gpu::DrawArgs& args, RecordedDraw
             }
         }
     }
+    const bool deferred = ctx.u64["deferred"] != 0;
     for (int i = 0; i < 16; ++i) {
         if (Res* r = ResAt(s.vb[i])) {
-            d.vb[i].buffer = r->buffer;
+            if (r->buffer) {
+                d.vb[i].buffer = r->buffer;
+            } else if (r->host_ptr != 0 && s.stride[i] != 0) {
+                const uint32_t size = r->host_size ? r->host_size : 65536;
+                d.vb[i].buffer = CopyOfHost(r->host_ptr, size, deferred);
+            }
             d.vb[i].stride = s.stride[i];
             d.vb[i].offset = s.voffset[i];
         }
     }
-    if (Res* r = ResAt(s.ib)) d.index_buffer = r->buffer;
+    if (Res* r = ResAt(s.ib)) {
+        if (r->buffer) {
+            d.index_buffer = r->buffer;
+        } else if (r->host_ptr != 0) {
+            s.ib_address = r->host_ptr + s.ib_offset;
+        }
+    }
     d.index_format = s.ib_format;
     d.index_offset = s.ib_offset;
     d.topology = s.topology;
@@ -997,7 +1009,6 @@ gpu::DrawState Snapshot(Obj& ctx, CtxState& s, gpu::DrawArgs& args, RecordedDraw
     std::memcpy(d.viewports, s.viewports, sizeof d.viewports);
     d.num_scissors = s.num_scissors;
     std::memcpy(d.scissors, s.scissors, sizeof d.scissors);
-    const bool deferred = ctx.u64["deferred"] != 0;
     BindStream(s, d, args, deferred, rd);
     return d;
 }
