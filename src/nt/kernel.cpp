@@ -1,3 +1,4 @@
+namespace utsuro::gpu { bool IsTurbo(); }
 #include "nt/kernel.h"
 #include <atomic>
 #include <pthread/qos.h>
@@ -74,7 +75,16 @@ FileObject::~FileObject() {
 
 int64_t Kernel::MonotonicNs() {
     static mach_timebase_info_data_t tb = [] { mach_timebase_info_data_t t; mach_timebase_info(&t); return t; }();
-    return static_cast<int64_t>(mach_absolute_time() * tb.numer / tb.denom);
+    const int64_t real = static_cast<int64_t>(mach_absolute_time() * tb.numer / tb.denom);
+    static std::atomic<int64_t> last_real {real};
+    static std::atomic<int64_t> virt_time {real};
+    int64_t prev = last_real.exchange(real);
+    int64_t dt = real - prev;
+    if (dt > 0) {
+        const double mult = gpu::IsTurbo() ? 5.0 : 1.0;
+        virt_time.fetch_add(static_cast<int64_t>(dt * mult));
+    }
+    return virt_time.load();
 }
 
 int64_t Kernel::NtSystemTime() {

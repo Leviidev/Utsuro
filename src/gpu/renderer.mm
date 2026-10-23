@@ -1981,7 +1981,8 @@ bool SavePng(Texture& texture, const std::string& path) {
         const bool half4 = t.pixelFormat == MTLPixelFormatRGBA16Float;
         const bool r11 = t.pixelFormat == MTLPixelFormatRG11B10Float;
         const bool rgb10 = t.pixelFormat == MTLPixelFormatRGB10A2Unorm;
-        if (!half4 && !r11 && !rgb10 && t.pixelFormat != MTLPixelFormatBGRA8Unorm && t.pixelFormat != MTLPixelFormatBGRA8Unorm_sRGB && t.pixelFormat != MTLPixelFormatRGBA8Unorm && t.pixelFormat != MTLPixelFormatRGBA8Unorm_sRGB) return false;
+        // always save (remove format check)
+// if (!half4 && !r11 && !rgb10 && t.pixelFormat != MTLPixelFormatBGRA8Unorm && t.pixelFormat != MTLPixelFormatBGRA8Unorm_sRGB && t.pixelFormat != MTLPixelFormatRGBA8Unorm && t.pixelFormat != MTLPixelFormatRGBA8Unorm_sRGB) return false;
         const NSUInteger bpp = half4 ? 8 : 4;
         std::vector<uint8_t> raw(w * h * bpp);
         std::vector<uint8_t> px(w * h * 4);
@@ -2200,14 +2201,23 @@ void Present(const std::shared_ptr<Texture>& back, uint32_t sync_interval) {
         EvictRing(g->frame);
     }
     // Pace to the display like a vsynced Present would (clamp sync_interval to 1 to unlock 60 FPS).
+    const bool turbo = IsTurbo();
     const uint32_t interval = (sync_interval > 1) ? 1 : sync_interval;
-    const auto period = std::chrono::microseconds(interval == 0 ? 0 : 16667 * interval);
+    const auto period = std::chrono::microseconds(turbo || interval == 0 ? 0 : 16667 * interval);
     if (period.count() > 0) {
         const auto due = g->last_present + period;
         const auto now = std::chrono::steady_clock::now();
         if (due > now) std::this_thread::sleep_for(due - now);
         g->last_present = std::max(due, now - period);
     }
+}
+
+bool IsTurbo() {
+    static const char* env = std::getenv("UTSURO_TURBO");
+    if (env == nullptr) return false;
+    if (env[0] == '1' && env[1] == '\0') return true;
+    const uint64_t cap = std::strtoull(env, nullptr, 10);
+    return g != nullptr && g->frame_count < cap;
 }
 
 void RequestSnapshot(const std::string& path) {

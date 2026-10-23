@@ -926,13 +926,11 @@ gpu::DrawState Snapshot(Obj& ctx, CtxState& s, gpu::DrawArgs& args) {
             }
         }
         for (int i = 0; i < 16; ++i) {
-            if (rf.textures & (1u << i)) {
-                if (Res* r = ResAt(s.srv[src][i])) {
-                    Res* target = r->base ? r->base : r;
-                    if (target->placement != 0 && ((target->placement_dirty && g_frame.load() >= target->next_try_frame) || PlacementChanged(*target)))
-                        UploadPlacement(*target);
-                    d.srv[stage][i] = r->view;
-                }
+            if (Res* r = ResAt(s.srv[src][i])) {
+                Res* target = r->base ? r->base : r;
+                if (target->placement != 0 && ((target->placement_dirty && g_frame.load() >= target->next_try_frame) || PlacementChanged(*target)))
+                    UploadPlacement(*target);
+                d.srv[stage][i] = r->view;
             }
             if (rf.samplers & (1u << i)) {
                 if (Res* r = ResAt(s.sampler[src][i])) d.sampler[stage][i] = r->state;

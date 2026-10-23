@@ -1,3 +1,4 @@
+#include "gpu/renderer.h"
 // hle.cpp -- exports of guest DLLs that are implemented by the host instead. The entry of
 // the guest function is overwritten with `mov r10, rcx; mov eax, N; syscall; ret`, which
 // lands in Kernel::Dispatch like any other syscall; the host function's result is rax.
@@ -185,7 +186,8 @@ uint64_t SignalOnVblank(Kernel& k, NtThread&, SyscallArgs& a) {
         started = true;
         std::thread([&k] {
             for (;;) {
-                std::this_thread::sleep_for(std::chrono::microseconds(16667));
+                const bool turbo = gpu::IsTurbo();
+                std::this_thread::sleep_for(std::chrono::microseconds(turbo ? 500 : 16667));
                 std::vector<std::shared_ptr<EventObject>> list;
                 { std::scoped_lock l {mutex}; list = events; }
                 std::scoped_lock wait {k.WaitMutex()};

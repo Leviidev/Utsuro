@@ -1,3 +1,4 @@
+#include "gpu/renderer.h"
 // mmdevice.cpp -- the audio endpoint enumerator (CLSID_MMDeviceEnumerator, with the console's IMMXboxDeviceEnumerator extras). The
 // real MMDevAPI.dll opens a virtual audio bus device that does not exist here, and then the title's audio thread retries for ever; the
 // host answers the class instead. There is one pretend output (HDMI, two channels) and nothing to enumerate behind it yet.
@@ -93,13 +94,15 @@ void SignalEvent(Kernel& k, uint64_t handle) {
 void RunClock(Kernel* k, std::shared_ptr<Stream> st) {
     auto last = std::chrono::steady_clock::now();
     for (;;) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        const bool turbo = gpu::IsTurbo();
+        std::this_thread::sleep_for(std::chrono::microseconds(turbo ? 500 : 10000));
         uint64_t event;
         {
             std::scoped_lock lock {st->mutex};
             if (st->stop || k->exiting) return;
             const auto now = std::chrono::steady_clock::now();
-            const double played = std::chrono::duration<double>(now - last).count() * kRate;
+            const double multiplier = turbo ? 10.0 : 1.0;
+            const double played = std::chrono::duration<double>(now - last).count() * kRate * multiplier;
             last = now;
             if (!st->started) continue;
             st->queued = std::max(0.0, st->queued - played);
