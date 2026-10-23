@@ -39,8 +39,13 @@ enum Key : uint16_t {
 
 bool Down(uint16_t k) { return k < 256 && g_keys[k]; }
 
-// UTSURO_SCRIPT="seconds:BUTTON:hold, ..." presses buttons on a schedule (for unattended runs).
-struct ScriptEvent { double at, hold; std::string name; };
+// UTSURO_SCRIPT="seconds:BUTTON:hold, ..." or "fFRAME:BUTTON:hold_frames, ..." presses buttons on a schedule.
+struct ScriptEvent {
+    bool frame_based {false};
+    double at {0}, hold {0};
+    uint64_t frame_at {0}, frame_hold {0};
+    std::string name;
+};
 std::vector<ScriptEvent> LoadScript() {
     std::vector<ScriptEvent> out;
     const char* env = std::getenv("UTSURO_SCRIPT");
@@ -52,7 +57,11 @@ std::vector<ScriptEvent> LoadScript() {
         std::string a, b, c;
         std::getline(is, a, ':'); std::getline(is, b, ':'); std::getline(is, c, ':');
         if (a.empty() || b.empty()) continue;
-        out.push_back({std::atof(a.c_str()), c.empty() ? 0.3 : std::atof(c.c_str()), b});
+        if (a[0] == 'f' || a[0] == 'F') {
+            out.push_back({true, 0, 0, std::strtoull(a.c_str() + 1, nullptr, 10), c.empty() ? 30ULL : std::strtoull(c.c_str(), nullptr, 10), b});
+        } else {
+            out.push_back({false, std::atof(a.c_str()), c.empty() ? 0.3 : std::atof(c.c_str()), 0, 0, b});
+        }
     }
     return out;
 }
@@ -62,8 +71,13 @@ void ApplyScript(PadState& s) {
     static const auto start = std::chrono::steady_clock::now();
     if (script.empty()) return;
     const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    const uint64_t fc = gpu::FrameCount();
     for (const ScriptEvent& e : script) {
-        if (t < e.at || t >= e.at + e.hold) continue;
+        if (e.frame_based) {
+            if (fc < e.frame_at || fc >= e.frame_at + e.frame_hold) continue;
+        } else {
+            if (t < e.at || t >= e.at + e.hold) continue;
+        }
         const std::string& n = e.name;
         if (n == "A") s.buttons |= kA; else if (n == "B") s.buttons |= kB; else if (n == "X") s.buttons |= kX; else if (n == "Y") s.buttons |= kY;
         else if (n == "START") s.buttons |= kMenu; else if (n == "BACK") s.buttons |= kView;

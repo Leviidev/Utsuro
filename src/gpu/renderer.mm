@@ -2212,6 +2212,8 @@ void Present(const std::shared_ptr<Texture>& back, uint32_t sync_interval) {
     }
 }
 
+uint64_t FrameCount() { return g ? g->frame_count : 0; }
+
 bool IsTurbo() {
     static const char* env = std::getenv("UTSURO_TURBO");
     if (env == nullptr) return false;

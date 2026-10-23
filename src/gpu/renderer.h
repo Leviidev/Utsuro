@@ -178,6 +178,7 @@ bool IsTraceFrame(uint64_t frame);
 
 /// Writes the texture's top mip to a PNG (debugging).
 /// Whether fast-forward / turbo mode is active (UTSURO_TURBO).
+uint64_t FrameCount();
 bool IsTurbo();
 
 bool SavePng(Texture& texture, const std::string& path);
