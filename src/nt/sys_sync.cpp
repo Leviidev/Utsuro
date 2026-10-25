@@ -15,6 +15,8 @@
 #include <cstring>
 #include <thread>
 
+namespace utsuro::gpu { bool IsTurbo(); }
+
 namespace utsuro::nt {
 
 namespace {
@@ -32,12 +34,16 @@ Deadline MakeDeadline(const int64_t* timeout) {
     d.infinite = false;
     const int64_t v = *timeout;
     if (v < 0) {
-        d.when = Clock::now() + std::chrono::nanoseconds(-v * 100);
+        int64_t ns = -v * 100;
+        if (gpu::IsTurbo()) ns /= 5;
+        d.when = Clock::now() + std::chrono::nanoseconds(ns);
     } else if (v == 0) {
         d.when = Clock::now();
     } else {
         const int64_t rel = v - Kernel::NtSystemTime();
-        d.when = Clock::now() + std::chrono::nanoseconds(rel > 0 ? rel * 100 : 0);
+        int64_t ns = rel > 0 ? rel * 100 : 0;
+        if (gpu::IsTurbo()) ns /= 5;
+        d.when = Clock::now() + std::chrono::nanoseconds(ns);
     }
     return d;
 }

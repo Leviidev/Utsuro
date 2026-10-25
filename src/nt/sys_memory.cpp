@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 
 namespace utsuro::nt {
@@ -246,6 +247,12 @@ NTSTATUS NtMapViewOfSection(Kernel& k, NtThread&, SyscallArgs& a) {
     NTSTATUS rc = k.Vm().Allocate(&b, &s, MEM_RESERVE | MEM_COMMIT, nt_prot == 0 ? PAGE_READWRITE : PAGE_READWRITE,
                                   RegionKind::Mapped, section->file ? section->file->nt_path : section->name);
     if (rc != STATUS_SUCCESS) return rc;
+    {
+        static std::atomic<int> shown {0};
+        if (shown++ < 40) UT_INFO("vm: NtMapViewOfSection data view %s: %#llx + %#llx (offset %#llx, section size %#llx, protect %#x)",
+                                  section->file ? section->file->nt_path.c_str() : "(pagefile)", (unsigned long long)b, (unsigned long long)s,
+                                  (unsigned long long)file_off, (unsigned long long)section->size, protect);
+    }
     if (section->file) {
         const uint64_t avail = section->size > file_off ? std::min<uint64_t>(length, section->size - file_off) : 0;
         uint64_t done = 0;

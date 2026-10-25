@@ -29,6 +29,10 @@ struct Res {
     uint32_t check_interval {1};                  ///< ...doubling up to 8 frames; a Map or a cache flush over them resets it
     Res* base {nullptr};                         ///< a view's resource
     std::vector<RecordedDraw> recorded;          ///< a command list: what to replay
+    bool final_om {false}, final_vp {false};     ///< a command list: the targets / viewports it left bound, which stay bound after it runs
+    uint64_t final_rtv[8] {}, final_dsv {0};
+    uint32_t final_nvp {0};
+    Viewport final_vps[16] {};
     std::vector<gpu::InputElement> elements;     ///< an input layout's elements
     bool gpu_written {false};
 };
@@ -67,6 +71,16 @@ Res* ResAt(uint64_t pointer) {
 constexpr uint32_t kDescMagic = 0xD3D1FACEu;
 std::unordered_map<uint64_t, Res*> g_by_id;
 std::atomic<uint64_t> g_frame {0};   // presented frames
+
+// The last constant-buffer bind calls (ring): dumped with the race-time draw probe, since the binds that
+// matter may happen long before the draws that need them.
+struct CbCallLog { uint64_t frame, ctx, start, count, p0; uint32_t stage; };
+static CbCallLog g_cb_calls[64];
+static std::atomic<uint32_t> g_cb_calls_n {0};
+static void LogCbCall(uint32_t stage, uint64_t ctx, uint64_t start, uint64_t count, uint64_t p0) {
+    const uint32_t i = g_cb_calls_n.fetch_add(1) % 64;
+    g_cb_calls[i] = {g_frame.load(), ctx, start, count, p0, stage};
+}
 std::vector<Res*> g_placed;   // placement textures, to find which a cache flush covers
 
 uint8_t* ObjMem(Obj& o) { return reinterpret_cast<uint8_t*>(o.blocks[0]); }
@@ -179,6 +193,19 @@ void OnCreate(Call& c, const winrt::Method& m, Obj& o) {
             }
             return;
         }
+        if (d.width <= 4 && d.height <= 4 && (bind & 0x60) && std::getenv("UTSURO_RTDIAG") != nullptr) {
+            static std::atomic<int> shown {0};
+            GuestCpuState st;
+            if (shown++ < 24 && c.thread.control != nullptr && c.thread.control->CaptureCpuState(&st)) {
+                uint64_t regs[16];
+                for (int k = 0; k < 16; ++k) regs[k] = st.gregs[k];
+                const auto frames = c.kernel.Backtrace(st.rip, regs, 10);
+                std::string chain, words;
+                for (size_t k = 1; k < frames.size(); ++k) chain += (k > 1 ? " < " : "") + c.kernel.Describe(frames[k]);
+                for (size_t k = 0; k < 11; ++k) { char t[12]; std::snprintf(t, sizeof t, " %x", U32(desc, k)); words += t; }
+                UT_INFO("d3d: rtdiag %s desc%s -> %#llx from %s", n.c_str(), words.c_str(), (unsigned long long)reinterpret_cast<uint64_t>(&o), chain.c_str());
+            }
+        }
         if (d.width <= 4 && d.height <= 4) {
             const auto* init0 = c.Ptr<uint8_t>(1);
             uint64_t mem = 0;
@@ -203,6 +230,10 @@ void OnCreate(Call& c, const winrt::Method& m, Obj& o) {
         }
     } else if (n == "CreateShaderResourceView" || n == "CreateRenderTargetView" || n == "CreateDepthStencilView" || n == "CreateUnorderedAccessView") {
         Res* base = ResAt(c.Arg(0));
+        if (base != nullptr && !base->texture && !base->buffer && std::getenv("UTSURO_CBDIAG") != nullptr) {
+            static std::atomic<int> shown {0};
+            if (shown++ < 60) UT_INFO("d3d: cbdiag %s on a placement buffer host %#llx %u B usage %u bind %#x: no view", n.c_str(), (unsigned long long)base->host_ptr, base->host_size, base->usage, base->bind);
+        }
         if (base == nullptr || (!base->texture && !base->buffer)) return;
         auto v = std::make_shared<gpu::TextureView>();
         UT_INFO("d3d: %s obj=%p base_res=%p native=%p view fmt %u", n.c_str(), &o, base, (base && base->texture) ? gpu::NativeOf(*base->texture) : nullptr, U32(desc, 0));
@@ -262,6 +293,25 @@ void OnCreate(Call& c, const winrt::Method& m, Obj& o) {
             const uint32_t zero = 0;
             v->counter = gpu::CreateBuffer(4, false, &zero);   // the hidden append/consume counter every buffer UAV carries
         }
+        if (n == "CreateShaderResourceView" && have && base->texture && gpu::TextureInfo(*base->texture).samples > 1 && vd.dimension != 6 && vd.dimension != 7) {
+            // A single-sample view of a multisample texture: on the console that reads the surface's FMASK (which samples hold
+            // which fragment). There is no FMASK here: hand out zeros, "every sample holds fragment 0", so a resolve shader
+            // takes its uncompressed path (Forza Horizon 2's scene resolve read colour bits as sample indices otherwise, and its
+            // auto-exposure saw luminance over 1000 and darkened the frame to black).
+            static std::shared_ptr<gpu::Texture> zeros;
+            if (!zeros) {
+                gpu::TextureDesc zd;
+                zd.width = zd.height = 1;
+                zd.format = 2;   // R32G32B32A32_FLOAT
+                zeros = gpu::CreateTexture(zd);
+                const float z[4] = {0, 0, 0, 0};
+                if (zeros) gpu::UploadTexture(*zeros, 0, 0, nullptr, z, 16, 16);
+            }
+            static std::atomic<int> shown {0};
+            if (shown++ < 8) UT_INFO("d3d: a %u-sample texture's single-sample view (dimension %u, format %u) reads as FMASK zeros", gpu::TextureInfo(*base->texture).samples, vd.dimension, vd.format);
+            v->texture = zeros;
+            v->desc = gpu::ViewDesc {};
+        }
         r.view = v;
     } else if (n.size() > 12 && n.compare(0, 6, "Create") == 0 && n.find("Shader") != std::string::npos && n != "CreateShaderResourceView") {
         if (c.Arg(0) == 0) return;
@@ -298,11 +348,24 @@ void OnCreate(Call& c, const winrt::Method& m, Obj& o) {
     } else if (n == "CreateBlendState" || n == "CreateDepthStencilState" || n == "CreateRasterizerState" || n == "CreateSamplerState" || n == "CreateDepthStencilStateX") {
         r.state.bytes = desc;
         if (n == "CreateSamplerState") SetIdDescriptor(o, 0x20, 0x10);
-    } else if (n == "CreateDeferredContext" || n == "CreateDeferredContext1" || n == "CreateDeferredContext2") {
+    } else if (n == "CreateDeferredContext" || n == "CreateDeferredContext1" || n == "CreateDeferredContext2" || n == "CreateDeferredContextX") {
         o.u64["deferred"] = 1;
     } else if (n == "FinishCommandList") {
         r.recorded = std::move(StateOf(c.obj).recorded);
         StateOf(c.obj).recorded.clear();
+        {
+            CtxState& ds = StateOf(c.obj);
+            r.final_om = ds.om_bound;
+            r.final_vp = ds.vp_bound;
+            std::memcpy(r.final_rtv, ds.rtv, sizeof r.final_rtv);
+            r.final_dsv = ds.dsv;
+            r.final_nvp = ds.num_viewports;
+            std::memcpy(r.final_vps, ds.viewports, sizeof r.final_vps);
+            ds.om_bound = ds.vp_bound = false;   // the next list starts out using the executing context's
+        }
+        // FinishCommandList(RestoreDeferredContextState, list): on the PC, FALSE leaves the deferred context in its default state.
+        // Doing that here (UTSURO_FINISHRESET=1) crashed Forza Horizon 2's game and render threads as its 3D phase began.
+        if (static const bool reset = std::getenv("UTSURO_FINISHRESET") != nullptr; reset && (c.Arg(0) & 0xFF) == 0) StateOf(c.obj) = CtxState {};
         Tally("~lists finished");
         Tally("~list draws finished", r.recorded.size());
         static std::atomic<int> shown {0};
@@ -313,7 +376,19 @@ void OnCreate(Call& c, const winrt::Method& m, Obj& o) {
         r.bind = U32(desc, 2);
         r.host_ptr = c.Arg(1);
         r.host_size = U32(desc, 0);
-        SetBufferDescriptor(o, 0, r.host_size);   // the title adds the buffer's address itself (found by watching what its packets hold)
+        SetBufferDescriptor(o, 0, r.host_size);
+        if (static const bool diag = std::getenv("UTSURO_CBDIAG") != nullptr; diag && (r.bind & 4)) {
+            static std::atomic<int> shown {0};
+            GuestCpuState st;
+            if (shown++ < 40 && c.thread.control != nullptr && c.thread.control->CaptureCpuState(&st)) {
+                uint64_t regs[16];
+                for (int k = 0; k < 16; ++k) regs[k] = st.gregs[k];
+                const auto frames = c.kernel.Backtrace(st.rip, regs, 8);
+                std::string chain;
+                for (size_t k = 1; k < frames.size(); ++k) chain += (k > 1 ? " < " : "") + c.kernel.Describe(frames[k]);
+                UT_INFO("d3d: cbdiag CreatePlacementBuffer %u B usage %u bind %#x cpu %#x at %#llx from %s", r.host_size, r.usage, r.bind, U32(desc, 3), (unsigned long long)r.host_ptr, chain.c_str());
+            }
+        }   // the title adds the buffer's address itself (found by watching what its packets hold)
     } else if (n == "CreateSwapChainForCoreWindow") {
         gpu::TextureDesc d;
         d.width = U32(desc, 0);
@@ -829,7 +904,34 @@ void BindStream(CtxState& s, gpu::DrawState& d, gpu::DrawArgs& args, bool deferr
                 rd->ib_size = static_cast<uint32_t>(args.count) * size;
             }
         }
-    } else if (!args.indexed) {
+    } else if (args.indexed) {
+        // An index buffer that is a real GPU buffer (not placement memory): its indices are in shared memory too, so read
+        // the range this draw uses. Without the range every vertex stream below is cut to a single vertex, and every
+        // triangle collapses to the first vertex -- Forza Horizon 2's world renders nothing at all that way (the whole
+        // 1920x1080 scene target stayed at the clear value while ~600 draws a frame went through).
+        Res* ibr = ResAt(s.ib);
+        if (ibr != nullptr && ibr->buffer != nullptr && args.count > 0) {
+            const uint32_t size = s.ib_format == 42 ? 4 : 2;
+            const uint32_t bytes = static_cast<uint32_t>(args.count) * size;
+            const uint64_t at = static_cast<uint64_t>(s.ib_offset) + static_cast<uint64_t>(args.start) * size;
+            const uint8_t* data = gpu::BufferData(*ibr->buffer);
+            if (data != nullptr && at + bytes <= gpu::BufferSize(*ibr->buffer)) {
+                uint32_t lo = 0xFFFFFFFFu, hi = 0;
+                for (uint32_t i = 0; i < args.count; ++i) {
+                    const uint32_t v = size == 4 ? reinterpret_cast<const uint32_t*>(data + at)[i] : reinterpret_cast<const uint16_t*>(data + at)[i];
+                    if (v == 0xFFFF && size == 2) continue;   // restart index
+                    lo = std::min(lo, v); hi = std::max(hi, v);
+                }
+                if (lo <= hi) {
+                    first_vertex = static_cast<int64_t>(lo) + args.base_vertex;
+                    last_vertex = static_cast<int64_t>(hi) + args.base_vertex;
+                    args.base_vertex = -static_cast<int32_t>(lo);
+                    static std::atomic<int> shown {0};
+                    if (shown++ < 6) UT_INFO("d3d: indexed draw count %u: index range %u..%u from a GPU index buffer (streams were cut to one vertex before)", args.count, lo, hi);
+                }
+            }
+        }
+    } else {
         args.start = 0;
     }
     if (s.regs.empty()) return;
@@ -868,13 +970,31 @@ void BindStream(CtxState& s, gpu::DrawState& d, gpu::DrawArgs& args, bool deferr
             if (!(rf.constant_buffers & (1u << k))) continue;
             const auto* v = get((stage == 0 ? kRegCbA : kRegCbB) + 0x10 * k);
             if (v == nullptr || v->n < 3) {
+                // A deferred draw whose declared constant buffers mostly have no packet: dump this context's whole
+                // register map once -- Forza Horizon 2's world draws bind their vertex constants somewhere we do not
+                // look, and this says where.
                 static std::atomic<int> shown {0};
-                if (std::getenv("UTSURO_REGLOG") != nullptr && shown++ < 6) {
-                    UT_INFO("d3d: %s cb%u has no packet; %zu registers hold:", stage ? "ps" : "vs", k, s.regs.size());
+                uint32_t declared = 0, unbound = 0;
+                for (uint32_t j = 0; j < 14; ++j) {
+                    if (!(rf.constant_buffers & (1u << j))) continue;
+                    ++declared;
+                    const auto* w = get((stage == 0 ? kRegCbA : kRegCbB) + 0x10 * j);
+                    if (w == nullptr || w->n < 3) ++unbound;
+                }
+                if (deferred && declared >= 3 && unbound >= 2 && g_frame.load() >= (std::getenv("UTSURO_CBFROM") != nullptr ? std::strtoull(std::getenv("UTSURO_CBFROM"), nullptr, 10) : ~0ull) && shown++ < 4) {
                     std::vector<uint32_t> keys;
                     for (const auto& [reg, r] : s.regs) keys.push_back(reg);
                     std::sort(keys.begin(), keys.end());
-                    for (uint32_t reg : keys) { const auto& r = s.regs[reg]; UT_INFO("d3d:   reg %#x n %u: %08x %08x %08x %08x", reg, r.n, r.dw[0], r.dw[1], r.dw[2], r.dw[3]); }
+                    std::string list;
+                    for (uint32_t reg : keys) { char t[24]; std::snprintf(t, sizeof t, " %#x(%u)", reg, s.regs[reg].n); list += t; }
+                    UT_INFO("d3d: %s cb%u has no packet (deferred draw, %u of %u declared cbs unbound, %zu regs):%s", stage ? "ps" : "vs", k, unbound, declared, s.regs.size(), list.c_str());
+                    int dumped = 0;
+                    for (uint32_t reg : keys) {
+                        const auto& r = s.regs[reg];
+                        if (r.n < 3) continue;
+                        UT_INFO("d3d:   reg %#x n %u: %08x %08x %08x %08x", reg, r.n, r.dw[0], r.dw[1], r.dw[2], r.dw[3]);
+                        if (++dumped >= 48) break;
+                    }
                 }
                 continue;
             }
@@ -910,6 +1030,21 @@ void BindStream(CtxState& s, gpu::DrawState& d, gpu::DrawArgs& args, bool deferr
     }
 }
 
+static CtxState* GetImmCtx(Obj& ctx) {
+    auto dit = ctx.u64.find("device");
+    if (dit != ctx.u64.end()) {
+        if (Obj* dev = Runtime::Get().FromPointer(dit->second)) {
+            auto cit = dev->u64.find("context");
+            if (cit != dev->u64.end()) {
+                if (Obj* imm = Runtime::Get().FromPointer(cit->second)) {
+                    return &StateOf(*imm);
+                }
+            }
+        }
+    }
+    return nullptr;
+}
+
 gpu::DrawState Snapshot(Obj& ctx, CtxState& s, gpu::DrawArgs& args, RecordedDraw* rd = nullptr) {
     gpu::DrawState d;
     if (!ctx.blocks.empty()) {
@@ -928,6 +1063,7 @@ gpu::DrawState Snapshot(Obj& ctx, CtxState& s, gpu::DrawArgs& args, RecordedDraw
     d.vs = shader(s.shader[0]);
     d.ps = shader(s.shader[4]);
     if (Res* l = ResAt(s.layout)) d.layout = l->layout;
+    const bool deferred = ctx.u64["deferred"] != 0;
     for (int stage = 0; stage < 2; ++stage) {
         const int src = stage == 0 ? 0 : 4;
         const auto& sh = stage == 0 ? d.vs : d.ps;
@@ -935,25 +1071,132 @@ gpu::DrawState Snapshot(Obj& ctx, CtxState& s, gpu::DrawArgs& args, RecordedDraw
         const auto& rf = gpu::Reflection(*sh);
         for (int i = 0; i < 16; ++i) {
             if (!(rf.constant_buffers & (1u << i))) continue;
-            if (Res* r = ResAt(s.cb[src][i])) {
-                d.cb[stage][i].buffer = r->buffer;
-                d.cb[stage][i].offset = s.cb_first[src][i] * 16;
-                d.cb[stage][i].size = s.cb_count[src][i] * 16;
+            int cb_st = src;
+            int cb_sl = i;
+            if (s.cb_remap[src][i].stage < 6) {
+                cb_st = s.cb_remap[src][i].stage;
+                cb_sl = s.cb_remap[src][i].slot;
+            }
+            uint64_t addr = s.cb_address[cb_st][cb_sl];
+            uint64_t cb_res = s.cb[cb_st][cb_sl];
+            uint32_t first = s.cb_first[cb_st][cb_sl];
+            uint32_t count = s.cb_count[cb_st][cb_sl];
+            // A deferred draw's unset slot stays empty here: ExecuteCommandList fills it from the executing context then.
+            if (static const bool diag = std::getenv("UTSURO_CBDIAG") != nullptr; diag && stage == 0 && i == 2) {
+                static std::mutex m;
+                static std::map<uint64_t, int> seen;
+                std::scoped_lock lock {m};
+                const uint64_t key = addr ? addr : cb_res;
+                if (seen.size() < 80 && seen[key]++ == 0) {
+                    Res* r = ResAt(cb_res);
+                    const uint64_t from = addr ? addr + first * 16 : (r ? r->host_ptr + first * 16 : 0);
+                    uint32_t w[16] {}; int nz = -1;
+                    if (from && SafeRead(from, w, 64)) { nz = 0; for (uint32_t x : w) nz += x != 0; }
+                    UT_INFO("d3d: cbdiag vs cb2 slot: addr %#llx res %#llx (buffer %d host %#llx %u B) first %u count %u src %#llx nonzero-of-16 %d, rf size %u, frame %llu ctx %llu deferred %d remap %d",
+                            (unsigned long long)addr, (unsigned long long)cb_res, r && r->buffer ? 1 : 0, (unsigned long long)(r ? r->host_ptr : 0), r ? r->host_size : 0, first, count, (unsigned long long)from, nz,
+                            rf.cb_size[i], (unsigned long long)g_frame.load(), (unsigned long long)ctx.id, deferred ? 1 : 0, s.cb_remap[src][i].stage < 6 ? 1 : 0);
+                }
+            }
+            if (addr != 0) {
+                uint32_t size = count ? count * 16 : 65536;
+                if (rf.cb_size[i] != 0) size = std::min<uint32_t>(size, rf.cb_size[i] * 16);
+                const uint64_t final_addr = addr + first * 16;
+                d.cb[stage][i].buffer = CopyOfHost(final_addr, size, deferred);
+                d.cb[stage][i].offset = 0;
+                d.cb[stage][i].size = size;
+                if (rd != nullptr && stage < 2 && i < 14) {
+                    rd->cb_addr[stage][i] = final_addr;
+                    rd->cb_size[stage][i] = size;
+                }
+            } else if (Res* r = ResAt(cb_res)) {
+                if (r->buffer) {
+                    d.cb[stage][i].buffer = r->buffer;
+                    d.cb[stage][i].offset = first * 16;
+                    d.cb[stage][i].size = count ? count * 16 : gpu::BufferSize(*r->buffer);
+                    if (static const bool diag = std::getenv("UTSURO_CBDIAG") != nullptr; diag && stage == 0 && i == 2) {
+                        static std::mutex m;
+                        static std::map<uint64_t, int> seen;
+                        std::scoped_lock lock {m};
+                        if (seen.size() < 60 && seen[cb_res]++ == 0) {
+                            const uint32_t* w = reinterpret_cast<const uint32_t*>(gpu::BufferData(*r->buffer));
+                            uint32_t nz = 0, n = gpu::BufferSize(*r->buffer) / 4;
+                            for (uint32_t k = 0; w && k < n; ++k) nz += w[k] != 0;
+                            UT_INFO("d3d: cbdiag vs cb2 buffer obj %#llx res %p: %u B usage %u bind %#x, %u of %u dwords non-zero now, first %u count %u, frame %llu ctx %llu deferred %d",
+                                    (unsigned long long)cb_res, static_cast<void*>(r), gpu::BufferSize(*r->buffer), r->usage, r->bind, nz, n, first, count, (unsigned long long)g_frame.load(), (unsigned long long)ctx.id, deferred ? 1 : 0);
+                        }
+                    }
+                } else if (r->host_ptr != 0) {
+                    uint32_t size = count ? count * 16 : (r->host_size ? r->host_size : 65536);
+                    if (rf.cb_size[i] != 0) size = std::min<uint32_t>(size, rf.cb_size[i] * 16);
+                    const uint64_t final_addr = r->host_ptr + first * 16;
+                    if (static const bool diag = std::getenv("UTSURO_CBDIAG") != nullptr; diag) {
+                        // Where the title's own buffer descriptor (object +0x20) points now, against the creation address.
+                        static std::mutex m;
+                        static std::map<uint64_t, int> seen;
+                        std::scoped_lock lock {m};
+                        if (seen.size() < 200 && seen[cb_res]++ == 0) {
+                            uint64_t desc[2] {};
+                            SafeRead(cb_res + 0x20, desc, 16);
+                            auto zero = [](uint64_t a, uint32_t n) { uint32_t w[16] {}; if (!SafeRead(a, w, std::min<uint32_t>(n, 64))) return -1; for (uint32_t x : w) if (x) return 0; return 1; };
+                            const uint64_t base = desc[0] & 0xFFFFFFFFFFFFull;
+                            UT_INFO("d3d: cbdiag %s cb%d obj %#llx host %#llx (%u B, zero %d) desc base %#llx dw2 %#x (zero %d) first %u count %u frame %llu deferred %d",
+                                    stage ? "ps" : "vs", i, (unsigned long long)cb_res, (unsigned long long)r->host_ptr, r->host_size, zero(r->host_ptr, size),
+                                    (unsigned long long)base, (unsigned)(desc[1] & 0xFFFFFFFF), base ? zero(base, size) : -2, first, count, (unsigned long long)g_frame.load(), deferred ? 1 : 0);
+                        }
+                    }
+                    d.cb[stage][i].buffer = CopyOfHost(final_addr, size, deferred);
+                    d.cb[stage][i].offset = 0;
+                    d.cb[stage][i].size = size;
+                    if (rd != nullptr && stage < 2 && i < 14) {
+                        rd->cb_addr[stage][i] = final_addr;
+                        rd->cb_size[stage][i] = size;
+                    }
+                }
             }
         }
         for (int i = 0; i < 16; ++i) {
-            if (Res* r = ResAt(s.srv[src][i])) {
+            int srv_st = src;
+            int srv_sl = i;
+            if (s.srv_remap[src][i].stage < 6) {
+                srv_st = s.srv_remap[src][i].stage;
+                srv_sl = s.srv_remap[src][i].slot;
+            }
+            uint64_t srv_ptr = s.srv[srv_st][srv_sl];
+            if (!srv_ptr && deferred) {
+                if (CtxState* imm_s = GetImmCtx(ctx)) srv_ptr = imm_s->srv[srv_st][srv_sl];
+            }
+            if (Res* r = ResAt(srv_ptr)) {
                 Res* target = r->base ? r->base : r;
                 if (target->placement != 0 && ((target->placement_dirty && g_frame.load() >= target->next_try_frame) || PlacementChanged(*target)))
                     UploadPlacement(*target);
                 d.srv[stage][i] = r->view;
             }
             if (rf.samplers & (1u << i)) {
-                if (Res* r = ResAt(s.sampler[src][i])) d.sampler[stage][i] = r->state;
+                int samp_st = src;
+                int samp_sl = i;
+                if (s.sampler_remap[src][i].stage < 6) {
+                    samp_st = s.sampler_remap[src][i].stage;
+                    samp_sl = s.sampler_remap[src][i].slot;
+                }
+                uint64_t samp_ptr = s.sampler[samp_st][samp_sl];
+                if (!samp_ptr && deferred) {
+                    if (CtxState* imm_s = GetImmCtx(ctx)) samp_ptr = imm_s->sampler[samp_st][samp_sl];
+                }
+                if (Res* r = ResAt(samp_ptr)) d.sampler[stage][i] = r->state;
             }
         }
         for (uint8_t slot : rf.high_slots) {
-            if (Res* r = ResAt(s.srv[src][slot])) {
+            int srv_st = src;
+            int srv_sl = slot;
+            if (s.srv_remap[src][slot].stage < 6) {
+                srv_st = s.srv_remap[src][slot].stage;
+                srv_sl = s.srv_remap[src][slot].slot;
+            }
+            uint64_t srv_ptr = s.srv[srv_st][srv_sl];
+            if (!srv_ptr && deferred) {
+                if (CtxState* imm_s = GetImmCtx(ctx)) srv_ptr = imm_s->srv[srv_st][srv_sl];
+            }
+            if (Res* r = ResAt(srv_ptr)) {
                 Res* target = r->base ? r->base : r;
                 if (target->placement != 0 && ((target->placement_dirty && g_frame.load() >= target->next_try_frame) || PlacementChanged(*target)))
                     UploadPlacement(*target);
@@ -961,9 +1204,17 @@ gpu::DrawState Snapshot(Obj& ctx, CtxState& s, gpu::DrawArgs& args, RecordedDraw
             }
         }
     }
-    const bool deferred = ctx.u64["deferred"] != 0;
     for (int i = 0; i < 16; ++i) {
-        if (Res* r = ResAt(s.vb[i])) {
+        if (s.vb_address[i] != 0 && s.stride[i] != 0) {
+            const uint32_t size = 65536 * 16;
+            d.vb[i].buffer = CopyOfHost(s.vb_address[i], size, deferred);
+            d.vb[i].stride = s.stride[i];
+            d.vb[i].offset = s.voffset[i];
+            if (rd != nullptr && i < 8) {
+                rd->vb_addr[i] = s.vb_address[i];
+                rd->vb_size[i] = size;
+            }
+        } else if (Res* r = ResAt(s.vb[i])) {
             if (r->buffer) {
                 d.vb[i].buffer = r->buffer;
             } else if (r->host_ptr != 0 && s.stride[i] != 0) {
@@ -988,9 +1239,36 @@ gpu::DrawState Snapshot(Obj& ctx, CtxState& s, gpu::DrawArgs& args, RecordedDraw
         const auto& prf = gpu::Reflection(*d.ps);
         for (int i = 0; i < 64; ++i) if ((prf.uavs & (1u << i)) && s.uav[i] != 0) if (Res* r = ResAt(s.uav[i])) d.ps_uav[i] = r->view;
     }
-    for (int i = 0; i < 8; ++i)
+    for (int i = 0; i < 8; ++i) {
         if (Res* r = ResAt(s.rtv[i])) d.rtv[i] = r->view;
-        if (s.rtv[0] != 0 && (!d.rtv[0] || !d.rtv[0]->texture)) {
+    }
+    if (static const bool diag = std::getenv("UTSURO_RTDIAG") != nullptr; diag) {
+        // Views of tiny textures drawn with a big viewport: what the title keeps in the view objects (it may write the real
+        // surface's registers there itself).
+        static std::mutex m;
+        static std::map<uint64_t, int> seen;
+        auto dump = [&](const char* what, uint64_t view) {
+            Res* r = ResAt(view);
+            if (r == nullptr || r->base == nullptr || !r->base->texture) return;
+            const auto& info = gpu::TextureInfo(*r->base->texture);
+            static int big = 0;
+            const bool tiny = info.width <= 4;
+            std::scoped_lock lock {m};
+            if (!tiny && (info.width != 1920 || big >= 3)) return;
+            if (seen.size() >= 16 || seen[view]++ != 0) return;
+            if (!tiny) ++big;
+            uint32_t w[64] {};
+            SafeRead(view, w, sizeof w);
+            Obj* o = Runtime::Get().FromPointer(view);
+            UT_INFO("d3d: rtdiag %s %#llx (%s, texture %ux%u fmt %u native %p, obj blocks %zu) viewport %gx%g frame %llu:", what, (unsigned long long)view, o ? o->class_name.c_str() : "?", info.width, info.height, info.format,
+                    gpu::NativeOf(*r->base->texture), o ? o->blocks.size() : 0, s.num_viewports ? s.viewports[0].w : 0.f, s.num_viewports ? s.viewports[0].h : 0.f, (unsigned long long)g_frame.load());
+            for (int row = 0; row < 8; ++row)
+                UT_INFO("d3d:   +%#04x: %08x %08x %08x %08x %08x %08x %08x %08x", row * 32, w[row * 8], w[row * 8 + 1], w[row * 8 + 2], w[row * 8 + 3], w[row * 8 + 4], w[row * 8 + 5], w[row * 8 + 6], w[row * 8 + 7]);
+        };
+        dump("rtv0", s.rtv[0]);
+        dump("dsv", s.dsv);
+    }
+    if (s.rtv[0] != 0 && (!d.rtv[0] || !d.rtv[0]->texture)) {
             // A draw into a target the host could not resolve ("no pass" in the frame stats): say which.
             static std::atomic<int> shown {0};
             Res* r = ResAt(s.rtv[0]);
@@ -1040,6 +1318,19 @@ void TraceDrawCaller(Call& c) {
     }
 }
 
+// In a traced frame: a copy-like call between two resources, by native texture (to follow the frame's data flow).
+void TraceCopy(const char* what, Call& c, uint64_t dst_obj, uint64_t src_obj) {
+    if (!gpu::IsTraceFrame(g_frame.load())) return;
+    auto describe = [](uint64_t obj) -> std::string {
+        Res* r = ResAt(obj);
+        char t[96];
+        if (r == nullptr) return "?";
+        if (r->texture) { const auto& i = gpu::TextureInfo(*r->texture); std::snprintf(t, sizeof t, "%p %ux%u fmt %u s%u", gpu::NativeOf(*r->texture), i.width, i.height, i.format, i.samples); return t; }
+        std::snprintf(t, sizeof t, "buffer %u B", r->buffer ? gpu::BufferSize(*r->buffer) : r->host_size); return t;
+    };
+    UT_INFO("d3d: %s on ctx %llu%s: %s <- %s", what, (unsigned long long)c.obj.id, c.obj.u64["deferred"] != 0 ? " (deferred)" : "", describe(dst_obj).c_str(), describe(src_obj).c_str());
+}
+
 void DoDraw(Obj& ctx, const gpu::DrawArgs& args_in) {
     if (!gpu::Available()) return;
     gpu::DrawArgs args = args_in;
@@ -1064,7 +1355,49 @@ void DoDraw(Obj& ctx, const gpu::DrawArgs& args_in) {
             }
         }
     }
-    if (d.ps && std::getenv("UTSURO_SRVLOG") != nullptr) {
+    // The title's inline draw-state block also carries data beyond topology/layout/shaders: dump it at the race to
+    // find where the vertex constant buffers hide (UTSURO_CBFROM=frame).
+    if (true) {
+        static const uint64_t ubfrom = std::getenv("UTSURO_CBFROM") != nullptr ? std::strtoull(std::getenv("UTSURO_CBFROM"), nullptr, 10) : ~0ull;
+        static std::atomic<int> ubshown {0};
+        if (g_frame.load() >= ubfrom && ubshown++ < 3 && !ctx.blocks.empty() && d.vs && d.ps) {
+            const uint32_t* u = reinterpret_cast<const uint32_t*>(ctx.blocks[0] + kUserDataOffset);
+            UT_INFO("d3d: userdata of ctx %llu (deferred %d), %u dwords from %#x:", (unsigned long long)ctx.id, deferred ? 1 : 0, 96u, kUserDataOffset);
+            for (int row = 0; row < 24; ++row) {
+                const uint32_t* w = u + row * 4;
+                UT_INFO("d3d:   +%#05x: %08x %08x %08x %08x  | %g %g %g %g", kUserDataOffset + row * 16, w[0], w[1], w[2], w[3],
+                        *reinterpret_cast<const float*>(w), *reinterpret_cast<const float*>(w + 1), *reinterpret_cast<const float*>(w + 2), *reinterpret_cast<const float*>(w + 3));
+            }
+        }
+    }
+    // The race probe: for world-shaped draws (a vertex shader with several constant buffers), print the whole
+    // context state -- which context, what its cb slots hold, and the last 64 bind calls (UTSURO_CBFROM=frame).
+    if (true) {
+        static const uint64_t cbfrom3 = std::getenv("UTSURO_CBFROM") != nullptr ? std::strtoull(std::getenv("UTSURO_CBFROM"), nullptr, 10) : ~0ull;
+        static std::atomic<int> probe {0};
+        if (g_frame.load() >= cbfrom3 && d.vs) {
+            const auto& rf = gpu::Reflection(*d.vs);
+            uint32_t declared = 0, bound = 0;
+            for (uint32_t k = 0; k < 14; ++k) if (rf.constant_buffers & (1u << k)) { ++declared; if (d.cb[0][k].buffer) ++bound; }
+            if (declared >= 3 && probe++ < 8) {
+                std::string cbs;
+                for (uint32_t k = 0; k < 14; ++k) {
+                    if (!(rf.constant_buffers & (1u << k))) continue;
+                    char t[80];
+                    if (Res* r = ResAt(state.cb[0][k])) std::snprintf(t, sizeof t, " cb%u=%#llx(buf %d)", k, (unsigned long long)state.cb[0][k], r->buffer != nullptr);
+                    else std::snprintf(t, sizeof t, " cb%u=%#llx", k, (unsigned long long)state.cb[0][k]);
+                    cbs += t;
+                }
+                UT_INFO("d3d: probe draw on ctx %llu (deferred %d, %zu regs, parsed %#llx): vs cbs:%s (%u/%u bound)", (unsigned long long)ctx.id, deferred ? 1 : 0, state.regs.size(), (unsigned long long)state.stream_parsed, cbs.c_str(), bound, declared);
+                const uint32_t n = g_cb_calls_n.load();
+                for (uint32_t i = 0; i < n && i < 64; ++i) {
+                    const CbCallLog& e = g_cb_calls[(g_cb_calls_n.load() - 1 - i) % 64];
+                    UT_INFO("d3d:   bind -%u: frame %llu stage %u ctx %llu start %llu count %llu p0 %#llx", i, (unsigned long long)e.frame, e.stage, (unsigned long long)e.ctx, (unsigned long long)e.start, (unsigned long long)e.count, (unsigned long long)e.p0);
+                }
+            }
+        }
+    }
+    if (static_cast<bool>(d.ps) && std::getenv("UTSURO_SRVLOG") != nullptr) {
         static std::atomic<int> logged {0};
         const auto& rf = gpu::Reflection(*d.ps);
         if (rf.textures && !d.srv[1][0] && logged++ < 6) {
@@ -1100,6 +1433,8 @@ void DoDraw(Obj& ctx, const gpu::DrawArgs& args_in) {
     if (ctx.u64["deferred"] != 0) {
         rd_storage.state = d;
         rd_storage.args = args;
+        rd_storage.own_om = state.om_bound;
+        rd_storage.own_vp = state.vp_bound;
         state.recorded.push_back(std::move(rd_storage));
         Tally("~draws recorded");
         if (state.recorded.size() == 2048) UT_WARN("d3d: deferred context %llu holds 2048 draws and was never finished", (unsigned long long)ctx.id);
@@ -1133,13 +1468,27 @@ void DoDispatch(Obj& ctx, uint32_t x, uint32_t y, uint32_t z, std::shared_ptr<gp
         return (static_cast<uint64_t>(reg.dw[1] & 0xFFFF) << 32) | reg.dw[0];
     };
 
-    // Constant buffers: check s.cb[5] first, or fall back to regs
+    // Constant buffers: check s.cb_address[5] or s.cb[5] first, or fall back to regs
     for (int i = 0; i < 16; ++i) {
         if (!(rf.constant_buffers & (1u << i))) continue;
-        if (Res* cb = ResAt(s.cb[5][i])) {
-            d.cb[i].buffer = cb->buffer;
-            d.cb[i].offset = s.cb_first[5][i] * 16;
-            d.cb[i].size = s.cb_count[5][i] * 16;
+        if (s.cb_address[5][i] != 0) {
+            uint32_t size = s.cb_count[5][i] ? s.cb_count[5][i] * 16 : 65536;
+            if (rf.cb_size[i] != 0) size = std::min<uint32_t>(size, rf.cb_size[i] * 16);
+            d.cb[i].buffer = CopyOfHost(s.cb_address[5][i] + s.cb_first[5][i] * 16, size);
+            d.cb[i].offset = 0;
+            d.cb[i].size = size;
+        } else if (Res* cb = ResAt(s.cb[5][i])) {
+            if (cb->buffer) {
+                d.cb[i].buffer = cb->buffer;
+                d.cb[i].offset = s.cb_first[5][i] * 16;
+                d.cb[i].size = s.cb_count[5][i] ? s.cb_count[5][i] * 16 : gpu::BufferSize(*cb->buffer);
+            } else if (cb->host_ptr != 0) {
+                uint32_t size = s.cb_count[5][i] ? s.cb_count[5][i] * 16 : (cb->host_size ? cb->host_size : 65536);
+                if (rf.cb_size[i] != 0) size = std::min<uint32_t>(size, rf.cb_size[i] * 16);
+                d.cb[i].buffer = CopyOfHost(cb->host_ptr + s.cb_first[5][i] * 16, size);
+                d.cb[i].offset = 0;
+                d.cb[i].size = size;
+            }
         } else if (const auto* v = get(kRegCbB + 0x10 * i)) {
             uint32_t size = std::min<uint32_t>(v->dw[2], 65536);
             if (rf.cb_size[i] != 0) size = std::min<uint32_t>(size, rf.cb_size[i] * 16);
@@ -1352,9 +1701,22 @@ void RegisterGpuOverrides() {
         { static int n = 0; if (n++ < 6) UT_INFO("d3d: Map this=%#llx res=%#llx sub=%#llx type=%#llx flags=%#llx out=%#llx", (unsigned long long)c.args[0], (unsigned long long)c.Arg(0), (unsigned long long)c.Arg(1), (unsigned long long)c.Arg(2), (unsigned long long)c.Arg(3), (unsigned long long)c.Arg(4)); }
         Res* r = ResAt(c.Arg(0));
         auto* out = c.Ptr<uint64_t>(4);
+        if (static const bool diag = std::getenv("UTSURO_CBDIAG") != nullptr; diag && r && r->buffer && (r->bind & 4)) {
+            static std::atomic<int> shown {0};
+            if (shown++ < 80) UT_INFO("d3d: cbdiag Map cb obj %#llx %u B usage %u type %llu on ctx %llu (deferred %d) frame %llu", (unsigned long long)c.Arg(0), gpu::BufferSize(*r->buffer), r->usage, (unsigned long long)c.Arg(2), (unsigned long long)c.obj.id, c.obj.u64["deferred"] != 0 ? 1 : 0, (unsigned long long)g_frame.load());
+        }
         if (r == nullptr || out == nullptr) { if (out) std::memset(out, 0, 16); return 0x80004005u; }
         const uint32_t type = static_cast<uint32_t>(c.Arg(2));
         if (r->buffer) return MapBuffer(c, *r, type, out);
+        if (!r->texture && r->host_ptr != 0) {
+            // A placement buffer: its memory is the title's own, and Map hands it straight back (draws copy it when they run).
+            static std::atomic<int> shown {0};
+            if (shown++ < 12) UT_INFO("d3d: Map of a placement buffer %#llx (%u bytes, type %u)", (unsigned long long)r->host_ptr, r->host_size, type);
+            out[0] = r->host_ptr;
+            reinterpret_cast<uint32_t*>(out)[2] = r->host_size;
+            reinterpret_cast<uint32_t*>(out)[3] = r->host_size;
+            return 0;
+        }
         if (r->texture && r->placement == 0 && type == 5 && g_kernel != nullptr && !(r->bind & 0x60)) {
             // WRITE_NO_OVERWRITE on a plain texture: the console keeps the memory mapped, and the title writes into it again later
             // without another Map. Give the texture memory of its own that stays (linear, laid out the way xg_x.dll says) and
@@ -1415,6 +1777,8 @@ void RegisterGpuOverrides() {
             reinterpret_cast<uint32_t*>(out)[3] = row * rows;
             return 0;
         }
+        static std::atomic<int> failed {0};
+        if (failed++ < 12) UT_WARN("d3d: Map of %#llx failed: no buffer, texture or placement memory (type %u)", (unsigned long long)c.Arg(0), type);
         std::memset(out, 0, 16);
         return 0x80004005u;
     });
@@ -1449,6 +1813,18 @@ void RegisterGpuOverrides() {
         Res* r = ResAt(c.Arg(0));
         if (r == nullptr || c.Arg(3) == 0) return 0;
         const auto* box = c.Ptr<uint32_t>(2);
+        if (!r->buffer && !r->texture && r->host_ptr != 0) {
+            // A placement buffer: the title's own memory, which draws copy from when they run. Forza Horizon 2's camera
+            // constants are DEFAULT-usage placement buffers filled this way; dropped, every world vertex went to (0,0,0,0).
+            const uint32_t left = box ? std::min(box[0], r->host_size) : 0, right = box ? std::min(box[3], r->host_size) : r->host_size;
+            if (right > left) std::memcpy(reinterpret_cast<void*>(r->host_ptr + left), c.Ptr<void>(3), right - left);
+            Tally("~placement buffer updates");
+            return 0;
+        }
+        if (static const bool diag = std::getenv("UTSURO_CBDIAG") != nullptr; diag && r->buffer && (r->bind & 4)) {
+            static std::atomic<int> shown {0};
+            if (shown++ < 80) UT_INFO("d3d: cbdiag UpdateSubresource cb obj %#llx %u B usage %u box %d on ctx %llu (deferred %d) frame %llu", (unsigned long long)c.Arg(0), gpu::BufferSize(*r->buffer), r->usage, box ? 1 : 0, (unsigned long long)c.obj.id, c.obj.u64["deferred"] != 0 ? 1 : 0, (unsigned long long)g_frame.load());
+        }
         if (r->buffer) {
             const uint32_t size = gpu::BufferSize(*r->buffer);
             if (box == nullptr) {
@@ -1485,10 +1861,31 @@ void RegisterGpuOverrides() {
         }
         return 0;
     });
+    // Buffer copies where a side is a placement buffer (guest memory, no Metal storage): done on the CPU, in call order, which
+    // is when draws read placement memory too.
+    static auto CopyPlacementBytes = [](Res* dst, uint32_t dst_at, Res* src, uint32_t src_at, uint32_t bytes) -> bool {
+        auto bytes_of = [](Res* r, uint32_t* size) -> uint8_t* {
+            if (r->buffer) { *size = gpu::BufferSize(*r->buffer); return gpu::BufferData(*r->buffer); }
+            if (!r->texture && r->host_ptr != 0) { *size = r->host_size; return reinterpret_cast<uint8_t*>(r->host_ptr); }
+            return nullptr;
+        };
+        if ((dst->buffer && src->buffer) || dst->texture || src->texture) return false;
+        uint32_t dsize = 0, ssize = 0;
+        uint8_t* d = bytes_of(dst, &dsize);
+        uint8_t* s = bytes_of(src, &ssize);
+        if (d == nullptr || s == nullptr) return false;
+        if (dst_at >= dsize || src_at >= ssize) return true;
+        bytes = std::min({bytes, dsize - dst_at, ssize - src_at});
+        std::memmove(d + dst_at, s + src_at, bytes);
+        Tally("~placement buffer copies");
+        return true;
+    };
     OverrideAll("CopyResource", [](Call& c) -> uint32_t {
+        TraceCopy("CopyResource", c, c.Arg(0), c.Arg(1));
         Res* dst = ResAt(c.Arg(0));
         Res* src = ResAt(c.Arg(1));
         if (dst == nullptr || src == nullptr) return 0;
+        if (CopyPlacementBytes(dst, 0, src, 0, ~0u)) return 0;
         if (dst->buffer && src->buffer) {
             Tally("~buffer copies");
             static std::atomic<int> shown {0};
@@ -1509,6 +1906,7 @@ void RegisterGpuOverrides() {
     // so it is a copy, converting depth into whatever the destination is. Rocket League reads its scene depth from such a copy
     // (fog, soft particles, shadow projection): without it that texture stays zero and dynamic shadows black out whole boxes.
     OverrideAll("DecompressResource", [](Call& c) -> uint32_t {
+        TraceCopy("DecompressResource", c, c.Arg(0), c.Arg(3));
         Res* dst = ResAt(c.Arg(0));
         Res* src = ResAt(c.Arg(3));
         static std::atomic<int> shown {0};
@@ -1542,6 +1940,7 @@ void RegisterGpuOverrides() {
     // ResolveSubresource(dst, dst sub, src, src sub, DXGI_FORMAT): Forza Horizon 2 renders multisampled and resolves before its
     // post-processing samples the result; unanswered, that texture stayed empty and the picture black.
     OverrideAll("ResolveSubresource", [](Call& c) -> uint32_t {
+        TraceCopy("ResolveSubresource", c, c.Arg(0), c.Arg(2));
         Res* dst = ResAt(c.Arg(0));
         Res* src = ResAt(c.Arg(2));
         if (dst == nullptr || src == nullptr || !dst->texture || !src->texture) return 0;
@@ -1557,11 +1956,13 @@ void RegisterGpuOverrides() {
         return 0;
     });
     OverrideAll("CopySubresourceRegion", [](Call& c) -> uint32_t {
+        TraceCopy("CopySubresourceRegion", c, c.Arg(0), c.Arg(5));
         Res* dst = ResAt(c.Arg(0));
         Res* src = ResAt(c.Arg(5));
         if (dst == nullptr || src == nullptr) return 0;
         const auto* box = c.Ptr<uint32_t>(7);
         const uint32_t dx = static_cast<uint32_t>(c.Arg(2)), dy = static_cast<uint32_t>(c.Arg(3)), dz = static_cast<uint32_t>(c.Arg(4));
+        if (CopyPlacementBytes(dst, dx, src, box ? box[0] : 0, box ? (box[3] > box[0] ? box[3] - box[0] : 0) : ~0u)) return 0;
         if (dst->buffer && src->buffer) {
             const uint32_t left = box ? box[0] : 0, right = box ? box[3] : gpu::BufferSize(*src->buffer);
             if (right > left) gpu::CopyBuffer(*dst->buffer, dx, *src->buffer, left, right - left);
@@ -1647,6 +2048,241 @@ void RegisterGpuOverrides() {
         return 0;
     });
 
+    // GetImmCtx is defined statically above
+
+    OverrideAll("RemapConstantBufferInheritance", [](Call& c) -> uint32_t {
+        const uint32_t stage = static_cast<uint32_t>(c.Arg(0));
+        const uint32_t slot = static_cast<uint32_t>(c.Arg(1));
+        const uint32_t inherit_stage = static_cast<uint32_t>(c.Arg(2));
+        const uint32_t inherit_slot = static_cast<uint32_t>(c.Arg(3));
+        auto& s = StateOf(c.obj);
+        if (stage < 6 && inherit_stage < 6 && slot < 16 && inherit_slot < 16) {
+            s.cb_remap[stage][slot] = { static_cast<uint8_t>(inherit_stage), static_cast<uint8_t>(inherit_slot) };
+            uint64_t cb = s.cb[inherit_stage][inherit_slot];
+            uint64_t addr = s.cb_address[inherit_stage][inherit_slot];
+            uint32_t first = s.cb_first[inherit_stage][inherit_slot];
+            uint32_t count = s.cb_count[inherit_stage][inherit_slot];
+            if (cb == 0 && addr == 0) {
+                if (CtxState* imm_s = GetImmCtx(c.obj)) {
+                    if (imm_s != &s) {
+                        cb = imm_s->cb[inherit_stage][inherit_slot];
+                        addr = imm_s->cb_address[inherit_stage][inherit_slot];
+                        first = imm_s->cb_first[inherit_stage][inherit_slot];
+                        count = imm_s->cb_count[inherit_stage][inherit_slot];
+                    }
+                }
+            }
+            s.cb[stage][slot] = cb;
+            s.cb_address[stage][slot] = addr;
+            s.cb_first[stage][slot] = first;
+            s.cb_count[stage][slot] = count ? count : 4096;
+
+            const uint32_t inherit_reg_base = (inherit_stage == 0 ? kRegCbA : ((inherit_stage == 4 || inherit_stage == 5) ? kRegCbB : 0));
+            const uint32_t stage_reg_base = (stage == 0 ? kRegCbA : ((stage == 4 || stage == 5) ? kRegCbB : 0));
+            if (inherit_reg_base != 0 && stage_reg_base != 0) {
+                auto it = s.regs.find(inherit_reg_base + 0x10 * inherit_slot);
+                if (it != s.regs.end()) {
+                    s.regs[stage_reg_base + 0x10 * slot] = it->second;
+                } else if (CtxState* imm_s = GetImmCtx(c.obj)) {
+                    auto it2 = imm_s->regs.find(inherit_reg_base + 0x10 * inherit_slot);
+                    if (it2 != imm_s->regs.end()) {
+                        s.regs[stage_reg_base + 0x10 * slot] = it2->second;
+                    }
+                }
+            }
+
+            static std::atomic<int> shown {0};
+            if (shown++ < 40) {
+                UT_INFO("d3d: RemapConstantBufferInheritance(ctx %llu): %s cb%u <- %s cb%u (cb=%#llx addr=%#llx first=%u count=%u)",
+                        (unsigned long long)c.obj.id, kStages[stage], slot, kStages[inherit_stage], inherit_slot,
+                        (unsigned long long)cb, (unsigned long long)addr, first, count);
+            }
+        }
+        return 0;
+    });
+
+    OverrideAll("RemapShaderResourceInheritance", [](Call& c) -> uint32_t {
+        const uint32_t stage = static_cast<uint32_t>(c.Arg(0));
+        const uint32_t slot = static_cast<uint32_t>(c.Arg(1));
+        const uint32_t inherit_stage = static_cast<uint32_t>(c.Arg(2));
+        const uint32_t inherit_slot = static_cast<uint32_t>(c.Arg(3));
+        auto& s = StateOf(c.obj);
+        if (stage < 6 && inherit_stage < 6 && slot < 128 && inherit_slot < 128) {
+            s.srv_remap[stage][slot] = { static_cast<uint8_t>(inherit_stage), static_cast<uint8_t>(inherit_slot) };
+            uint64_t srv = s.srv[inherit_stage][inherit_slot];
+            if (srv == 0) {
+                if (CtxState* imm_s = GetImmCtx(c.obj)) {
+                    if (imm_s != &s) srv = imm_s->srv[inherit_stage][inherit_slot];
+                }
+            }
+            s.srv[stage][slot] = srv;
+            if (inherit_stage == 4 && stage == 4) {
+                auto it = s.regs.find(kRegTexture + 0x20 * inherit_slot);
+                if (it != s.regs.end()) s.regs[kRegTexture + 0x20 * slot] = it->second;
+                else if (CtxState* imm_s = GetImmCtx(c.obj)) {
+                    auto it2 = imm_s->regs.find(kRegTexture + 0x20 * inherit_slot);
+                    if (it2 != imm_s->regs.end()) s.regs[kRegTexture + 0x20 * slot] = it2->second;
+                }
+            }
+            static std::atomic<int> shown {0};
+            if (shown++ < 30) {
+                UT_INFO("d3d: RemapShaderResourceInheritance(ctx %llu): %s srv%u <- %s srv%u (srv=%#llx)",
+                        (unsigned long long)c.obj.id, kStages[stage], slot, kStages[inherit_stage], inherit_slot, (unsigned long long)srv);
+            }
+        }
+        return 0;
+    });
+
+    OverrideAll("RemapSamplerInheritance", [](Call& c) -> uint32_t {
+        const uint32_t stage = static_cast<uint32_t>(c.Arg(0));
+        const uint32_t slot = static_cast<uint32_t>(c.Arg(1));
+        const uint32_t inherit_stage = static_cast<uint32_t>(c.Arg(2));
+        const uint32_t inherit_slot = static_cast<uint32_t>(c.Arg(3));
+        auto& s = StateOf(c.obj);
+        if (stage < 6 && inherit_stage < 6 && slot < 16 && inherit_slot < 16) {
+            s.sampler_remap[stage][slot] = { static_cast<uint8_t>(inherit_stage), static_cast<uint8_t>(inherit_slot) };
+            uint64_t samp = s.sampler[inherit_stage][inherit_slot];
+            if (samp == 0) {
+                if (CtxState* imm_s = GetImmCtx(c.obj)) {
+                    if (imm_s != &s) samp = imm_s->sampler[inherit_stage][inherit_slot];
+                }
+            }
+            s.sampler[stage][slot] = samp;
+        }
+        return 0;
+    });
+
+    OverrideAll("RemapVertexBufferInheritance", [](Call& c) -> uint32_t {
+        const uint32_t slot = static_cast<uint32_t>(c.Arg(0));
+        const uint32_t inherit_slot = static_cast<uint32_t>(c.Arg(1));
+        auto& s = StateOf(c.obj);
+        if (slot < 16 && inherit_slot < 16) {
+            s.vb[slot] = s.vb[inherit_slot];
+            s.vb_address[slot] = s.vb_address[inherit_slot];
+            s.stride[slot] = s.stride[inherit_slot];
+            s.voffset[slot] = s.voffset[inherit_slot];
+        }
+        return 0;
+    });
+
+    for (int st = 0; st < 6; ++st) {
+        const std::string p = kStages[st];
+        // Fast ConstantBuffer: (Slot, pBuffer)
+        OverrideAll((p + "SetFastConstantBuffer").c_str(), [st](Call& c) -> uint32_t {
+            auto& s = StateOf(c.obj);
+            const uint32_t slot = static_cast<uint32_t>(c.Arg(0));
+            if (slot < 16) {
+                s.cb[st][slot] = c.Arg(1);
+                s.cb_address[st][slot] = 0;
+                s.cb_first[st][slot] = 0;
+                s.cb_count[st][slot] = 4096;
+            }
+            return 0;
+        });
+        // Fast ShaderResource: (Slot, pSRV)
+        OverrideAll((p + "SetFastShaderResource").c_str(), [st](Call& c) -> uint32_t {
+            auto& s = StateOf(c.obj);
+            const uint32_t slot = static_cast<uint32_t>(c.Arg(0));
+            if (slot < 128) s.srv[st][slot] = c.Arg(1);
+            return 0;
+        });
+        // Fast Sampler: (Slot, pSampler)
+        OverrideAll((p + "SetFastSampler").c_str(), [st](Call& c) -> uint32_t {
+            auto& s = StateOf(c.obj);
+            const uint32_t slot = static_cast<uint32_t>(c.Arg(0));
+            if (slot < 16) s.sampler[st][slot] = c.Arg(1);
+            return 0;
+        });
+        // Placement ConstantBuffer: (Slot, pBuffer, pBaseAddress)
+        OverrideAll((p + "SetPlacementConstantBuffer").c_str(), [st](Call& c) -> uint32_t {
+            auto& s = StateOf(c.obj);
+            const uint32_t slot = static_cast<uint32_t>(c.Arg(0));
+            if (slot < 16) {
+                s.cb[st][slot] = c.Arg(1);
+                s.cb_address[st][slot] = c.Arg(2);
+                s.cb_first[st][slot] = 0;
+                s.cb_count[st][slot] = 4096;
+                if (c.Arg(2) != 0) {
+                    if (Res* r = ResAt(c.Arg(1))) r->host_ptr = c.Arg(2);
+                }
+            }
+            return 0;
+        });
+        // Placement ShaderResource: (Slot, pSRV, pBaseAddress)
+        OverrideAll((p + "SetPlacementShaderResource").c_str(), [st](Call& c) -> uint32_t {
+            auto& s = StateOf(c.obj);
+            const uint32_t slot = static_cast<uint32_t>(c.Arg(0));
+            if (slot < 128) {
+                s.srv[st][slot] = c.Arg(1);
+                if (c.Arg(2) != 0) {
+                    if (Res* r = ResAt(c.Arg(1))) {
+                        if (r->base != nullptr) {
+                            r->base->placement = c.Arg(2);
+                            r->base->placement_dirty = true;
+                        }
+                    }
+                }
+            }
+            return 0;
+        });
+        // GetConstantBuffers1
+        OverrideAll((p + "GetConstantBuffers1").c_str(), [st](Call& c) -> uint32_t {
+            auto& s = StateOf(c.obj);
+            for (uint64_t i = 0; i < c.Arg(1) && c.Arg(0) + i < 16; ++i) {
+                const uint64_t k = c.Arg(0) + i;
+                if (c.Arg(2)) c.Ptr<uint64_t>(2)[i] = s.cb[st][k];
+                if (c.Arg(3)) c.Ptr<uint32_t>(3)[i] = s.cb_first[st][k];
+                if (c.Arg(4)) c.Ptr<uint32_t>(4)[i] = s.cb_count[st][k];
+            }
+            return 0;
+        });
+    }
+
+    OverrideAll("IASetFastVertexBuffer", [](Call& c) -> uint32_t {
+        const uint32_t slot = static_cast<uint32_t>(c.Arg(0));
+        if (slot < 16) {
+            auto& s = StateOf(c.obj);
+            s.vb[slot] = c.Arg(1);
+            s.vb_address[slot] = 0;
+            s.stride[slot] = static_cast<uint32_t>(c.Arg(2));
+            s.voffset[slot] = 0;
+        }
+        return 0;
+    });
+
+    OverrideAll("IASetFastIndexBuffer", [](Call& c) -> uint32_t {
+        auto& s = StateOf(c.obj);
+        s.ib_format = (c.Arg(0) & 0xFF) == 0 ? 57 : 42;
+        s.ib = c.Arg(1);
+        s.ib_address = 0;
+        s.ib_offset = 0;
+        return 0;
+    });
+
+    OverrideAll("IASetPlacementVertexBuffer", [](Call& c) -> uint32_t {
+        const uint32_t slot = static_cast<uint32_t>(c.Arg(0));
+        if (slot < 16) {
+            auto& s = StateOf(c.obj);
+            s.vb[slot] = c.Arg(1);
+            s.vb_address[slot] = c.Arg(2);
+            s.stride[slot] = static_cast<uint32_t>(c.Arg(3));
+            s.voffset[slot] = 0;
+            if (c.Arg(2) != 0) {
+                if (Res* r = ResAt(c.Arg(1))) r->host_ptr = c.Arg(2);
+            }
+        }
+        return 0;
+    });
+
+    OverrideAll("IASetPrimitiveResetIndex", [](Call&) -> uint32_t { return 0; });
+    OverrideAll("SetShaderResourceViewMinLOD", [](Call&) -> uint32_t { return 0; });
+    OverrideAll("SetResourceCompression", [](Call&) -> uint32_t { return 0; });
+    OverrideAll("CSEnableAutomaticGpuFlush", [](Call&) -> uint32_t { return 0; });
+    OverrideAll("GpuSendPipelinedEvent", [](Call&) -> uint32_t { return 0; });
+    OverrideAll("InsertWaitUntilIdle", [](Call&) -> uint32_t { return 0; });
+    OverrideAll("InsertWaitOnFence", [](Call&) -> uint32_t { return 0; });
+    OverrideAll("FlushGpuCaches", [](Call&) -> uint32_t { return 0; });
+
     // FlushGpuCacheRange(flags, address, size): the title wrote this memory with the CPU; the GPU's copy of it is stale.
     OverrideAll("FlushGpuCacheRange", [](Call& c) -> uint32_t {
         const uint64_t from = c.Arg(1), to = c.Arg(1) + c.Arg(2);
@@ -1670,11 +2306,40 @@ void RegisterGpuOverrides() {
         Tally("~lists executed");
         if (list != nullptr) Tally("~list draws replayed", list->recorded.size());
         static std::atomic<int> shown {0};
-        if (shown++ < 24) UT_INFO("d3d: ExecuteCommandList(%#llx): res %p, %zu draws", (unsigned long long)c.Arg(0), static_cast<void*>(list), list ? list->recorded.size() : 0);
+        if (shown++ < 24 || gpu::IsTraceFrame(g_frame.load())) UT_INFO("d3d: ExecuteCommandList(%#llx) on ctx %llu: res %p, %zu draws", (unsigned long long)c.Arg(0), (unsigned long long)c.obj.id, static_cast<void*>(list), list ? list->recorded.size() : 0);
         if (list == nullptr || !gpu::Available()) return 0;
-        const CtxState& imm = StateOf(c.obj);
+        CtxState& imm = StateOf(c.obj);
+        ParseStream(c.obj, imm);   // the immediate context's inline descriptors as of this execute
+        auto imm_reg = [&imm](uint32_t reg) -> const CtxState::Reg* { auto it = imm.regs.find(reg); return it == imm.regs.end() ? nullptr : &it->second; };
+        auto imm_address = [](const CtxState::Reg& r) { return static_cast<uint64_t>(r.dw[0]) | (static_cast<uint64_t>(r.dw[1] & 0xFFFF) << 32); };
         for (const RecordedDraw& rd : list->recorded) {
             gpu::DrawState d = rd.state;
+            // Console command lists run against the executing context's output state: a draw recorded before its list bound
+            // any render targets (or viewports) uses the ones bound when the list runs, and what a list binds stays bound
+            // after it (see the end of this function). Forza Horizon 2 binds its scene target in one list and draws the
+            // world from pre-recorded lists that bind none; their deferred contexts still held a 1x1 placeholder from
+            // earlier use (UTSURO_RTINHERIT=0: replay what was recorded).
+            static const std::string inherit_mode = std::getenv("UTSURO_RTINHERIT") ? std::getenv("UTSURO_RTINHERIT") : "tiny";
+            if (inherit_mode == "list") {
+                if (!rd.own_om) {
+                    for (int i = 0; i < 8; ++i) { Res* r = ResAt(imm.rtv[i]); d.rtv[i] = r ? r->view : nullptr; }
+                    Res* r = ResAt(imm.dsv);
+                    d.dsv = r ? r->view : nullptr;
+                }
+                if (!rd.own_vp && imm.num_viewports != 0) {
+                    d.num_viewports = imm.num_viewports;
+                    std::memcpy(d.viewports, imm.viewports, sizeof d.viewports);
+                }
+            } else if (inherit_mode != "0" && d.rtv[0] && d.rtv[0]->texture) {
+                // "tiny" (default): a list draw into a <= 4x4 placeholder while the executing context has a real target takes that.
+                const auto& ti = gpu::TextureInfo(*d.rtv[0]->texture);
+                Res* ir = ResAt(imm.rtv[0]);
+                if (ti.width <= 4 && ti.height <= 4 && ir && ir->view && ir->view->texture && gpu::TextureInfo(*ir->view->texture).width > 4) {
+                    for (int i = 0; i < 8; ++i) { Res* r = ResAt(imm.rtv[i]); d.rtv[i] = r ? r->view : nullptr; }
+                    Res* r = ResAt(imm.dsv);
+                    d.dsv = r ? r->view : nullptr;
+                }
+            }
             for (int i = 0; i < 8; ++i)
                 if (!d.rtv[i]) if (Res* r = ResAt(imm.rtv[i])) d.rtv[i] = r->view;
             if (!d.dsv) if (Res* r = ResAt(imm.dsv)) d.dsv = r->view;
@@ -1686,11 +2351,81 @@ void RegisterGpuOverrides() {
             for (int stage = 0; stage < 2; ++stage) {
                 for (int k = 0; k < 14; ++k) {
                     if (rd.cb_addr[stage][k] != 0 && rd.cb_size[stage][k] != 0) {
+                        if (static const bool diag = std::getenv("UTSURO_CBDIAG") != nullptr; diag && stage == 0 && k == 2) {
+                            static std::atomic<uint64_t> n {0};
+                            if (n++ % 3000 == 0) {
+                                const uint32_t* w = reinterpret_cast<const uint32_t*>(rd.cb_addr[0][2]);
+                                uint32_t nz = 0;
+                                for (uint32_t j = 0; j < rd.cb_size[0][2] / 4; ++j) nz += w[j] != 0;
+                                UT_INFO("d3d: cbdiag replay vs cb2 %#llx %u B: %u dwords non-zero, frame %llu", (unsigned long long)rd.cb_addr[0][2], rd.cb_size[0][2], nz, (unsigned long long)g_frame.load());
+                            }
+                        }
                         if (auto b = CopyOfHost(rd.cb_addr[stage][k], rd.cb_size[stage][k])) {
                             d.cb[stage][k].buffer = b;
                             d.cb[stage][k].offset = 0;
                             d.cb[stage][k].size = rd.cb_size[stage][k];
                         }
+                    }
+                }
+            }
+            // On the console a command list runs against the immediate context's state: the title binds its
+            // per-frame vertex constants and textures there and only records per-draw state in the list. The
+            // deferred context's own stream never carries them, so a recorded draw's declared slots that stayed
+            // unbound resolve from the immediate context now -- Forza Horizon 2's world draws kept every vertex
+            // constant buffer unbound otherwise, collapsing the whole scene to (0,0,0,0) and an empty frame.
+            for (int stage = 0; stage < 2; ++stage) {
+                const std::shared_ptr<gpu::Shader>& sh = stage == 0 ? d.vs : d.ps;
+                if (!sh) continue;
+                const auto& rf = gpu::Reflection(*sh);
+                const int src = stage == 0 ? 0 : 4;
+                for (uint32_t k = 0; k < 14; ++k) {
+                    if (!(rf.constant_buffers & (1u << k)) || d.cb[stage][k].buffer != nullptr) continue;
+                    if (const auto* v = imm_reg((stage == 0 ? kRegCbA : kRegCbB) + 0x10 * k); v != nullptr && v->n >= 3) {
+                        uint32_t size = std::min<uint32_t>(v->dw[2], 65536);
+                        if (rf.cb_size[k] != 0) size = std::min<uint32_t>(size, rf.cb_size[k] * 16);
+                        if (auto b = CopyOfHost(imm_address(*v), size)) {
+                            d.cb[stage][k].buffer = b;
+                            d.cb[stage][k].offset = 0;
+                            d.cb[stage][k].size = size;
+                        }
+                    }
+                    if (!d.cb[stage][k].buffer && imm.cb_address[src][k] != 0) {
+                        uint32_t size = imm.cb_count[src][k] ? imm.cb_count[src][k] * 16 : 65536;
+                        if (rf.cb_size[k] != 0) size = std::min<uint32_t>(size, rf.cb_size[k] * 16);
+                        const uint64_t addr = imm.cb_address[src][k] + imm.cb_first[src][k] * 16;
+                        d.cb[stage][k].buffer = CopyOfHost(addr, size, false);
+                        d.cb[stage][k].offset = 0;
+                        d.cb[stage][k].size = size;
+                    }
+                    if (!d.cb[stage][k].buffer) {
+                        if (Res* r = ResAt(imm.cb[src][k])) {
+                            if (r->buffer) {
+                                d.cb[stage][k].buffer = r->buffer;
+                                d.cb[stage][k].offset = imm.cb_first[src][k] * 16;
+                                d.cb[stage][k].size = imm.cb_count[src][k] ? imm.cb_count[src][k] * 16 : gpu::BufferSize(*r->buffer);
+                            } else if (r->host_ptr != 0) {
+                                uint32_t size = imm.cb_count[src][k] ? imm.cb_count[src][k] * 16 : (r->host_size ? r->host_size : 65536);
+                                if (rf.cb_size[k] != 0) size = std::min<uint32_t>(size, rf.cb_size[k] * 16);
+                                const uint64_t addr = r->host_ptr + imm.cb_first[src][k] * 16;
+                                d.cb[stage][k].buffer = CopyOfHost(addr, size, false);
+                                d.cb[stage][k].offset = 0;
+                                d.cb[stage][k].size = size;
+                            }
+                        }
+                    }
+                    static const uint64_t cbfrom2 = std::getenv("UTSURO_CBFROM") != nullptr ? std::strtoull(std::getenv("UTSURO_CBFROM"), nullptr, 10) : ~0ull;
+                    static std::atomic<int> filled {0}, empty {0};
+                    if (g_frame.load() < cbfrom2) continue;
+                    if (d.cb[stage][k].buffer != nullptr) {
+                        if (filled++ < 12) {
+                            size_t nz = 0;
+                            const uint32_t* dw = reinterpret_cast<const uint32_t*>(gpu::BufferData(*d.cb[stage][k].buffer) + d.cb[stage][k].offset);
+                            const size_t words = std::min<size_t>(d.cb[stage][k].size != 0 ? d.cb[stage][k].size : 65536, gpu::BufferSize(*d.cb[stage][k].buffer)) / 4;
+                            for (size_t w = 0; w < words; ++w) nz += dw[w] != 0;
+                            UT_INFO("d3d: list draw: %s cb%u filled from the immediate context (%u bytes, %zu non-zero dwords)", stage ? "ps" : "vs", k, d.cb[stage][k].size, nz);
+                        }
+                    } else if (empty++ < 6) {
+                        UT_INFO("d3d: list draw: %s cb%u still unbound at execute (%zu immediate registers)", stage ? "ps" : "vs", k, imm.regs.size());
                     }
                 }
             }
@@ -1704,6 +2439,17 @@ void RegisterGpuOverrides() {
                 }
             }
             gpu::Draw(d, rd.args);
+        }
+        // What the list bound stays bound on the executing context (the console's lists leave their output state behind).
+        if (static const bool carry = std::getenv("UTSURO_RTINHERIT") != nullptr && std::string(std::getenv("UTSURO_RTINHERIT")) == "list"; carry) {
+            if (list->final_om) {
+                std::memcpy(imm.rtv, list->final_rtv, sizeof imm.rtv);
+                imm.dsv = list->final_dsv;
+            }
+            if (list->final_vp) {
+                imm.num_viewports = list->final_nvp;
+                std::memcpy(imm.viewports, list->final_vps, sizeof imm.viewports);
+            }
         }
         // A list runs as often as the title executes it: Forza Horizon 2 records its scene into lists once and executes ~850 a frame
         // (dropping the recording after the first run left everything but per-frame work undrawn). The recording goes when the title
@@ -1854,7 +2600,6 @@ void RegisterGpuOverrides() {
     });
 
     // ---- constant buffer ranges (D3D11.1) ----
-    static const char* const kStages[6] = {"VS", "HS", "DS", "GS", "PS", "CS"};
     for (int st = 0; st < 6; ++st) {
         OverrideAll((std::string(kStages[st]) + "SetConstantBuffers1").c_str(), [st](Call& c) -> uint32_t {
             auto& s = StateOf(c.obj);

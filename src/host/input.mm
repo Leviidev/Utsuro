@@ -1,6 +1,7 @@
 #include "host/input.h"
 
 #include "gpu/renderer.h"
+#include "engine/log.h"
 
 #import <Foundation/Foundation.h>
 #import <GameController/GameController.h>
@@ -17,6 +18,9 @@
 #include <cstdio>
 #include <string>
 #include <vector>
+
+// Defined in gpu/renderer.mm; not in renderer.h so that a debug-only tweak does not rebuild the tree.
+namespace utsuro::gpu { void SetDebug(const std::string& flags); }
 
 namespace utsuro::input {
 
@@ -87,6 +91,28 @@ void ApplyScript(PadState& s) {
         else if (n == "LSUP") s.left_y = 1; else if (n == "LSDOWN") s.left_y = -1; else if (n == "LSLEFT") s.left_x = -1; else if (n == "LSRIGHT") s.left_x = 1;
         else if (n == "RSUP") s.right_y = 1; else if (n == "RSDOWN") s.right_y = -1; else if (n == "RSLEFT") s.right_x = -1; else if (n == "RSRIGHT") s.right_x = 1;
         else if (n == "RT") s.right_trigger = 1; else if (n == "LT") s.left_trigger = 1;
+    }
+}
+
+void ApplyTitleBypass(PadState& s) {
+    // UTSURO_BYPASS_TITLE=1: Forza Horizon 2's press-start screen, for unattended runs.
+    static const bool enabled = []() {
+        const char* e = std::getenv("UTSURO_BYPASS_TITLE");
+        return e != nullptr && std::strcmp(e, "0") != 0;
+    }();
+    if (!enabled) return;
+    const uint64_t fc = gpu::FrameCount();
+    // At title screen (between frame 2400 and 4500), pulse button A
+    // (press for 30 frames, release for 30 frames) to bypass the "Press A to Start" screen cleanly.
+    if (fc >= 2400 && fc <= 4500) {
+        static uint64_t last_log = 0;
+        if (fc - last_log >= 300) {
+            last_log = fc;
+            UT_INFO("input: title screen bypass pulsing button A (frame %llu)", (unsigned long long)fc);
+        }
+        if ((fc % 60) < 30) {
+            s.buttons |= kA;
+        }
     }
 }
 
@@ -191,6 +217,11 @@ void RunCommand(const std::string& line) {
         std::string path;
         ss >> path;
         if (!path.empty()) gpu::RequestSnapshot(path);
+    } else if (cmd == "debug") {
+        std::string rest;
+        std::getline(ss, rest);
+        while (!rest.empty() && rest.front() == ' ') rest.erase(rest.begin());
+        gpu::SetDebug(rest);
     } else if (cmd == "trace") {
         gpu::RequestTrace();
     } else if (cmd == "quit") {
@@ -259,6 +290,7 @@ PadState Poll() {
         s.left_trigger = std::max(s.left_trigger, g_touch.left_trigger);
         s.right_trigger = std::max(s.right_trigger, g_touch.right_trigger);
     }
+    ApplyTitleBypass(s);
     ApplyScript(s);
     ApplyOverrides(s);
     return s;

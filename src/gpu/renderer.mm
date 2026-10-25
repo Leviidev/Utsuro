@@ -114,8 +114,9 @@ struct Globals {
     uint64_t frame_count {0};
     int trace_draws {0};
     uint64_t trace_frame {0};
-    uint32_t trace_cap {1500};   ///< draws logged in the traced frame (UTSURO_TRACECAP)
+    uint32_t trace_cap {10000};  ///< draws logged in the traced frame (UTSURO_TRACECAP)
     id<MTLRenderPipelineState> depth_copy_pipeline {nil};
+    id<MTLRenderPipelineState> depth_copy_ms_pipeline {nil};
     int step_dumps {0}, srv_dumps {0};
     int draws_in_command {0};   ///< draws encoded into the current command buffer (it is committed every so many)
     const char* dir_or_empty() const { return dump_dir ? dump_dir : "."; }
@@ -1304,7 +1305,7 @@ std::shared_ptr<InputLayout> CreateInputLayout(const std::vector<InputElement>& 
 /// D3D shaders sample a depth buffer's SRV as plain floats; Metal only allows that through a depth2d. Keeps a float copy of `t`
 /// (rebuilt whenever the depth texture was written since) and returns it.
 id<MTLTexture> DepthAsFloat(Texture& t) {
-    if (t.mtl == nil || t.mtl.textureType != MTLTextureType2D) return nil;
+    if (t.mtl == nil || (t.mtl.textureType != MTLTextureType2D && t.mtl.textureType != MTLTextureType2DMultisample)) return nil;
     if (t.depth_copy == nil || t.depth_copy.width != t.mtl.width || t.depth_copy.height != t.mtl.height) {
         MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float width:t.mtl.width height:t.mtl.height mipmapped:NO];
         d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
@@ -1326,7 +1327,8 @@ id<MTLTexture> DepthAsFloat(Texture& t) {
         NSString* src = @"#include <metal_stdlib>\nusing namespace metal;\n"
             "struct V { float4 pos [[position]]; float2 uv; };\n"
             "vertex V vmain(uint vid [[vertex_id]]) { float2 p = float2((vid << 1) & 2, vid & 2); V o; o.pos = float4(p * 2.0 - 1.0, 0, 1); o.uv = float2(p.x, 1.0 - p.y); return o; }\n"
-            "fragment float4 fmain(V in [[stage_in]], depth2d<float> t [[texture(0)]]) { constexpr sampler s(filter::nearest, address::clamp_to_edge); float d = t.sample(s, in.uv); return float4(d, d, d, d); }\n";
+            "fragment float4 fmain(V in [[stage_in]], depth2d<float> t [[texture(0)]]) { constexpr sampler s(filter::nearest, address::clamp_to_edge); float d = t.sample(s, in.uv); return float4(d, d, d, d); }\n"
+            "fragment float4 fmain_ms(V in [[stage_in]], depth2d_ms<float> t [[texture(0)]]) { float d = t.read(uint2(in.pos.xy), 0); return float4(d, d, d, d); }\n";
         NSError* err = nil;
         id<MTLLibrary> lib = [g->device newLibraryWithSource:src options:nil error:&err];
         if (lib == nil) { UT_ERROR("gpu: depth copy shader: %s", [[err localizedDescription] UTF8String]); return nil; }
@@ -1336,6 +1338,10 @@ id<MTLTexture> DepthAsFloat(Texture& t) {
         pd.colorAttachments[0].pixelFormat = MTLPixelFormatR32Float;
         g->depth_copy_pipeline = [g->device newRenderPipelineStateWithDescriptor:pd error:&err];
         if (g->depth_copy_pipeline == nil) { UT_ERROR("gpu: depth copy pipeline: %s", [[err localizedDescription] UTF8String]); return nil; }
+
+        pd.fragmentFunction = [lib newFunctionWithName:@"fmain_ms"];
+        g->depth_copy_ms_pipeline = [g->device newRenderPipelineStateWithDescriptor:pd error:&err];
+        if (g->depth_copy_ms_pipeline == nil) { UT_ERROR("gpu: depth copy ms pipeline: %s", [[err localizedDescription] UTF8String]); return nil; }
     }
     EndEncoder();
     MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -1343,7 +1349,8 @@ id<MTLTexture> DepthAsFloat(Texture& t) {
     pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
     id<MTLRenderCommandEncoder> e = [Command() renderCommandEncoderWithDescriptor:pass];
-    [e setRenderPipelineState:g->depth_copy_pipeline];
+    id<MTLRenderPipelineState> pso = (t.mtl.textureType == MTLTextureType2DMultisample) ? g->depth_copy_ms_pipeline : g->depth_copy_pipeline;
+    [e setRenderPipelineState:pso];
     [e setFragmentTexture:t.mtl atIndex:0];
     [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [e endEncoding];
@@ -1366,7 +1373,11 @@ void Draw(const DrawState& st, const DrawArgs& args) {
                     if (g->frame_count == g->trace_frame && std::find(g->trace_depths.begin(), g->trace_depths.end(), dt) == g->trace_depths.end()) g->trace_depths.push_back(dt);
                 }
             for (const auto& [slot, view] : st.extra_srv[stage])
-                if (view && view->texture && IsDepth(view->texture->pixel_format)) DepthAsFloat(*view->texture);
+                if (view && view->texture && IsDepth(view->texture->pixel_format)) {
+                    Texture* dt = view->texture.get();
+                    DepthAsFloat(*dt);
+                    if (g->frame_count == g->trace_frame && std::find(g->trace_depths.begin(), g->trace_depths.end(), dt) == g->trace_depths.end()) g->trace_depths.push_back(dt);
+                }
         }
         int width = 0, height = 0;
         if (!BeginPass(st, &width, &height)) { ++g->stats.no_pass; return; }
@@ -1402,7 +1413,7 @@ void Draw(const DrawState& st, const DrawArgs& args) {
         const uint32_t cull = st.raster.empty() ? 3 : Rd<uint32_t>(st.raster.bytes, 4);
         [e setCullMode:(cull == 1 || g->debug.find("nocull") != std::string::npos) ? MTLCullModeNone : cull == 2 ? MTLCullModeFront : MTLCullModeBack];
         [e setFrontFacingWinding:(!st.raster.empty() && Rd<uint32_t>(st.raster.bytes, 8) != 0) ? MTLWindingCounterClockwise : MTLWindingClockwise];
-        [e setTriangleFillMode:(!st.raster.empty() && Rd<uint32_t>(st.raster.bytes, 0) == 2) ? MTLTriangleFillModeLines : MTLTriangleFillModeFill];
+        [e setTriangleFillMode:(!st.raster.empty() && Rd<uint32_t>(st.raster.bytes, 0) == 2) || g->debug.find("wire") != std::string::npos ? MTLTriangleFillModeLines : MTLTriangleFillModeFill];
         if (!st.raster.empty()) {
             [e setDepthBias:(float)Rd<int32_t>(st.raster.bytes, 12) slopeScale:Rd<float>(st.raster.bytes, 20) clamp:Rd<float>(st.raster.bytes, 16)];
             [e setDepthClipMode:Rd<uint32_t>(st.raster.bytes, 24) != 0 ? MTLDepthClipModeClip : MTLDepthClipModeClamp];
@@ -1420,7 +1431,7 @@ void Draw(const DrawState& st, const DrawArgs& args) {
         [e setViewport:vp];
         MTLScissorRect sc = {0, 0, (NSUInteger)width, (NSUInteger)height};
         const bool scissor_on = !st.raster.empty() && Rd<uint32_t>(st.raster.bytes, 28) != 0;
-        if (scissor_on && st.num_scissors > 0) {
+        if (scissor_on && st.num_scissors > 0 && g->debug.find("noscissor") == std::string::npos) {
             const ScissorRect& r = st.scissors[0];
             const int l = std::max(0, std::min(r.left, width)), t = std::max(0, std::min(r.top, height));
             const int rr = std::max(l, std::min(r.right, width)), bb = std::max(t, std::min(r.bottom, height));
@@ -1517,10 +1528,42 @@ void Draw(const DrawState& st, const DrawArgs& args) {
             id<MTLTexture> rt0 = st.rtv[0] && st.rtv[0]->texture ? ViewOf(*st.rtv[0]->texture, st.rtv[0]->desc, true) : nil;
             if (st.dsv && st.dsv->texture) UT_INFO("gpu:   dsv [%p] %lux%lu fmt %lu depth_gen %llu", (__bridge void*)st.dsv->texture->mtl, (unsigned long)st.dsv->texture->mtl.width, (unsigned long)st.dsv->texture->mtl.height,
                                                     (unsigned long)st.dsv->texture->mtl.pixelFormat, (unsigned long long)st.dsv->texture->depth_gen);
-            UT_INFO("gpu: draw %s count %u inst %u topo %u vs %p(#%d) ps %p(#%d) layout %p rt0 [%p] %ux%u fmt %lu depth %d vp %.0fx%.0f+%.0f,%.0f cb0 %p tex0 %p blend %zu", args.indexed ? "indexed" : "plain", args.count, args.instances, st.topology,
+            UT_INFO("gpu: draw %s count %u inst %u topo %u vs %p(#%d) ps %p(#%d) layout %p rt0 [%p] %ux%u fmt %lu depth %d vp %.0fx%.0f+%.0f,%.0f scis %d:%d,%d,%d,%d cb0 %p tex0 %p blend %zu", args.indexed ? "indexed" : "plain", args.count, args.instances, st.topology,
                     (void*)st.vs.get(), st.vs->serial, (void*)st.ps.get(), st.ps ? st.ps->serial : 0, (void*)st.layout.get(), st.rtv[0] && st.rtv[0]->texture ? (__bridge void*)st.rtv[0]->texture->mtl : nullptr, rt0 ? (unsigned)rt0.width : 0, rt0 ? (unsigned)rt0.height : 0, rt0 ? (unsigned long)rt0.pixelFormat : 0, has_depth,
                     st.num_viewports ? st.viewports[0].w : 0.f, st.num_viewports ? st.viewports[0].h : 0.f, st.num_viewports ? st.viewports[0].x : 0.f, st.num_viewports ? st.viewports[0].y : 0.f,
+                    scissor_on ? 1 : 0, st.num_scissors > 0 ? st.scissors[0].left : -1, st.num_scissors > 0 ? st.scissors[0].top : -1, st.num_scissors > 0 ? st.scissors[0].right : -1, st.num_scissors > 0 ? st.scissors[0].bottom : -1,
                     (void*)st.cb[0][0].buffer.get(), (void*)st.srv[1][0].get(), st.blend.bytes.size());
+                {
+                    std::string vbs, cbs, ins, ls;
+                    for (int i = 0; i < 8; ++i) {
+                        char t[96];
+                        if (!st.vb[i].buffer) { std::snprintf(t, sizeof t, " vb%d:NIL", i); vbs += t; continue; }
+                        std::snprintf(t, sizeof t, " vb%d:%uB/stride%u/off%u", i, st.vb[i].buffer->size, st.vb[i].stride, st.vb[i].offset); vbs += t;
+                    }
+                    for (int k = 0; k < 14; ++k) {
+                        if (!(st.vs->translated.reflection.constant_buffers & (1u << k))) continue;
+                        char t[48]; std::snprintf(t, sizeof t, " b%d:%s%u", k, st.cb[0][k].buffer ? "" : "NIL/", st.cb[0][k].size); cbs += t;
+                    }
+                    for (const auto& in : st.vs->translated.reflection.inputs) {
+                        char t[64]; std::snprintf(t, sizeof t, " %s%d@r%u/sv%u", in.semantic.c_str(), in.index, in.reg, in.system_value); ins += t;
+                    }
+                    if (st.layout) for (const auto& el : st.layout->elements) {
+                        char t[96]; std::snprintf(t, sizeof t, " %s%d:slot%u/fmt%u/off%u/cls%u/rate%u", el.semantic.c_str(), el.semantic_index, el.slot, el.format, el.offset, el.slot_class, el.step_rate); ls += t;
+                    }
+                    UT_INFO("gpu:   vs#%d start %u base_vertex %d inst0 %u indirect %p", st.vs->serial, args.start, args.base_vertex, args.start_instance, (void*)args.indirect.get());
+                    UT_INFO("gpu:   vb[%s ] cb[%s ]", vbs.c_str(), cbs.c_str());
+                    UT_INFO("gpu:   vs in[%s ]", ins.c_str());
+                    UT_INFO("gpu:   layout[%s ]", ls.c_str());
+                    if (g->dump_dir != nullptr) {
+                        char p[512];
+                        std::snprintf(p, sizeof p, "%s/vs_%03d.metal", g->dump_dir, st.vs->serial);
+                        if (FILE* f = std::fopen(p, "w")) { std::fputs(st.vs->translated.msl.c_str(), f); std::fclose(f); }
+                        if (st.ps) {
+                            std::snprintf(p, sizeof p, "%s/ps_%03d.metal", g->dump_dir, st.ps->serial);
+                            if (FILE* f = std::fopen(p, "w")) { std::fputs(st.ps->translated.msl.c_str(), f); std::fclose(f); }
+                        }
+                    }
+                }
             }
         }
         if (g->frame_count == g->trace_frame && g->trace_draws <= g->trace_cap && g->trace_draws > 0 && std::getenv("UTSURO_TRACEPIXELS")) {
@@ -1565,6 +1608,17 @@ void Draw(const DrawState& st, const DrawArgs& args) {
                         bb.size(), Rd<uint32_t>(bb, 0), Rd<uint32_t>(bb, 4), Rd<uint32_t>(bb, 8), Rd<uint32_t>(bb, 12), Rd<uint32_t>(bb, 16), Rd<uint32_t>(bb, 20), Rd<uint32_t>(bb, 24), Rd<uint32_t>(bb, 28), Rd<uint32_t>(bb, 32), Rd<uint8_t>(bb, 36),
                         st.depth_stencil.bytes.size(), Rd<uint32_t>(st.depth_stencil.bytes, 0), Rd<uint32_t>(st.depth_stencil.bytes, 4), Rd<uint32_t>(st.depth_stencil.bytes, 8),
                         st.raster.bytes.size(), Rd<uint32_t>(st.raster.bytes, 0), Rd<uint32_t>(st.raster.bytes, 4), Rd<uint32_t>(st.raster.bytes, 8), Rd<uint32_t>(st.raster.bytes, 24), Rd<uint32_t>(st.raster.bytes, 28));
+            }
+            if (st.vs) for (int i = 0; i < 16; ++i) {
+                // Vertex-stage textures, with texel (0,0) raw for small ones (exposure and similar 1-texel values).
+                if (!(st.vs->translated.reflection.textures & (1u << i))) continue;
+                if (!st.srv[0][i] || !st.srv[0][i]->texture) { UT_INFO("gpu:   vs t%d: NOT BOUND", i); continue; }
+                Texture& tx = *st.srv[0][i]->texture;
+                uint32_t px[4] = {};
+                if (!IsDepth(tx.pixel_format) && tx.mtl.textureType == MTLTextureType2D && tx.mtl.width <= 64 && tx.mtl.storageMode != MTLStorageModePrivate)
+                    [tx.mtl getBytes:px bytesPerRow:256 fromRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0];
+                UT_INFO("gpu:   vs t%d [%p]: %lux%lu fmt %lu texel0 %08x %08x %08x %08x (%g)", i, (__bridge void*)tx.mtl, (unsigned long)tx.mtl.width, (unsigned long)tx.mtl.height, (unsigned long)tx.pixel_format,
+                        px[0], px[1], px[2], px[3], *reinterpret_cast<float*>(&px[0]));
             }
             if (st.ps) for (int i = 0; i < 16; ++i) {
                 if (!(st.ps->translated.reflection.textures & (1u << i))) continue;
@@ -1686,7 +1740,7 @@ void Draw(const DrawState& st, const DrawArgs& args) {
                 for (size_t i = 0; i < px.size(); i += 4) lit += (px[i] | px[i + 1] | px[i + 2]) != 0;
                 UT_INFO("gpu: after draw %d: rt0 [%p] %ux%u: %zu lit pixels", g->trace_draws, (__bridge void*)rt0, (unsigned)rt0.width, (unsigned)rt0.height, lit);
             }
-            if (g->dump_dir != nullptr) {
+            if (g->dump_dir != nullptr && g->trace_draws <= 60) {
                 char dpath[512];
                 std::snprintf(dpath, sizeof dpath, "%s/draw_%02u_rt0_%ux%u_fmt%lu.png", g->dump_dir, g->trace_draws, (unsigned)st.rtv[0]->texture->mtl.width, (unsigned)st.rtv[0]->texture->mtl.height, (unsigned long)st.rtv[0]->texture->mtl.pixelFormat);
                 SavePng(*st.rtv[0]->texture, dpath);
@@ -1701,6 +1755,11 @@ void Dispatch(const DispatchState& st, uint32_t x, uint32_t y, uint32_t z) {
     static int disp_count = 0;
     if (disp_count++ < 20 || g->frame_count == g->trace_frame) {
         UT_INFO("gpu: Dispatch call %d (frame %llu): x=%u y=%u z=%u cs=%p(#%d)", disp_count, (unsigned long long)g->frame_count, x, y, z, st.cs.get(), st.cs->serial);
+        if (g->dump_dir != nullptr) {
+            char p[512];
+            std::snprintf(p, sizeof p, "%s/cs_%03d.metal", g->dump_dir, st.cs->serial);
+            if (FILE* f = std::fopen(p, "w")) { std::fputs(st.cs->translated.msl.c_str(), f); std::fclose(f); }
+        }
         if (g->frame_count == g->trace_frame) {
             const ShaderReflection& rf = st.cs->translated.reflection;
             for (int i = 0; i < 16; ++i) {
@@ -1760,6 +1819,12 @@ void Dispatch(const DispatchState& st, uint32_t x, uint32_t y, uint32_t z) {
         }
 
         // SRVs: textures at 0..15, structured buffers at 14..29
+        for (int i = 0; i < 16; ++i) {
+            if (st.srv[i] && st.srv[i]->texture && IsDepth(st.srv[i]->texture->pixel_format)) DepthAsFloat(*st.srv[i]->texture);
+        }
+        for (const auto& [slot, view] : st.extra_srv) {
+            if (view && view->texture && IsDepth(view->texture->pixel_format)) DepthAsFloat(*view->texture);
+        }
         for (int i = 0; i < 16; ++i) {
             if (!(rf.textures & (1u << i))) continue;
             if (rf.texture_dimension[i] == 12) {
@@ -2010,13 +2075,57 @@ bool SavePng(Texture& texture, const std::string& path) {
     @autoreleasepool {
         id<MTLTexture> t = texture.mtl;
         if (t == nil) return false;
+        id<MTLTexture> resolved = nil;
+        if (t.sampleCount > 1) {
+            MTLTextureDescriptor* desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:t.pixelFormat width:t.width height:t.height mipmapped:NO];
+            desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+            desc.storageMode = MTLStorageModePrivate;
+            resolved = [g->device newTextureWithDescriptor:desc];
+            MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
+            rpd.colorAttachments[0].texture = t;
+            rpd.colorAttachments[0].resolveTexture = resolved;
+            rpd.colorAttachments[0].loadAction = MTLLoadActionLoad;
+            rpd.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
+            id<MTLCommandBuffer> cb = [g->queue commandBuffer];
+            id<MTLRenderCommandEncoder> rce = [cb renderCommandEncoderWithDescriptor:rpd];
+            [rce endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
+            t = resolved;
+        }
+        if (t.textureType != MTLTextureType2D) return false;
         const NSUInteger w = t.width, h = t.height;
-        const bool half4 = t.pixelFormat == MTLPixelFormatRGBA16Float;
-        const bool r11 = t.pixelFormat == MTLPixelFormatRG11B10Float;
-        const bool rgb10 = t.pixelFormat == MTLPixelFormatRGB10A2Unorm;
-        // always save (remove format check)
-// if (!half4 && !r11 && !rgb10 && t.pixelFormat != MTLPixelFormatBGRA8Unorm && t.pixelFormat != MTLPixelFormatBGRA8Unorm_sRGB && t.pixelFormat != MTLPixelFormatRGBA8Unorm && t.pixelFormat != MTLPixelFormatRGBA8Unorm_sRGB) return false;
-        const NSUInteger bpp = half4 ? 8 : 4;
+        NSUInteger bpp = 4;
+        bool half4 = false, r11 = false, rgb10 = false, f32 = false, bgra = false;
+        switch (t.pixelFormat) {
+        case MTLPixelFormatRGBA8Unorm:
+        case MTLPixelFormatRGBA8Unorm_sRGB:
+            bpp = 4;
+            break;
+        case MTLPixelFormatBGRA8Unorm:
+        case MTLPixelFormatBGRA8Unorm_sRGB:
+            bpp = 4;
+            bgra = true;
+            break;
+        case MTLPixelFormatRGBA16Float:
+            bpp = 8;
+            half4 = true;
+            break;
+        case MTLPixelFormatRG11B10Float:
+            bpp = 4;
+            r11 = true;
+            break;
+        case MTLPixelFormatRGB10A2Unorm:
+            bpp = 4;
+            rgb10 = true;
+            break;
+        case MTLPixelFormatRGBA32Float:
+            bpp = 16;
+            f32 = true;
+            break;
+        default:
+            return false;
+        }
         std::vector<uint8_t> raw(w * h * bpp);
         std::vector<uint8_t> px(w * h * 4);
         if (t.storageMode == MTLStorageModePrivate) {
@@ -2068,10 +2177,19 @@ bool SavePng(Texture& texture, const std::string& path) {
                 }
                 px[i * 4 + 3] = 255;
             }
+        } else if (f32) {
+            const float* fp = reinterpret_cast<const float*>(raw.data());
+            for (size_t i = 0; i < w * h; ++i) {
+                for (int c = 0; c < 3; ++c) {
+                    float v = fp[i * 4 + c];
+                    v = v < 0 ? 0 : v > 1 ? 1 : v;
+                    px[i * 4 + c] = static_cast<uint8_t>(v * 255.f + 0.5f);
+                }
+                px[i * 4 + 3] = 255;
+            }
         } else {
             px = raw;
         }
-        const bool bgra = !half4 && !r11 && !rgb10 && (t.pixelFormat == MTLPixelFormatBGRA8Unorm || t.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB);
         if (!bgra) for (size_t i = 0; i < px.size(); i += 4) std::swap(px[i], px[i + 2]);   // CoreGraphics below wants BGRA
         CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
         CGContextRef ctx = CGBitmapContextCreate(px.data(), w, h, 8, w * 4, cs, kCGBitmapByteOrder32Little | kCGImageAlphaNoneSkipFirst);
@@ -2180,16 +2298,17 @@ void Present(const std::shared_ptr<Texture>& back, uint32_t sync_interval) {
             else std::snprintf(path, sizeof path, "%s/frame_%06llu.png", g->dump_dir, (unsigned long long)index);
             SavePng(*back, path);
         }
-        if (index == g->trace_frame + 1 && !g->trace_depths.empty()) {
-            // The depth textures the traced frame sampled, as their float copies hold them now: range, how much is exactly 0 or 1
-            // (a cleared or never-written depth map), and a grayscale picture of it.
+        if (index == g->trace_frame + 1 && g->dump_dir != nullptr && !g->trace_depths.empty()) {
+            // The depth textures the traced frame drew into: range, how much is exactly 0 or 1 (a cleared or never-written depth
+            // map) and a grayscale picture of them. Tells a geometry pass that rasterized nothing from one whose colour was lost.
             [cmd waitUntilCompleted];
             int n = 0;
             for (Texture* dt : g->trace_depths) {
                 if (!dt || !dt->mtl) continue;
-                DepthAsFloat(*dt);
-                id<MTLTexture> c = dt->depth_copy;
-                if (c == nil) continue;
+                UT_INFO("gpu: traced dsv %p %lux%lu type %lu samples %lu", (__bridge void*)dt->mtl, (unsigned long)dt->mtl.width, (unsigned long)dt->mtl.height,
+                        (unsigned long)dt->mtl.textureType, (unsigned long)dt->mtl.sampleCount);
+                id<MTLTexture> c = DepthAsFloat(*dt);
+                if (c == nil) { UT_WARN("gpu: traced dsv %p has no float copy (type %lu)", (__bridge void*)dt->mtl, (unsigned long)dt->mtl.textureType); continue; }
                 const NSUInteger w = c.width, h = c.height;
                 id<MTLBuffer> staging = [g->device newBufferWithLength:w * h * 4 options:MTLResourceStorageModeShared];
                 id<MTLCommandBuffer> cb = [g->queue commandBuffer];
@@ -2201,10 +2320,9 @@ void Present(const std::shared_ptr<Texture>& back, uint32_t sync_interval) {
                 const float* f = static_cast<const float*>(staging.contents);
                 float lo = 1e30f, hi = -1e30f; size_t zeros = 0, ones = 0;
                 for (size_t k = 0; k < w * h; ++k) { lo = std::min(lo, f[k]); hi = std::max(hi, f[k]); zeros += f[k] == 0.f; ones += f[k] == 1.f; }
-                UT_INFO("gpu: traced depth texture %p %lux%lu: min %g max %g, %.1f%% exactly 0, %.1f%% exactly 1", (__bridge void*)dt->mtl, (unsigned long)w, (unsigned long)h, lo, hi,
+                UT_INFO("gpu: traced depth %lux%lu: min %g max %g, %.1f%% exactly 0, %.1f%% exactly 1", (unsigned long)w, (unsigned long)h, lo, hi,
                         100.0 * zeros / (w * h), 100.0 * ones / (w * h));
-                if (g->dump_dir != nullptr) {
-                    // Grayscale, stretched over the values that are not 1 (the far plane), so the content shows.
+                {
                     float vlo = 1e30f, vhi = -1e30f;
                     for (size_t k = 0; k < w * h; ++k) if (f[k] < 1.f) { vlo = std::min(vlo, f[k]); vhi = std::max(vhi, f[k]); }
                     std::vector<uint8_t> px(w * h * 4);
@@ -2262,6 +2380,14 @@ void RequestSnapshot(const std::string& path) {
     if (g == nullptr) return;
     std::scoped_lock lock {g->mutex};
     g->snapshot_path = path;
+}
+
+/// Changes the UTSURO_GPUDEBUG flags at runtime ("nodepth", "nocull", "noblend"); see the control file's `debug` command.
+void SetDebug(const std::string& flags) {
+    if (g == nullptr) return;
+    std::scoped_lock lock {g->mutex};
+    g->debug = flags;
+    UT_INFO("gpu: debug flags set to \"%s\"", g->debug.c_str());
 }
 
 bool IsTraceFrame(uint64_t frame) { return g != nullptr && frame == g->trace_frame; }

@@ -154,9 +154,13 @@ struct RecordedDraw {
     uint32_t vb_size[8] {};
     uint64_t ib_addr {0};
     uint32_t ib_size {0};
+    bool own_om {false}, own_vp {false};   ///< the list bound render targets / viewports itself before this draw
 };
+static const char* const kStages[6] = {"VS", "HS", "DS", "GS", "PS", "CS"};
+
 struct CtxState {
     uint64_t cb[6][16] {}, srv[6][128] {}, sampler[6][16] {}, shader[6] {};
+    uint64_t cb_address[6][16] {};
     uint64_t rtv[8] {}, dsv {}, uav[64] {};
     uint64_t blend {}, depth_stencil {}, raster {};
     float blend_factor[4] {1, 1, 1, 1};
@@ -166,7 +170,12 @@ struct CtxState {
     int32_t scissors[16][4] {};
     uint32_t num_scissors {0};
     uint32_t cb_first[6][16] {}, cb_count[6][16] {};   ///< D3D11.1 constant ranges, in float4s (count 0: the whole buffer)
+    struct RemapEntry { uint8_t stage {255}; uint8_t slot {255}; };
+    RemapEntry cb_remap[6][16] {};
+    RemapEntry srv_remap[6][128] {};
+    RemapEntry sampler_remap[6][16] {};
     uint64_t layout {}, vb[16] {}, ib {};
+    uint64_t vb_address[16] {};
     uint32_t stride[16] {}, voffset[16] {}, ib_format {0}, ib_offset {0}, topology {0};
     // Titles of console OS 6.2.13xxx bind resources by appending descriptor packets to the context's constant-engine buffer.
     struct Reg { uint32_t dw[8] {}; uint32_t n {0}; };
@@ -174,6 +183,7 @@ struct CtxState {
     uint64_t stream_parsed {0};               ///< how far into the buffer the packets have been read
     uint64_t ib_address {0};                  ///< the placement index buffer's data
     std::vector<RecordedDraw> recorded;       ///< a deferred context: draws since the last FinishCommandList
+    bool om_bound {false}, vp_bound {false};   ///< a deferred context: the list being recorded set targets / viewports
 };
 
 std::map<uint64_t, CtxState> g_ctx;
@@ -468,30 +478,86 @@ static void Setup(Runtime& rt, uint32_t os_timestamp, bool old_abi) {
     }
     OverrideAll("SetFastResources_Debug", [](Call& c) -> uint32_t {
         auto& s = StateOf(c.obj);
-        const uint32_t* p = c.Ptr<uint32_t>(0);
-        if (!p) return 0;
-        uint32_t header = p[0];
-        uint32_t type = (header >> 28) & 0xF;
-        uint32_t stage_code = (header >> 16) & 0xF;
-        uint32_t slot = (header >> 8) & 0xFF;
-        uint64_t ptr = 0;
-        std::memcpy(&ptr, reinterpret_cast<const uint8_t*>(p) + 4, 8);
-        int st = -1;
-        if (stage_code == 3) st = 0; // VS
-        else if (stage_code == 4) st = 4; // PS
-        else if (stage_code == 5) st = 5; // CS
-        if (std::getenv("UTSURO_SRVLOG") != nullptr) {
-            static std::atomic<int> srv_shown {0};
-            if (srv_shown++ < 20) {
-                UT_INFO("d3d: SetFastResources_Debug header=%08x (type=%x stage_code=%x -> st=%d slot=%u) ptr=%#llx",
-                    header, type, stage_code, st, (unsigned)slot, (unsigned long long)ptr);
-            }
-        }
-        if (st >= 0) {
-            if (type == 8) { // SRV
-                if (slot < 128) s.srv[st][slot] = ptr;
-            } else if (type == 9 || type == 10) { // Sampler
-                if (slot < 16) s.sampler[st][slot] = ptr;
+        uint64_t cur = c.Arg(0);
+        const uint64_t end = c.Arg(1);
+        while (cur + 4 <= end) {
+            uint32_t v10 = 0;
+            SafeRead(cur, &v10, 4);
+            cur += 4;
+            const uint16_t v11 = static_cast<uint16_t>(v10 & 0x7FF);
+            const uint8_t v12 = static_cast<uint8_t>(v10 & 0xFF);
+            const uint32_t v16 = (v10 >> 28) & 7;
+            const uint32_t slot = (v10 >> 8) & 0xFF;
+            const uint32_t v14 = (v10 >> 27) & 1;
+            const uint32_t v17 = (v10 >> 31);
+            const uint32_t stage_code = (v10 >> 16) & 0xF;
+
+            if (v12) {
+                while (cur + 16 <= end) {
+                    uint64_t resource_ptr = 0;
+                    uint64_t v23 = 0;
+                    SafeRead(cur, &resource_ptr, 8);
+                    SafeRead(cur + 8, &v23, 8);
+                    cur += 16;
+                    const uint32_t stride = static_cast<uint32_t>((v23 >> 48) & 0xFFFF);
+                    const uint64_t offset = v23 & 0x0000FFFFFFFFFFFFull;
+                    if (resource_ptr != 0) {
+                        if (v16 == 0) { // SRV
+                            if (v17 == 1 && !v14) {
+                                if ((v11 & 0x40) != 0) break;
+                                const uint64_t base_address = offset;
+                                const int v27 = v11 & 0x100;
+                                const int st = stage_code < 6 ? stage_code : 0;
+                                if (slot < 128) {
+                                    s.srv[st][slot] = resource_ptr;
+                                    if (v27 && base_address != 0) {
+                                        if (Res* r = ResAt(resource_ptr)) {
+                                            if (r->base != nullptr) {
+                                                r->base->placement = base_address;
+                                                r->base->placement_dirty = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                        if (v16 == 1) { // Buffer (CB or VB)
+                            if (v17 == 1) {
+                                const int v51 = v11 & 0x100;
+                                const uint64_t base_address = offset;
+                                if (stage_code == 6) { // VB
+                                    if (slot < 16) {
+                                        s.vb[slot] = resource_ptr;
+                                        s.vb_address[slot] = v51 ? base_address : 0;
+                                        s.stride[slot] = stride;
+                                        s.voffset[slot] = 0;
+                                        if (v51 && base_address != 0) {
+                                            if (Res* r = ResAt(resource_ptr)) r->host_ptr = base_address;
+                                        }
+                                    }
+                                } else { // CB
+                                    const int st = stage_code < 6 ? stage_code : 0;
+                                    if (slot < 16) {
+                                        s.cb[st][slot] = resource_ptr;
+                                        s.cb_address[st][slot] = v51 ? base_address : 0;
+                                        s.cb_first[st][slot] = 0;
+                                        s.cb_count[st][slot] = 4096;
+                                        if (v51 && base_address != 0) {
+                                            if (Res* r = ResAt(resource_ptr)) r->host_ptr = base_address;
+                                        }
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                        if (v17 == 1) { // Sampler
+                            const int st = stage_code < 6 ? stage_code : 0;
+                            if (slot < 16) s.sampler[st][slot] = resource_ptr;
+                            break;
+                        }
+                    }
+                }
             }
         }
         return 0;
@@ -504,6 +570,17 @@ static void Setup(Runtime& rt, uint32_t os_timestamp, bool old_abi) {
         auto& s = StateOf(c.obj);
         for (uint64_t i = 0; i < 8; ++i) s.rtv[i] = (i < c.Arg(0) && c.Arg(1)) ? c.Ptr<uint64_t>(1)[i] : 0;
         s.dsv = c.Arg(2);
+        s.om_bound = true;
+        if (gpu::IsTraceFrame(g_frame.load())) {
+            // In a traced frame: which targets each context binds, in call order (with the ExecuteCommandList lines).
+            auto describe = [](uint64_t view) -> std::string {
+                Res* r = ResAt(view);
+                if (r == nullptr || r->base == nullptr || !r->base->texture) return view ? "?" : "-";
+                const auto& i = gpu::TextureInfo(*r->base->texture);
+                char t[64]; std::snprintf(t, sizeof t, "%p %ux%u", gpu::NativeOf(*r->base->texture), i.width, i.height); return t;
+            };
+            UT_INFO("d3d: bind on ctx %llu%s: rtv0 %s dsv %s", (unsigned long long)c.obj.id, c.obj.u64["deferred"] != 0 ? " (deferred)" : "", describe(s.rtv[0]).c_str(), describe(s.dsv).c_str());
+        }
         return 0;
     });
     OverrideAll("OMSetRenderTargetsAndUnorderedAccessViews", [](Call& c) -> uint32_t {
@@ -511,6 +588,7 @@ static void Setup(Runtime& rt, uint32_t os_timestamp, bool old_abi) {
         if (c.Arg(0) != 0xFFFFFFFFu) {   // D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL
             for (uint64_t i = 0; i < 8; ++i) s.rtv[i] = (i < c.Arg(0) && c.Arg(1)) ? c.Ptr<uint64_t>(1)[i] : 0;
             s.dsv = c.Arg(2);
+            s.om_bound = true;
         }
         // (UAVStartSlot, NumUAVs, ppUAVs, pUAVInitialCounts): the pixel stage's UAVs share the context's uav[] with compute.
         const uint64_t start = c.Arg(3), count = c.Arg(4);
@@ -561,6 +639,7 @@ static void Setup(Runtime& rt, uint32_t os_timestamp, bool old_abi) {
         auto& s = StateOf(c.obj);
         s.num_viewports = static_cast<uint32_t>(std::min<uint64_t>(c.Arg(0), 16));
         if (c.Arg(1)) std::memcpy(s.viewports, c.Ptr<void>(1), s.num_viewports * sizeof(Viewport));
+        s.vp_bound = true;
         if (std::getenv("UTSURO_SRVLOG") != nullptr) {
             static std::atomic<int> vp_shown {0};
             if (vp_shown++ < 20) {
