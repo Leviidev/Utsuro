@@ -138,14 +138,16 @@ void OnCreate(Call& c, const winrt::Method& m, Obj& o) {
         r.host_ptr = reinterpret_cast<uint64_t>(gpu::BufferData(*r.buffer));
         r.host_size = size;
         SetBufferDescriptor(o, r.host_ptr, size);
-    } else if (n == "CreateTexture1D" || n == "CreateTexture2D" || n == "CreateTexture3D" || n == "CreatePlacementTexture2D") {
-        const bool placed = n == "CreatePlacementTexture2D";   // (desc, tile mode, pitch, placement address, ppTexture)
+    } else if (n == "CreateTexture1D" || n == "CreateTexture2D" || n == "CreateTexture3D" || n == "CreatePlacementTexture2D" || n == "CreatePlacementTexture3D") {
+        // Placement textures: (desc, tile mode, pitch, placement address, ppTexture). Forza Horizon 2's colour grading LUTs are
+        // 3D placement textures; without them its tonemap read an empty LUT and every frame came out black.
+        const bool placed = n == "CreatePlacementTexture2D" || n == "CreatePlacementTexture3D";
         gpu::TextureDesc d;
         uint32_t bind, misc, usage;
         if (n == "CreateTexture1D") {
             d.width = U32(desc, 0); d.height = 1; d.mips = MipCount(U32(desc, 1), d.width, 1); d.array_size = std::max(1u, U32(desc, 2)); d.format = U32(desc, 3);
             usage = U32(desc, 4); bind = U32(desc, 5); misc = U32(desc, 7);
-        } else if (n == "CreateTexture2D" || placed) {
+        } else if (n == "CreateTexture2D" || n == "CreatePlacementTexture2D") {
             d.width = U32(desc, 0); d.height = U32(desc, 1); d.mips = MipCount(U32(desc, 2), d.width, d.height); d.array_size = std::max(1u, U32(desc, 3));
             d.format = U32(desc, 4); d.samples = std::max(1u, U32(desc, 5)); usage = U32(desc, 7); bind = U32(desc, 8); misc = U32(desc, 10);
         } else {
@@ -156,7 +158,7 @@ void OnCreate(Call& c, const winrt::Method& m, Obj& o) {
             // MipLevels 0 asks for the whole chain; GetDesc must then report the chain's length, as D3D does (Forza
             // Horizon 2 sizes a per-mip loop from it and a 0 runs that loop off the end of its arrays).
             std::string& stored = o.str["desc"];
-            const size_t at = n == "CreateTexture1D" ? 4 : (n == "CreateTexture3D" ? 12 : 8);
+            const size_t at = n == "CreateTexture1D" ? 4 : (n == "CreateTexture3D" || n == "CreatePlacementTexture3D" ? 12 : 8);
             if (stored.size() >= at + 4) std::memcpy(&stored[at], &d.mips, 4);
         }
         d.shader_resource = (bind & 0x8) != 0 || bind == 0;
@@ -187,7 +189,7 @@ void OnCreate(Call& c, const winrt::Method& m, Obj& o) {
             {
                 uint32_t row, rows;
                 FormatShape(d.format, d.width, d.height, &row, &rows);
-                r.host_size = std::max(r.pitch, row) * rows * d.array_size * 2;   // generous: room for the mips
+                r.host_size = std::max(r.pitch, row) * rows * d.array_size * d.depth * 2;   // generous: room for the mips
                 std::scoped_lock lock {g_res_mutex};
                 g_placed.push_back(&r);
             }
@@ -629,6 +631,95 @@ void UploadPlacement(Res& r) {
     }
     if (!r.texture || r.placement == 0 || (r.bind & 0x40) != 0) return;
     const auto& info = gpu::TextureInfo(*r.texture);
+    if (info.depth > 1) {
+        // A volume (Forza Horizon 2's colour grading LUTs). Tiled ones are copied out by xg_x.dll's 3D address computer; the
+        // descriptor is D3D11_TEXTURE3D_DESC followed, as for 2D, by two ESRAM words and then the tile mode and pitch.
+        std::vector<uint8_t> level;
+        uint32_t ebytes, eblock;
+        ElementOf(info.format, &ebytes, &eblock);
+        if (r.tile_mode > 1 && g_kernel != nullptr && ebytes == 4) {
+            // Tiled: xg_x.dll's 3D address computer, asked once per shape to copy out a source whose every element holds its own
+            // index. That gives the top level's layout as a table, and each later upload (the title rewrites its LUTs) is a host
+            // gather with no call into the guest.
+            static std::mutex m;
+            static std::map<std::string, std::vector<uint32_t>> layouts;   // shape -> tiled element index of each linear texel
+            char key[96];
+            std::snprintf(key, sizeof key, "%u %u %u %u %u %u %u", info.width, info.height, info.depth, info.mips, info.format, r.tile_mode, r.pitch);
+            std::vector<uint32_t>* layout = nullptr;
+            {
+                std::scoped_lock lock {m};
+                auto it = layouts.find(key);
+                if (it == layouts.end()) {
+                    std::vector<uint32_t> table;
+                    if (const uint64_t create = xg::Export("XGCreateTexture3DComputer"); create != 0) {
+                        const uint64_t desc = Runtime::Get().AllocGuest(0x40, 16), out = Runtime::Get().AllocGuest(0x10, 16);
+                        auto* d = reinterpret_cast<uint32_t*>(desc);
+                        std::memset(d, 0, 0x40);
+                        d[0] = info.width; d[1] = info.height; d[2] = info.depth; d[3] = info.mips; d[4] = info.format; d[6] = 8; d[11] = r.tile_mode; d[12] = r.pitch;
+                        *reinterpret_cast<uint64_t*>(out) = 0;
+                        const uint64_t hr = xg::Call(*g_kernel, create, {desc, out});
+                        if (hr == 0 && *reinterpret_cast<uint64_t*>(out) != 0) {
+                            const uint64_t comp = *reinterpret_cast<uint64_t*>(out);
+                            const uint64_t* vtable = *reinterpret_cast<uint64_t**>(comp);
+                            const bool wide = xg::InImage(vtable[8]) && xg::InImage(vtable[11]);
+                            const uint64_t texels = static_cast<uint64_t>(info.width) * info.height * info.depth;
+                            const uint64_t src_words = texels * 4;   // room for tile padding
+                            const uint64_t src = Runtime::Get().AllocGuest(src_words * 4, 256), dst = Runtime::Get().AllocGuest(texels * 4 + 64, 64);
+                            for (uint64_t k = 0; k < src_words; ++k) reinterpret_cast<uint32_t*>(src)[k] = static_cast<uint32_t>(k);
+                            const uint32_t row = info.width * 4;
+                            if (xg::Call(*g_kernel, vtable[wide ? 9 : 6], {comp, dst, 0, 0, src, row, static_cast<uint64_t>(row) * info.height}) == 0) {
+                                table.assign(reinterpret_cast<const uint32_t*>(dst), reinterpret_cast<const uint32_t*>(dst) + texels);
+                                for (uint32_t v : table) if (v >= src_words) { table.clear(); break; }
+                            }
+                        }
+                        UT_INFO("d3d: xg layout for a %s volume: %s", key, table.empty() ? "none" : "ok");
+                    }
+                    it = layouts.emplace(key, std::move(table)).first;
+                }
+                layout = &it->second;
+            }
+            if (!layout->empty()) {
+                const size_t texels = layout->size();
+                uint32_t max_index = 0;
+                for (uint32_t v : *layout) max_index = std::max(max_index, v);
+                std::vector<uint32_t> tiled(static_cast<size_t>(max_index) + 1);
+                if (SafeRead(r.placement, tiled.data(), tiled.size() * 4)) {
+                    std::vector<uint32_t> linear(texels);
+                    for (size_t k = 0; k < texels; ++k) linear[k] = tiled[(*layout)[k]];
+                    const uint32_t row = info.width * 4;
+                    gpu::UploadTexture(*r.texture, 0, 0, nullptr, linear.data(), row, row * info.height);
+                    static std::atomic<int> shown {0};
+                    if (shown++ < 4) {
+                        auto texel = [&](uint32_t x, uint32_t y, uint32_t z) { return linear[(static_cast<size_t>(z) * info.height + y) * info.width + x]; };
+                        const uint32_t w = info.width - 1, h = info.height - 1, dd = info.depth - 1;
+                        UT_INFO("d3d: volume %ux%ux%u fmt %u tile %u detiled: (0,0,0) %08x (max,0,0) %08x (0,max,0) %08x (0,0,max) %08x (max,max,max) %08x", info.width, info.height, info.depth, info.format,
+                                r.tile_mode, texel(0, 0, 0), texel(w, 0, 0), texel(0, h, 0), texel(0, 0, dd), texel(w, h, dd));
+                    }
+                    return;
+                }
+            }
+        }
+        // Otherwise linear rows and slices; each mip follows the last.
+        uint64_t at = r.placement;
+        for (uint32_t mip = 0; mip < info.mips; ++mip) {
+            const uint32_t w = std::max(1u, info.width >> mip), h = std::max(1u, info.height >> mip), dd = std::max(1u, info.depth >> mip);
+            uint32_t row, rows;
+            FormatShape(info.format, w, h, &row, &rows);
+            const uint32_t pitch = mip == 0 ? std::max(r.pitch, row) : row;
+            level.resize(static_cast<size_t>(pitch) * rows * dd);
+            if (!SafeRead(at, level.data(), level.size())) break;
+            gpu::UploadTexture(*r.texture, mip, 0, nullptr, level.data(), pitch, pitch * rows);
+            at += level.size();
+        }
+        static std::atomic<int> shown {0};
+        if (shown++ < 8) {
+            size_t nz = 0;
+            for (uint8_t b : level) nz += b != 0;
+            UT_INFO("d3d: placement volume %ux%ux%u fmt %u tile %u pitch %u uploaded from %#llx (last level %zu non-zero bytes)", info.width, info.height, info.depth, info.format, r.tile_mode, r.pitch,
+                    (unsigned long long)r.placement, nz);
+        }
+        return;
+    }
     uint32_t bytes, block;
     ElementOf(info.format, &bytes, &block);
     auto fail = [&](const char* why) {
@@ -1498,10 +1589,14 @@ void DoDispatch(Obj& ctx, uint32_t x, uint32_t y, uint32_t z, std::shared_ptr<gp
         }
     }
 
-    // SRVs: check s.srv[5] first, or fall back to descriptor packets
+    // SRVs: check s.srv[5] first (through the stage remap, as draws do), or fall back to descriptor packets
+    auto cs_srv = [&](uint32_t slot) -> uint64_t {
+        if (s.srv_remap[5][slot].stage < 6) return s.srv[s.srv_remap[5][slot].stage][s.srv_remap[5][slot].slot];
+        return s.srv[5][slot];
+    };
     for (int i = 0; i < 16; ++i) {
         if (rf.textures & (1u << i)) {
-            if (Res* srv = ResAt(s.srv[5][i])) {
+            if (Res* srv = ResAt(cs_srv(i))) {
                 Res* target = srv->base ? srv->base : srv;
                 if (target->placement != 0 && ((target->placement_dirty && g_frame.load() >= target->next_try_frame) || PlacementChanged(*target)))
                     UploadPlacement(*target);
@@ -1514,15 +1609,27 @@ void DoDispatch(Obj& ctx, uint32_t x, uint32_t y, uint32_t z, std::shared_ptr<gp
             }
         }
         if (rf.samplers & (1u << i)) {
-            if (Res* samp = ResAt(s.sampler[5][i])) {
+            const uint64_t sp = s.sampler_remap[5][i].stage < 6 ? s.sampler[s.sampler_remap[5][i].stage][s.sampler_remap[5][i].slot] : s.sampler[5][i];
+            if (Res* samp = ResAt(sp)) {
                 d.sampler[i] = samp->state;
             } else if (const auto* t = get(kRegSampler + 0x10 * i)) {
                 if (Res* sampler = ResFromDescriptor(t->dw)) d.sampler[i] = sampler->state;
             }
         }
     }
+    if (gpu::IsTraceFrame(g_frame.load()))
+        for (int i = 0; i < 16; ++i)
+            if ((rf.textures & (1u << i)) && !d.srv[i]) {
+                uint64_t q[6] {};
+                const bool readable = s.srv[5][i] != 0 && SafeRead(s.srv[5][i], q, sizeof q);
+                Obj* o = s.srv[5][i] ? Runtime::Get().FromPointer(s.srv[5][i]) : nullptr;
+                UT_INFO("d3d: dispatch on ctx %llu: cs t%d unresolved: srv %#llx remap %u/%u, descriptor reg %s; obj %p user %d; words %s %#llx %#llx %#llx %#llx %#llx %#llx",
+                        (unsigned long long)ctx.id, i, (unsigned long long)s.srv[5][i], s.srv_remap[5][i].stage, s.srv_remap[5][i].slot, get(kRegTexture + 0x20 * i) ? "set" : "none",
+                        static_cast<void*>(o), o && o->user ? 1 : 0, readable ? "" : "(unreadable)", (unsigned long long)q[0], (unsigned long long)q[1], (unsigned long long)q[2],
+                        (unsigned long long)q[3], (unsigned long long)q[4], (unsigned long long)q[5]);
+            }
     for (uint8_t slot : rf.high_slots) {
-        if (Res* srv = ResAt(s.srv[5][slot])) {
+        if (Res* srv = ResAt(cs_srv(slot))) {
             Res* target = srv->base ? srv->base : srv;
             if (target->placement != 0 && ((target->placement_dirty && g_frame.load() >= target->next_try_frame) || PlacementChanged(*target))) UploadPlacement(*target);
             d.extra_srv.emplace_back(slot, srv->view);
@@ -2184,6 +2291,10 @@ void RegisterGpuOverrides() {
             auto& s = StateOf(c.obj);
             const uint32_t slot = static_cast<uint32_t>(c.Arg(0));
             if (slot < 128) s.srv[st][slot] = c.Arg(1);
+            if (c.Arg(1) != 0 && ResAt(c.Arg(1)) == nullptr) {
+                static std::atomic<int> shown {0};
+                if (shown++ < 16) UT_INFO("d3d: %sSetFastShaderResource(%llu, %#llx, %#llx, %#llx) is no view we made", kStages[st], (unsigned long long)c.Arg(0), (unsigned long long)c.Arg(1), (unsigned long long)c.Arg(2), (unsigned long long)c.Arg(3));
+            }
             return 0;
         });
         // Fast Sampler: (Slot, pSampler)
@@ -2214,6 +2325,10 @@ void RegisterGpuOverrides() {
             const uint32_t slot = static_cast<uint32_t>(c.Arg(0));
             if (slot < 128) {
                 s.srv[st][slot] = c.Arg(1);
+                if (c.Arg(1) != 0 && ResAt(c.Arg(1)) == nullptr) {
+                    static std::atomic<int> shown {0};
+                    if (shown++ < 16) UT_INFO("d3d: %sSetPlacementShaderResource(%llu, %#llx, %#llx, %#llx) is no view we made", kStages[st], (unsigned long long)c.Arg(0), (unsigned long long)c.Arg(1), (unsigned long long)c.Arg(2), (unsigned long long)c.Arg(3));
+                }
                 if (c.Arg(2) != 0) {
                     if (Res* r = ResAt(c.Arg(1))) {
                         if (r->base != nullptr) {
@@ -2346,6 +2461,47 @@ void RegisterGpuOverrides() {
             if (d.num_viewports == 0) {
                 d.num_viewports = imm.num_viewports;
                 std::memcpy(d.viewports, imm.viewports, sizeof d.viewports);
+            }
+            // Fixed-function state the list never set comes from the executing context too: most of Forza Horizon 2's world
+            // lists set none, so they drew with the D3D defaults (depth test LESS against its reversed-Z depth, back-face
+            // culling, no blending) instead of the GREATER_EQUAL state the game binds before executing them.
+            if (static const bool on = std::getenv("UTSURO_STATEINHERIT") == nullptr || std::getenv("UTSURO_STATEINHERIT")[0] != '0'; on) {
+                if (d.depth_stencil.empty()) if (Res* r = ResAt(imm.depth_stencil)) { d.depth_stencil = r->state; d.stencil_ref = imm.stencil_ref; }
+                if (d.raster.empty()) if (Res* r = ResAt(imm.raster)) d.raster = r->state;
+                if (d.blend.empty()) if (Res* r = ResAt(imm.blend)) { d.blend = r->state; std::memcpy(d.blend_factor, imm.blend_factor, 16); d.sample_mask = imm.sample_mask; }
+            }
+            // Shader resources and samplers the list left unbound resolve from the executing context as well (Forza Horizon 2's
+            // sky reads its scattering tables from vertex t0/t1 bound there; without them it read past a zero buffer).
+            for (int stage = 0; stage < 2; ++stage) {
+                const std::shared_ptr<gpu::Shader>& sh = stage == 0 ? d.vs : d.ps;
+                if (!sh) continue;
+                const auto& rf = gpu::Reflection(*sh);
+                const int src = stage == 0 ? 0 : 4;
+                auto imm_srv = [&](uint32_t slot) -> Res* {
+                    int st = src, sl = static_cast<int>(slot);
+                    if (imm.srv_remap[src][slot].stage < 6) { st = imm.srv_remap[src][slot].stage; sl = imm.srv_remap[src][slot].slot; }
+                    return ResAt(imm.srv[st][sl]);
+                };
+                for (uint32_t i = 0; i < 16; ++i) {
+                    if ((rf.textures & (1u << i)) && !d.srv[stage][i]) {
+                        if (Res* r = imm_srv(i)) {
+                            Res* target = r->base ? r->base : r;
+                            if (target->placement != 0 && ((target->placement_dirty && g_frame.load() >= target->next_try_frame) || PlacementChanged(*target))) UploadPlacement(*target);
+                            d.srv[stage][i] = r->view;
+                        } else if (static std::atomic<int> shown {0}; shown++ < 16) {
+                            UT_INFO("d3d: list draw: %s t%u unbound at execute too (shader %p, dimension %u)", stage ? "ps" : "vs", i, static_cast<void*>(sh.get()), rf.texture_dimension[i]);
+                        }
+                    }
+                    if ((rf.samplers & (1u << i)) && d.sampler[stage][i].empty()) {
+                        int st = src, sl = static_cast<int>(i);
+                        if (imm.sampler_remap[src][i].stage < 6) { st = imm.sampler_remap[src][i].stage; sl = imm.sampler_remap[src][i].slot; }
+                        if (Res* r = ResAt(imm.sampler[st][sl])) d.sampler[stage][i] = r->state;
+                    }
+                }
+                for (uint8_t slot : rf.high_slots) {
+                    const bool have = std::any_of(d.extra_srv[stage].begin(), d.extra_srv[stage].end(), [&](const auto& e) { return e.first == slot && e.second; });
+                    if (!have) if (Res* r = imm_srv(slot)) d.extra_srv[stage].emplace_back(slot, r->view);
+                }
             }
             // Dynamic re-snapshot of constant buffers from guest memory for the current frame
             for (int stage = 0; stage < 2; ++stage) {

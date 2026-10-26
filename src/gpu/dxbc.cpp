@@ -198,6 +198,21 @@ struct Translator {
     uint32_t pos_input_reg {~0u};
     uint32_t pos_output_reg {~0u};
     int loop_depth {0};
+    // Wave lockstep: an Xbox One thread group of at most 64 threads is one GCN wave, so it may share thread group memory without
+    // barriers (Forza Horizon 2's exposure reduction does). Apple GPUs run 32-wide SIMD groups, so such a group is two of them
+    // with no ordering between them. Barriers are added where control flow is uniform (top level): before a thread group memory
+    // load or a branch that follows a store.
+    int cf_depth {0};
+    bool tgsm_dirty {false}, nested_ret {false};
+    bool OneWave() const {
+        const uint32_t n = refl.thread_group_size[0] * refl.thread_group_size[1] * refl.thread_group_size[2];
+        return stage == ShaderStage::Compute && n > 32 && n <= 64;
+    }
+    void WaveSync() {
+        if (!tgsm_dirty || cf_depth != 0 || nested_ret || !OneWave()) return;
+        Line("threadgroup_barrier(mem_flags::mem_threadgroup);   // wave lockstep");
+        tgsm_dirty = false;
+    }
 
     void Line(const std::string& s) { body << std::string(static_cast<size_t>(indent) * 4, ' ') << s << "\n"; }
     void Fail(const std::string& e) { if (error.empty()) error = e; }
@@ -763,6 +778,7 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
         case OP_BFREV: { auto d = operand(); auto a = operand(); t.WriteBits(*d, "reverse_bits(" + t.SrcI(*a, true) + ")"); break; }
         case OP_SYNC: {
             t.body << "    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);\n";
+            if (t.cf_depth == 0) t.tgsm_dirty = false;
             break;
         }
         case OP_COUNTBITS: { auto d = operand(); auto a = operand(); t.WriteBits(*d, "popcount(" + t.SrcI(*a, true) + ")"); break; }
@@ -802,7 +818,9 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
             const uint32_t dim = sample_args_for(slot);
             std::string c = t.SrcF(*coord);
             std::string args = "s" + std::to_string(smp->index[0]) + ", " + t.Coord(dim, c) + t.ArraySlice(dim, c);
-            if (op == OP_SAMPLE_L) args += ", level(" + t.Scalar(*extra1) + ")";
+            const bool one_d = dim == 2 || dim == 7;   // Metal's 1D textures sample with no level, bias or gradient (Rocket League)
+            if (one_d) {}
+            else if (op == OP_SAMPLE_L) args += ", level(" + t.Scalar(*extra1) + ")";
             else if (op == OP_SAMPLE_B) args += ", bias(" + t.Scalar(*extra1) + ")";
             else if (op == OP_SAMPLE_D) {
                 const char* g = dim == 5 ? "gradient3d" : dim == 6 ? "gradientcube" : "gradient2d";
@@ -810,7 +828,7 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
                 const char* comps = (dim == 5 || dim == 6) ? ".xyz" : ".xy";
                 args += std::string(", ") + g + "(" + gx + comps + ", " + gy + comps + ")";
             }
-            if (vs && op == OP_SAMPLE) args += ", level(0)";   // a vertex shader has no derivatives
+            if (vs && op == OP_SAMPLE && !one_d) args += ", level(0)";   // a vertex shader has no derivatives
             if (has_offset && (dim == 3 || dim == 8)) args += ", int2(" + std::to_string(offset[0]) + ", " + std::to_string(offset[1]) + ")";
             else if (has_offset && dim == 5) args += ", int3(" + std::to_string(offset[0]) + ", " + std::to_string(offset[1]) + ", " + std::to_string(offset[2]) + ")";
             t.Write(*d, saturate, "t" + std::to_string(slot) + ".sample(" + args + ")." + Translator::Swizzle(*res));
@@ -913,14 +931,16 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
         case OP_IF: {
             auto a = operand();
             const bool nonzero = (tok >> 18) & 1;
+            t.WaveSync();
+            ++t.cf_depth;
             t.Line("if (as_type<uint>(" + t.Scalar(*a) + (nonzero ? ") != 0u) {" : ") == 0u) {"));
             ++t.indent;
             break;
         }
         case OP_ELSE: --t.indent; t.Line("} else {"); ++t.indent; break;
-        case OP_ENDIF: --t.indent; t.Line("}"); break;
-        case OP_LOOP: t.Line("for (;;) {"); ++t.indent; ++t.loop_depth; break;
-        case OP_ENDLOOP: --t.indent; --t.loop_depth; t.Line("}"); break;
+        case OP_ENDIF: --t.indent; --t.cf_depth; t.Line("}"); break;
+        case OP_LOOP: t.WaveSync(); ++t.cf_depth; t.Line("for (;;) {"); ++t.indent; ++t.loop_depth; break;
+        case OP_ENDLOOP: --t.indent; --t.loop_depth; --t.cf_depth; t.Line("}"); break;
         case OP_BREAK: t.Line("break;"); break;
         case OP_CONTINUE: t.Line("continue;"); break;
         case OP_BREAKC: case OP_CONTINUEC: {
@@ -941,6 +961,7 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
             auto byte_off = operand();
             auto res = operand();
             if (res->type == T_TGSM) {
+                t.WaveSync();
                 const uint32_t slot = res->index[0];
                 const uint32_t stride = t.tgsm_stride.count(slot) ? t.tgsm_stride[slot] : 4u;
                 t.Line("{");
@@ -974,6 +995,7 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
         case OP_STORE_STRUCTURED: {
             auto dst = operand(); auto idx = operand(); auto off = operand(); auto val = operand();
             if (dst->type == T_TGSM) {
+                t.tgsm_dirty = true;
                 const uint32_t slot = dst->index[0];
                 const uint32_t stride = t.tgsm_stride.count(slot) ? t.tgsm_stride[slot] : 4u;
                 t.Line("{");
@@ -1007,6 +1029,7 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
         case OP_STORE_RAW: {
             auto dst = operand(); auto off = operand(); auto val = operand();
             if (dst->type == T_TGSM || dst->type == T_UAV) {
+                if (dst->type == T_TGSM) t.tgsm_dirty = true;
                 const std::string g = (dst->type == T_TGSM ? "tgsm_g" : "u") + std::to_string(dst->index[0]);
                 t.Line("{");
                 t.Line("    uint w_idx = " + t.SrcU(*off) + ".x / 4u;");
@@ -1064,6 +1087,8 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
             const std::string a = t.SrcU(*addr);
             std::string ptr;
             if (mem->type == T_TGSM) {
+                t.WaveSync();
+                t.tgsm_dirty = true;
                 const std::string index = t.tgsm_raw.count(slot) ? "(" + a + ".x / 4u)"
                     : "((" + a + ".x * " + std::to_string(t.tgsm_stride[slot]) + "u + " + a + ".y) / 4u)";
                 ptr = "(threadgroup " + atype + "*)&tgsm_g" + std::to_string(slot) + "[" + index + "]";
@@ -1122,6 +1147,7 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
             auto dst = operand(); auto off = operand(); auto src = operand();
             const uint32_t slot = src->index[0];
             if (src->type == T_TGSM) {
+                t.WaveSync();
                 const std::string g = "tgsm_g" + std::to_string(slot);
                 t.Line("{");
                 t.Line("    uint w_idx = " + t.SrcU(*off) + ".x / 4u;");
@@ -1151,6 +1177,8 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
         }
         case OP_SWITCH: {
             auto a = operand();
+            t.WaveSync();
+            ++t.cf_depth;
             t.Line("switch (" + t.SrcI(*a, true) + ".x) {");
             break;
         }
@@ -1168,12 +1196,14 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
             break;
         }
         case OP_ENDSWITCH: {
+            --t.cf_depth;
             t.Line("}");
             break;
         }
-        case OP_RET: ended = (t.indent == 1); if (!ended) t.Line("@RET@"); break;
+        case OP_RET: ended = (t.indent == 1); if (!ended) { t.Line("@RET@"); if (t.cf_depth > 0) t.nested_ret = true; } break;
         case OP_RETC: {
             auto a = operand();
+            t.nested_ret = true;
             const bool nonzero = (tok >> 18) & 1;
             t.Line("if (as_type<uint>(" + t.Scalar(*a) + (nonzero ? ") != 0u) " : ") == 0u) ") + "@RET@");
             break;
@@ -1323,7 +1353,7 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
     } else {
         src << (vs ? "vertex VSOut main0(VSIn in [[stage_in]]" : "fragment PSOut main0(PSIn in [[stage_in]]");
         if (!vs && t.uses_front_face) src << ", bool front_facing [[front_facing]]";
-        if (vs && t.uses_vertex_id) src << ", uint vertex_id [[vertex_id]]";
+        if (vs && t.uses_vertex_id) src << ", uint vertex_id [[vertex_id]], uint base_vertex [[base_vertex]]";
         if (vs && t.uses_instance_id) src << ", uint instance_id [[instance_id]], uint base_instance [[base_instance]]";
         for (uint32_t b = 0; b < 16; ++b)
             if (t.refl.constant_buffers & (1u << b)) src << ", device const float4* cb" << b << " [[buffer(" << b << ")]]";
@@ -1342,7 +1372,7 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
         src << "    float4 v" << reg << " = float4(0.0f);\n";
         const auto sv = t.input_sgv.count(reg) ? t.input_sgv[reg] : 0u;
         if (vs) {
-            if (sv == 6) src << "    v" << reg << ".x = as_type<float>(vertex_id);\n";
+            if (sv == 6) src << "    v" << reg << ".x = as_type<float>(vertex_id - base_vertex);\n";   // D3D counts from the draw's base/start vertex too
             else if (sv == 8) src << "    v" << reg << ".x = as_type<float>(instance_id - base_instance);\n";   // D3D counts from the draw's first instance
             else if (input_class(reg) != 0) src << "    v" << reg << " = as_type<float4>(in.a" << reg << ");\n";
             else src << "    v" << reg << " = in.a" << reg << ";\n";

@@ -108,7 +108,7 @@ const DescSpec kDescs[] = {
     {"CreateTexture3D", 0, 44},       {"CreateShaderResourceView", 1, 24}, {"CreateUnorderedAccessView", 1, 20},
     {"CreateRenderTargetView", 1, 20}, {"CreateDepthStencilView", 1, 24}, {"CreateBlendState", 0, 264},
     {"CreateDepthStencilState", 0, 52}, {"CreateRasterizerState", 0, 40}, {"CreateSamplerState", 0, 52},
-    {"CreateSwapChainForCoreWindow", 2, 48}, {"CreatePlacementBuffer", 0, 24}, {"CreatePlacementTexture2D", 0, 44},
+    {"CreateSwapChainForCoreWindow", 2, 48}, {"CreatePlacementBuffer", 0, 24}, {"CreatePlacementTexture2D", 0, 44}, {"CreatePlacementTexture3D", 0, 36},
     {"CreateQuery", 0, 8},
 };
 
@@ -448,6 +448,12 @@ static void Setup(Runtime& rt, uint32_t os_timestamp, bool old_abi) {
                 if (shown[st] <= 3) for (int a : {0, 4}) { const uint64_t* q = c.Ptr<uint64_t>(a); char t[256]; std::snprintf(t, sizeof t, "arg%d -> %llx %llx %llx %llx %llx %llx", a, (unsigned long long)q[0], (unsigned long long)q[1], (unsigned long long)q[2], (unsigned long long)q[3], (unsigned long long)q[4], (unsigned long long)q[5]); UT_INFO("d3d:   %s", t); }
             }
             for (uint64_t i = 0; i < c.Arg(1) && c.Arg(0) + i < 128; ++i) s.srv[st][c.Arg(0) + i] = c.Arg(2) ? c.Ptr<uint64_t>(2)[i] : 0;
+            if (st == 5) {
+                static std::atomic<int> shown {0};
+                for (uint64_t i = 0; i < c.Arg(1) && c.Arg(0) + i < 128 && c.Arg(2); ++i)
+                    if (const uint64_t v = c.Ptr<uint64_t>(2)[i]; v != 0 && ResAt(v) == nullptr && shown++ < 12)
+                        UT_INFO("d3d: CSSetShaderResources(%llu, %llu, %#llx): slot %llu = %#llx is no view we made", (unsigned long long)c.Arg(0), (unsigned long long)c.Arg(1), (unsigned long long)c.Arg(2), (unsigned long long)(c.Arg(0) + i), (unsigned long long)v);
+            }
             return 0;
         });
         bind(p + "GetShaderResources", [st](Call& c) -> uint32_t {
@@ -510,6 +516,10 @@ static void Setup(Runtime& rt, uint32_t os_timestamp, bool old_abi) {
                                 const int st = stage_code < 6 ? stage_code : 0;
                                 if (slot < 128) {
                                     s.srv[st][slot] = resource_ptr;
+                                    if (st == 5 && ResAt(resource_ptr) == nullptr) {
+                                        static std::atomic<int> shown {0};
+                                        if (shown++ < 12) UT_INFO("d3d: fast resources: cs t%u = %#llx is no view we made (word %#x)", slot, (unsigned long long)resource_ptr, v10);
+                                    }
                                     if (v27 && base_address != 0) {
                                         if (Res* r = ResAt(resource_ptr)) {
                                             if (r->base != nullptr) {
