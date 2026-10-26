@@ -18,6 +18,10 @@ struct Res {
     // Memory the title's inline descriptors point at: a buffer's data, as host memory (placement memory, or the buffer's own storage).
     uint64_t host_ptr {0};
     uint32_t host_size {0};
+    // A placement buffer's own memory, given at creation. Binding it with a base address moves host_ptr (that is where draws read),
+    // but UpdateSubresource, copies and Map write the buffer itself: writing at the last bound address instead overwrote memory the
+    // title had moved on to use for something else.
+    uint64_t own_ptr {0};
     // A placement texture: where the title keeps its texels (in the console GPU's tiled layout), and whether they were written since the last upload.
     uint64_t placement {0};
     uint32_t tile_mode {0}, pitch {0};
@@ -267,6 +271,7 @@ void OnCreate(Call& c, const winrt::Method& m, Obj& o) {
                 case 10: vd.first_mip = U32(desc, 2); vd.mip_count = U32(desc, 3); vd.first_slice = U32(desc, 4) * 6; vd.slice_count = U32(desc, 5) * 6; break;
                 case 6: break;
                 case 7: vd.first_slice = U32(desc, 2); vd.slice_count = U32(desc, 3); break;
+                case 1: case 11: vd.first_slice = U32(desc, 2); vd.slice_count = U32(desc, 3); break;   // a buffer: first element, element count
                 }
                 if (vd.mip_count == 0xFFFFFFFFu) vd.mip_count = 0;
             } else if (n == "CreateRenderTargetView") {
@@ -377,6 +382,7 @@ void OnCreate(Call& c, const winrt::Method& m, Obj& o) {
         r.usage = U32(desc, 1);
         r.bind = U32(desc, 2);
         r.host_ptr = c.Arg(1);
+        r.own_ptr = c.Arg(1);
         r.host_size = U32(desc, 0);
         SetBufferDescriptor(o, 0, r.host_size);
         if (static const bool diag = std::getenv("UTSURO_CBDIAG") != nullptr; diag && (r.bind & 4)) {
@@ -1293,6 +1299,23 @@ gpu::DrawState Snapshot(Obj& ctx, CtxState& s, gpu::DrawArgs& args, RecordedDraw
                     UploadPlacement(*target);
                 d.extra_srv[stage].emplace_back(slot, r->view);
             }
+            if (static const bool diag = std::getenv("UTSURO_SRVDIAG") != nullptr; diag) {
+                Res* r = ResAt(srv_ptr);
+                if (!r || !r->view) {
+                    static std::mutex m;
+                    static std::map<std::pair<int, int>, int> seen;
+                    std::scoped_lock lock {m};
+                    if (seen[{stage, slot}]++ < 3) {
+                        const auto reg = s.regs.find(kRegTexture + 0x20 * slot);
+                        Obj* o = srv_ptr ? Runtime::Get().FromPointer(srv_ptr) : nullptr;
+                        UT_INFO("d3d: srvdiag ctx %llu%s %s t%u: srv %#llx (res %p view %p obj %p) remap %u/%u, register %s, base %p buffer %p host %#llx",
+                                (unsigned long long)ctx.id, deferred ? " (deferred)" : "", stage ? "ps" : "vs", slot, (unsigned long long)srv_ptr, static_cast<void*>(r),
+                                r ? static_cast<void*>(r->view.get()) : nullptr, static_cast<void*>(o), s.srv_remap[src][slot].stage, s.srv_remap[src][slot].slot,
+                                reg != s.regs.end() ? "set" : "none", r ? static_cast<void*>(r->base) : nullptr, r && r->base ? static_cast<void*>(r->base->buffer.get()) : nullptr,
+                                r && r->base ? (unsigned long long)r->base->host_ptr : 0ull);
+                    }
+                }
+            }
         }
     }
     for (int i = 0; i < 16; ++i) {
@@ -1526,6 +1549,22 @@ void DoDraw(Obj& ctx, const gpu::DrawArgs& args_in) {
         rd_storage.args = args;
         rd_storage.own_om = state.om_bound;
         rd_storage.own_vp = state.vp_bound;
+        for (int stage = 0; stage < 2; ++stage) {
+            const std::shared_ptr<gpu::Shader>& sh = stage == 0 ? d.vs : d.ps;
+            if (!sh) continue;
+            const auto& rf = gpu::Reflection(*sh);
+            const int src = stage == 0 ? 0 : 4;
+            auto note = [&](uint32_t slot) {
+                const auto& m = state.srv_remap[src][slot];
+                if (m.stage < 6) rd_storage.srv_remaps.push_back({static_cast<uint8_t>(stage), static_cast<uint8_t>(slot), m.stage, m.slot});
+            };
+            for (uint32_t i = 0; i < 16; ++i) if (rf.textures & (1u << i)) note(i);
+            for (uint8_t slot : rf.high_slots) note(slot);
+            for (uint32_t i = 0; i < 14; ++i) {
+                const auto& m = state.cb_remap[src][i];
+                if ((rf.constant_buffers & (1u << i)) && m.stage < 6) rd_storage.cb_remaps.push_back({static_cast<uint8_t>(stage), static_cast<uint8_t>(i), m.stage, m.slot});
+            }
+        }
         state.recorded.push_back(std::move(rd_storage));
         Tally("~draws recorded");
         if (state.recorded.size() == 2048) UT_WARN("d3d: deferred context %llu holds 2048 draws and was never finished", (unsigned long long)ctx.id);
@@ -1815,11 +1854,11 @@ void RegisterGpuOverrides() {
         if (r == nullptr || out == nullptr) { if (out) std::memset(out, 0, 16); return 0x80004005u; }
         const uint32_t type = static_cast<uint32_t>(c.Arg(2));
         if (r->buffer) return MapBuffer(c, *r, type, out);
-        if (!r->texture && r->host_ptr != 0) {
+        if (!r->texture && r->own_ptr != 0) {
             // A placement buffer: its memory is the title's own, and Map hands it straight back (draws copy it when they run).
             static std::atomic<int> shown {0};
-            if (shown++ < 12) UT_INFO("d3d: Map of a placement buffer %#llx (%u bytes, type %u)", (unsigned long long)r->host_ptr, r->host_size, type);
-            out[0] = r->host_ptr;
+            if (shown++ < 12) UT_INFO("d3d: Map of a placement buffer %#llx (%u bytes, type %u)", (unsigned long long)r->own_ptr, r->host_size, type);
+            out[0] = r->own_ptr;
             reinterpret_cast<uint32_t*>(out)[2] = r->host_size;
             reinterpret_cast<uint32_t*>(out)[3] = r->host_size;
             return 0;
@@ -1920,11 +1959,11 @@ void RegisterGpuOverrides() {
         Res* r = ResAt(c.Arg(0));
         if (r == nullptr || c.Arg(3) == 0) return 0;
         const auto* box = c.Ptr<uint32_t>(2);
-        if (!r->buffer && !r->texture && r->host_ptr != 0) {
+        if (!r->buffer && !r->texture && r->own_ptr != 0) {
             // A placement buffer: the title's own memory, which draws copy from when they run. Forza Horizon 2's camera
             // constants are DEFAULT-usage placement buffers filled this way; dropped, every world vertex went to (0,0,0,0).
             const uint32_t left = box ? std::min(box[0], r->host_size) : 0, right = box ? std::min(box[3], r->host_size) : r->host_size;
-            if (right > left) std::memcpy(reinterpret_cast<void*>(r->host_ptr + left), c.Ptr<void>(3), right - left);
+            if (right > left) std::memcpy(reinterpret_cast<void*>(r->own_ptr + left), c.Ptr<void>(3), right - left);
             Tally("~placement buffer updates");
             return 0;
         }
@@ -1973,7 +2012,7 @@ void RegisterGpuOverrides() {
     static auto CopyPlacementBytes = [](Res* dst, uint32_t dst_at, Res* src, uint32_t src_at, uint32_t bytes) -> bool {
         auto bytes_of = [](Res* r, uint32_t* size) -> uint8_t* {
             if (r->buffer) { *size = gpu::BufferSize(*r->buffer); return gpu::BufferData(*r->buffer); }
-            if (!r->texture && r->host_ptr != 0) { *size = r->host_size; return reinterpret_cast<uint8_t*>(r->host_ptr); }
+            if (!r->texture && r->own_ptr != 0) { *size = r->host_size; return reinterpret_cast<uint8_t*>(r->own_ptr); }
             return nullptr;
         };
         if ((dst->buffer && src->buffer) || dst->texture || src->texture) return false;
@@ -2470,6 +2509,40 @@ void RegisterGpuOverrides() {
                 if (d.raster.empty()) if (Res* r = ResAt(imm.raster)) d.raster = r->state;
                 if (d.blend.empty()) if (Res* r = ResAt(imm.blend)) { d.blend = r->state; std::memcpy(d.blend_factor, imm.blend_factor, 16); d.sample_mask = imm.sample_mask; }
             }
+            // Remapped slots read what the executing context has bound at the slot they inherit from (Forza Horizon 2's world lists
+            // remap their vertex instance data and shadow maps this way; resolved at record time they found nothing).
+            for (const auto& m : rd.srv_remaps) {
+                Res* r = ResAt(imm.srv[m.from_stage][m.from_slot]);
+                if (r == nullptr || !r->view) continue;
+                Res* target = r->base ? r->base : r;
+                if (target->placement != 0 && ((target->placement_dirty && g_frame.load() >= target->next_try_frame) || PlacementChanged(*target))) UploadPlacement(*target);
+                if (m.slot < 16) { d.srv[m.stage][m.slot] = r->view; continue; }
+                auto& extra = d.extra_srv[m.stage];
+                extra.erase(std::remove_if(extra.begin(), extra.end(), [&](const auto& e) { return e.first == m.slot; }), extra.end());
+                extra.emplace_back(m.slot, r->view);
+            }
+            for (const auto& m : rd.cb_remaps) {
+                const uint64_t addr = imm.cb_address[m.from_stage][m.from_slot];
+                const uint32_t first = imm.cb_first[m.from_stage][m.from_slot], count = imm.cb_count[m.from_stage][m.from_slot];
+                const auto& rf = gpu::Reflection(*(m.stage == 0 ? d.vs : d.ps));
+                uint32_t size = count ? count * 16 : 65536;
+                if (rf.cb_size[m.slot] != 0) size = std::min<uint32_t>(size, rf.cb_size[m.slot] * 16);
+                std::shared_ptr<gpu::Buffer> b;
+                if (addr != 0) b = CopyOfHost(addr + first * 16, size, false);
+                else if (Res* r = ResAt(imm.cb[m.from_stage][m.from_slot])) {
+                    if (r->buffer) { d.cb[m.stage][m.slot].buffer = r->buffer; d.cb[m.stage][m.slot].offset = first * 16; d.cb[m.stage][m.slot].size = count ? count * 16 : gpu::BufferSize(*r->buffer); continue; }
+                    if (r->host_ptr != 0) b = CopyOfHost(r->host_ptr + first * 16, size, false);
+                }
+                if (b) { d.cb[m.stage][m.slot].buffer = b; d.cb[m.stage][m.slot].offset = 0; d.cb[m.stage][m.slot].size = size; }
+            }
+            if (static const bool diag = std::getenv("UTSURO_SRVDIAG") != nullptr; diag && !rd.srv_remaps.empty()) {
+                static std::atomic<int> shown {0};
+                if (shown++ < 20) {
+                    std::string t;
+                    for (const auto& m : rd.srv_remaps) { char x[64]; std::snprintf(x, sizeof x, " %s t%u<-%s t%u%s", m.stage ? "ps" : "vs", m.slot, kStages[m.from_stage], m.from_slot, ResAt(imm.srv[m.from_stage][m.from_slot]) ? "" : "(unbound)"); t += x; }
+                    UT_INFO("d3d: list draw remaps:%s", t.c_str());
+                }
+            }
             // Shader resources and samplers the list left unbound resolve from the executing context as well (Forza Horizon 2's
             // sky reads its scattering tables from vertex t0/t1 bound there; without them it read past a zero buffer).
             for (int stage = 0; stage < 2; ++stage) {
@@ -2506,6 +2579,7 @@ void RegisterGpuOverrides() {
             // Dynamic re-snapshot of constant buffers from guest memory for the current frame
             for (int stage = 0; stage < 2; ++stage) {
                 for (int k = 0; k < 14; ++k) {
+                    if (std::any_of(rd.cb_remaps.begin(), rd.cb_remaps.end(), [&](const auto& m) { return m.stage == stage && m.slot == k; })) continue;   // resolved above
                     if (rd.cb_addr[stage][k] != 0 && rd.cb_size[stage][k] != 0) {
                         if (static const bool diag = std::getenv("UTSURO_CBDIAG") != nullptr; diag && stage == 0 && k == 2) {
                             static std::atomic<uint64_t> n {0};

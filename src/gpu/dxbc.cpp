@@ -336,6 +336,7 @@ struct Translator {
     // ---- declarations ------------------------------------------------------------------
     std::string TextureType(uint32_t dim) {
         switch (dim) {
+        case 1: return "texture_buffer<float>";   // Buffer<T>: the renderer binds a texture view over the buffer
         case 2: return "texture1d<float>";
         case 3: return "texture2d<float>";
         case 4: return "texture2d_ms<float>";
@@ -906,7 +907,8 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
             const uint32_t dim = sample_args_for(slot);
             const std::string c = t.SrcI(*coord, true);
             std::string call;
-            if (dim == 2) call = "t" + std::to_string(slot) + ".read((" + c + ").x, (" + c + ").y)";
+            if (dim == 1) call = "t" + std::to_string(slot) + ".read((" + c + ").x)";
+            else if (dim == 2) call = "t" + std::to_string(slot) + ".read((" + c + ").x, (" + c + ").y)";
             else if (dim == 5) call = "t" + std::to_string(slot) + ".read((" + c + ").xyz, (" + c + ").w)";
             else if (dim == 8) call = "t" + std::to_string(slot) + ".read((" + c + ").xy, (" + c + ").z, (" + c + ").w)";
             else call = "t" + std::to_string(slot) + ".read((" + c + ").xy, (" + c + ").z)";
@@ -921,6 +923,7 @@ TranslatedShader TranslateDxbc(const uint8_t* data, size_t size, const std::vect
             const std::string lod = "as_type<uint>(" + t.SrcF(*mip) + ".x)";
             std::string v;
             if (dim == 5) v = "float4(float(" + tx + ".get_width(" + lod + ")), float(" + tx + ".get_height(" + lod + ")), float(" + tx + ".get_depth(" + lod + ")), float(" + tx + ".get_num_mip_levels()))";
+            else if (dim == 1) v = "float4(float(" + tx + ".get_width()), 0.0f, 0.0f, 1.0f)";
             else if (dim == 2) v = "float4(float(" + tx + ".get_width(" + lod + ")), 0.0f, 0.0f, float(" + tx + ".get_num_mip_levels()))";
             else v = "float4(float(" + tx + ".get_width(" + lod + ")), float(" + tx + ".get_height(" + lod + ")), 0.0f, float(" + tx + ".get_num_mip_levels()))";
             t.Write(*d, false, v + "." + Translator::Swizzle(*res));

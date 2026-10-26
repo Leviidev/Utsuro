@@ -155,6 +155,10 @@ struct RecordedDraw {
     uint64_t ib_addr {0};
     uint32_t ib_size {0};
     bool own_om {false}, own_vp {false};   ///< the list bound render targets / viewports itself before this draw
+    /// Slots the list remapped to inherit from the executing context (RemapShaderResourceInheritance and its constant-buffer
+    /// twin): resolved when the list runs. stage 0 = vertex, 1 = pixel; from_stage is the D3D stage index (0-5).
+    struct Remap { uint8_t stage, slot, from_stage, from_slot; };
+    std::vector<Remap> srv_remaps, cb_remaps;
 };
 static const char* const kStages[6] = {"VS", "HS", "DS", "GS", "PS", "CS"};
 
@@ -448,6 +452,17 @@ static void Setup(Runtime& rt, uint32_t os_timestamp, bool old_abi) {
                 if (shown[st] <= 3) for (int a : {0, 4}) { const uint64_t* q = c.Ptr<uint64_t>(a); char t[256]; std::snprintf(t, sizeof t, "arg%d -> %llx %llx %llx %llx %llx %llx", a, (unsigned long long)q[0], (unsigned long long)q[1], (unsigned long long)q[2], (unsigned long long)q[3], (unsigned long long)q[4], (unsigned long long)q[5]); UT_INFO("d3d:   %s", t); }
             }
             for (uint64_t i = 0; i < c.Arg(1) && c.Arg(0) + i < 128; ++i) s.srv[st][c.Arg(0) + i] = c.Arg(2) ? c.Ptr<uint64_t>(2)[i] : 0;
+            if (static const bool diag = std::getenv("UTSURO_SRVDIAG") != nullptr; diag && st >= 1 && st <= 3) {
+                static std::mutex m;
+                static std::set<std::pair<int, uint64_t>> seen;
+                std::scoped_lock lock {m};
+                if (seen.insert({st, c.Arg(0) * 1000 + c.Arg(1)}).second && seen.size() < 40) {
+                    const uint64_t v = c.Arg(2) && c.Arg(1) ? c.Ptr<uint64_t>(2)[0] : 0;
+                    Res* r = ResAt(v);
+                    UT_INFO("d3d: %sSetShaderResources(%llu, %llu) on ctx %llu: first %#llx (%s)", kStages[st], (unsigned long long)c.Arg(0), (unsigned long long)c.Arg(1), (unsigned long long)c.obj.id,
+                            (unsigned long long)v, r == nullptr ? "unknown" : r->view && r->view->buffer ? "buffer view" : r->view && r->view->texture ? "texture view" : "other");
+                }
+            }
             if (st == 5) {
                 static std::atomic<int> shown {0};
                 for (uint64_t i = 0; i < c.Arg(1) && c.Arg(0) + i < 128 && c.Arg(2); ++i)
@@ -486,6 +501,51 @@ static void Setup(Runtime& rt, uint32_t os_timestamp, bool old_abi) {
         auto& s = StateOf(c.obj);
         uint64_t cur = c.Arg(0);
         const uint64_t end = c.Arg(1);
+        if (static const bool diag = std::getenv("UTSURO_FASTDIAG") != nullptr; diag) {
+            // Each distinct header shape once: the raw stream around it, and what the pointers after it are.
+            static std::mutex m;
+            static std::map<uint32_t, int> seen;
+            static std::atomic<int> dumps {0};
+            std::scoped_lock lock {m};
+            if (dumps < 6) {
+                ++dumps;
+                std::string words;
+                for (uint64_t p = cur; p + 4 <= end && p < cur + 4 * 48; p += 4) { uint32_t w = 0; SafeRead(p, &w, 4); char t[12]; std::snprintf(t, sizeof t, " %08x", w); words += t; }
+                UT_INFO("d3d: fastdiag stream %llu bytes:%s", (unsigned long long)(end - cur), words.c_str());
+            }
+            for (uint64_t p = cur; p + 4 <= end; ) {
+                uint32_t h = 0; SafeRead(p, &h, 4);
+                const uint32_t shape = h & 0xFFFF00FFu;   // all but the slot
+                if (seen.size() < 64 && seen[shape]++ == 0) {
+                    uint64_t e[4] {};
+                    SafeRead(p + 4, e, sizeof e);
+                    auto kind = [](uint64_t ptr) -> std::string {
+                        Res* r = ResAt(ptr);
+                        if (r == nullptr) return ptr ? "unknown" : "null";
+                        if (r->view && r->view->buffer) return "buffer view";
+                        if (r->view && r->view->texture) return "texture view";
+                        if (r->buffer) return "buffer";
+                        if (r->host_ptr) return "placement buffer";
+                        if (!r->state.empty()) return "state";
+                        return "res";
+                    };
+                    UT_INFO("d3d: fastdiag header %08x (slot %u count %u type %u flags %u/%u stage %u): %#llx %#llx (%s) | %#llx %#llx (%s)", h, (h >> 8) & 0xFF, h & 0xFF, (h >> 28) & 7,
+                            h >> 31, (h >> 27) & 1, (h >> 16) & 0xF, (unsigned long long)e[0], (unsigned long long)e[1], kind(e[0]).c_str(), (unsigned long long)e[2], (unsigned long long)e[3], kind(e[2]).c_str());
+                }
+                if (((h >> 28) & 7) <= 1 && ((h >> 8) & 0xFF) >= 16 && ((h >> 16) & 0xF) != 6) {
+                    static std::map<uint32_t, uint64_t> high;   // (stage << 8 | slot) -> times bound, with the flag bits
+                    if (high[h & 0xFFFFFF00u]++ == 0) {
+                        uint64_t e[2] {};
+                        SafeRead(p + 4, e, sizeof e);
+                        Res* r = ResAt(e[0]);
+                        UT_INFO("d3d: fastdiag high header %08x (type %u stage %u slot %u count %u) -> %#llx %#llx res %p view %p buffer %p own %#llx size %u", h, (h >> 28) & 7, (h >> 16) & 0xF, (h >> 8) & 0xFF, h & 0xFF,
+                                (unsigned long long)e[0], (unsigned long long)e[1], static_cast<void*>(r), r ? static_cast<void*>(r->view.get()) : nullptr,
+                                r ? static_cast<void*>(r->buffer.get()) : nullptr, r ? (unsigned long long)r->own_ptr : 0ull, r ? r->host_size : 0u);
+                    }
+                }
+                p += 4 + 16 * std::max<uint32_t>(1, h & 0xFF);
+            }
+        }
         while (cur + 4 <= end) {
             uint32_t v10 = 0;
             SafeRead(cur, &v10, 4);

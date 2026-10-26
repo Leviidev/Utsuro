@@ -438,6 +438,47 @@ id<MTLBuffer> ScratchCounter() {
     return b;
 }
 
+/// A typed buffer view (Buffer<T> SRV) as a Metal texture buffer over the buffer's storage, in the view's format. 32-bit integer
+/// formats are read as floats of the same bits (shaders declare float and reinterpret). Views are cached by storage and shape.
+id<MTLTexture> BufferTexture(const TextureView& v) {
+    if (!v.buffer || v.buffer->mtl == nil) return nil;
+    uint32_t fmt = v.desc.format;
+    switch (fmt) { case 3: case 4: fmt = 2; break; case 7: case 8: fmt = 6; break; case 17: case 18: fmt = 16; break; case 42: case 43: fmt = 41; break; default: break; }
+    const MTLPixelFormat pf = PixelFormat(fmt);
+    const size_t bpp = pf == MTLPixelFormatInvalid ? 0 : PixelFormatBytes(pf);
+    if (bpp == 0) return nil;
+    const NSUInteger first = static_cast<NSUInteger>(v.desc.first_slice) * bpp;
+    const NSUInteger size = v.buffer->size;
+    if (first >= size) return nil;
+    NSUInteger elements = (size - first) / bpp;
+    if (v.desc.slice_count != 0) elements = std::min<NSUInteger>(elements, v.desc.slice_count);
+    if (elements == 0) return nil;
+    id<MTLBuffer> storage = v.buffer->mtl;
+    NSUInteger offset = v.buffer->offset + first;
+    const NSUInteger align = [g->device minimumTextureBufferAlignmentForPixelFormat:pf];
+    if (align > 1 && offset % align != 0) {
+        // Misaligned for a texture view: read from a copy (made per draw; rare).
+        id<MTLBuffer> copy = NewBuffer(elements * bpp);
+        if (copy == nil) return nil;
+        std::memcpy(copy.contents, static_cast<const uint8_t*>(storage.contents) + offset, elements * bpp);
+        storage = copy;
+        offset = 0;
+    }
+    static std::map<std::tuple<void*, NSUInteger, NSUInteger, NSUInteger>, id<MTLTexture>> cache;
+    const auto key = std::make_tuple((__bridge void*)storage, offset, static_cast<NSUInteger>(pf), elements);
+    if (auto it = cache.find(key); it != cache.end()) return it->second;
+    if (cache.size() > 8192) cache.clear();
+    MTLTextureDescriptor* d = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:pf width:elements resourceOptions:storage.resourceOptions usage:MTLTextureUsageShaderRead];
+    id<MTLTexture> t = [storage newTextureWithDescriptor:d offset:offset bytesPerRow:elements * bpp];
+    if (t == nil) {
+        static std::atomic<int> shown {0};
+        if (shown++ < 8) UT_WARN("gpu: no texture buffer for a %lu-element view (format %u, offset %lu)", (unsigned long)elements, v.desc.format, (unsigned long)offset);
+        return nil;
+    }
+    cache[key] = t;
+    return t;
+}
+
 id<MTLTexture> ViewOf(Texture& t, const ViewDesc& v, bool as_render_target) {
 
     MTLPixelFormat fmt = v.format != 0 ? PixelFormat(v.format) : t.pixel_format;
@@ -500,6 +541,14 @@ id<MTLTexture> ViewOf(Texture& t, const ViewDesc& v, bool as_render_target) {
 id<MTLTexture> DummyTexture(uint32_t dim) {
     auto it = g->dummy_textures.find(dim);
     if (it != g->dummy_textures.end()) return it->second;
+    if (dim == 1) {
+        // A typed buffer (Buffer<T>): zeros, wide enough for any index a title reads.
+        if (g->zero_cb == nil) { g->zero_cb = NewBuffer(kZeroBytes); if (g->zero_cb && g->zero_cb.contents) std::memset(g->zero_cb.contents, 0, kZeroBytes); }
+        MTLTextureDescriptor* d = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:kZeroBytes / 16 resourceOptions:g->zero_cb.resourceOptions usage:MTLTextureUsageShaderRead];
+        id<MTLTexture> t = [g->zero_cb newTextureWithDescriptor:d offset:0 bytesPerRow:kZeroBytes];
+        g->dummy_textures[dim] = t;
+        return t;
+    }
     MTLTextureDescriptor* d = [MTLTextureDescriptor new];
     d.pixelFormat = MTLPixelFormatRGBA8Unorm;
     d.width = d.height = 1;
@@ -1502,6 +1551,7 @@ void Draw(const DrawState& st, const DrawArgs& args) {
                     Texture& tx = *st.srv[stage][i]->texture;
                     tex = IsDepth(tx.pixel_format) && tx.depth_copy != nil ? tx.depth_copy : ViewOf(tx, st.srv[stage][i]->desc, false);
                 }
+                if (tex == nil && rf.texture_dimension[i] == 1 && st.srv[stage][i]) tex = BufferTexture(*st.srv[stage][i]);   // Buffer<T>
                 if (tex == nil) tex = DummyTexture(rf.texture_dimension[i]);
                 if (stage == 0) [e setVertexTexture:tex atIndex:i];
                 else [e setFragmentTexture:tex atIndex:i];
@@ -1516,6 +1566,7 @@ void Draw(const DrawState& st, const DrawArgs& args) {
                 } else {
                     id<MTLTexture> tex = nil;
                     if (view && view->texture) { Texture& tx = *view->texture; tex = IsDepth(tx.pixel_format) && tx.depth_copy != nil ? tx.depth_copy : ViewOf(tx, view->desc, false); }
+                    if (tex == nil && rf.texture_dimension[slot] == 1 && view) tex = BufferTexture(*view);   // Buffer<T>
                     if (tex == nil) tex = DummyTexture(rf.texture_dimension[slot]);
                     if (stage == 0) [e setVertexTexture:tex atIndex:slot];
                     else [e setFragmentTexture:tex atIndex:slot];
@@ -1974,6 +2025,7 @@ void Dispatch(const DispatchState& st, uint32_t x, uint32_t y, uint32_t z) {
                 Texture& tx = *st.srv[i]->texture;
                 tex = IsDepth(tx.pixel_format) && tx.depth_copy != nil ? tx.depth_copy : ViewOf(tx, st.srv[i]->desc, false);
             }
+            if (tex == nil && rf.texture_dimension[i] == 1 && st.srv[i]) tex = BufferTexture(*st.srv[i]);   // Buffer<T>
             if (tex == nil) tex = DummyTexture(rf.texture_dimension[i]);
             [ce setTexture:tex atIndex:i];
         }
@@ -1987,6 +2039,7 @@ void Dispatch(const DispatchState& st, uint32_t x, uint32_t y, uint32_t z) {
             } else {
                 id<MTLTexture> tex = nil;
                 if (view && view->texture) { Texture& tx = *view->texture; tex = IsDepth(tx.pixel_format) && tx.depth_copy != nil ? tx.depth_copy : ViewOf(tx, view->desc, false); }
+                if (tex == nil && rf.texture_dimension[slot] == 1 && view) tex = BufferTexture(*view);   // Buffer<T>
                 if (tex == nil) tex = DummyTexture(rf.texture_dimension[slot]);
                 [ce setTexture:tex atIndex:slot];
             }
